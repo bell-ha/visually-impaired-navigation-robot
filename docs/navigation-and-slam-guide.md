@@ -23,6 +23,7 @@ export ROS_DOMAIN_ID=0
 
 ```bash
 ssh -Y hello-robot@192.168.0.89
+ssh -Y hello-robot@172.20.10.3
 ```
 
 * 비밀번호: `hello2020`
@@ -57,6 +58,7 @@ stretch_robot_home.py
 
 ```bash
 sudo date -s "$(ssh hello-robot@192.168.0.89 'date')"
+sudo date -s "$(ssh hello-robot@172.20.10.3 'date')"
 ```
 
 5. 네트워크 동기화
