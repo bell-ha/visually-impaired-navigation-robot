@@ -103,29 +103,24 @@ ros2 run rplidar_ros rplidar_composition --ros-args \
 이전보다 더 촘촘하고 정확하게 지도를 그리는 설정입니다.
 
 ```bash
-ros2 run slam_toolbox async_slam_toolbox_node --ros-args \
--p odom_frame:=odom \
--p base_frame:=base_link \
--p scan_topic:=/scan \
--p mode:=mapping \
--p use_sim_time:=false \
--p max_laser_range:=15.0 \
--p minimum_travel_distance:=0.1 \
--p minimum_travel_heading:=0.1 \
--p map_update_interval:=0.5 \
--p transform_timeout:=0.2
+ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p odom_frame:=odom -p base_frame:=base_link -p scan_topic:=/scan -p mode:=mapping -p use_sim_time:=false -p min_laser_range:=0.8 -p max_laser_range:=15.0 -p minimum_travel_distance:=0.1 -p minimum_travel_heading:=0.1 -p map_update_interval:=0.5 -p transform_timeout:=0.2
 ```
 
 ---
 
 ### 3.2 노트북(Local)에서 실행
 
-| 순서 | 기능      | 명령어                                                                                             |
-| -- | ------- | ----------------------------------------------------------------------------------------------- |
-| 1  | 키보드 조종  | `ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=/stretch/cmd_vel` |
-| 2  | RViz 실행 | `ros2 run rviz2 rviz2`                                                                          |
+1단계:  키보드 조종
 
----
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=/stretch/cmd_vel
+```
+2단계:  RViz 실행
+
+```bash
+ros2 run rviz2 rviz2
+```
+
 
 ## 4. 좌표 지정해서 알아서 움직이게 하기 (Navigation)
 

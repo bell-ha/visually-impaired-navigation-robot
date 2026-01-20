@@ -1,0 +1,20 @@
+running develop
+running egg_info
+writing blind_nav_system.egg-info/PKG-INFO
+writing dependency_links to blind_nav_system.egg-info/dependency_links.txt
+writing entry points to blind_nav_system.egg-info/entry_points.txt
+writing requirements to blind_nav_system.egg-info/requires.txt
+writing top-level names to blind_nav_system.egg-info/top_level.txt
+reading manifest file 'blind_nav_system.egg-info/SOURCES.txt'
+writing manifest file 'blind_nav_system.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind-nav-system.egg-link (link to .)
+Installing main_state_machine script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+Installing navigation_client script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+Installing sensor_monitor script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+Installing voice_interface script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+
+Installed /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system
+running symlink_data
+symbolically linking /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/resource/blind_nav_system -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/package.xml -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/share/blind_nav_system
