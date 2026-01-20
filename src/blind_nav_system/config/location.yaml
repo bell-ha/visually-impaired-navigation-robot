@@ -1,0 +1,10 @@
+# config/location.yaml
+locations:
+  point_a:
+    x: 0.8698
+    y: -2.1024
+    w: 1.0
+  point_b:
+    x: 0.9884
+    y: 0.4203
+    w: 1.0

@@ -61,12 +61,15 @@ sudo date -s "$(ssh hello-robot@192.168.0.89 'date')"
 sudo date -s "$(ssh hello-robot@172.20.10.3 'date')"
 ```
 
-5. 네트워크 동기화
+5. 네트워크 동기화(두 기기 다)
 
 ```bash
 export ROS_DOMAIN_ID=0
 ```
-
+6. 팔 넣기
+```bash
+/home/hello-robot/.local/bin/stretch_robot_stow.py
+```
 ---
 
 ## 3. 지도 생성하기 (실시간 SLAM)
@@ -152,25 +155,30 @@ ros2 run rviz2 rviz2
 
 #### 1단계: 기본 노드 실행
 
+주행모드 활성화
 ```bash
-ros2 launch stretch_core stretch_driver.launch.py mode:=navigation broadcast_odom_tf:=True ## 주행모드 활성화
+ros2 launch stretch_core stretch_driver.launch.py mode:=navigation broadcast_odom_tf:=True 
 ```
+ laser 프레임 고정
 ```bash
-ros2 run rplidar_ros rplidar_composition --ros-args -p serial_port:=/dev/hello-lrf -p serial_baudrate:=115200 -p frame_id:=laser ## laser 프레임 고정
+ros2 run rplidar_ros rplidar_composition --ros-args -p serial_port:=/dev/hello-lrf -p serial_baudrate:=115200 -p frame_id:=laser
 ```
 
 #### 2단계: Navigation + 지도 서버
 
+경로 계획/제어기 가동
 ```bash
-ros2 launch stretch_nav2 navigation_launch.py use_sim_time:=False ## 경로 계획/제어기 가동
+ros2 launch stretch_nav2 navigation_launch.py use_sim_time:=False 
 ```
+home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/test1_map.yaml로 설정
 ```bash
 ros2 run nav2_map_server map_server --ros-args \
--p yaml_filename:=/home/hello-robot/ament_ws/maps/test1_map.yaml \
--p use_sim_time:=False  ##ament_ws/maps/test1_map.yaml로 설정
+-p yaml_filename:=/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/test1_map.yaml \
+-p use_sim_time:=False  
 ```
+맵 서버 실행 후 필수
 ```bash
-ros2 lifecycle set /map_server configure ## 맵 서버 실행 후 필수
+ros2 lifecycle set /map_server configure 
 ```
 ```bash
 ros2 lifecycle set /map_server activate
@@ -178,8 +186,9 @@ ros2 lifecycle set /map_server activate
 
 #### 3단계: AMCL 실행
 
+위치 추정 알고리즘
 ```bash
-ros2 run nav2_amcl amcl --ros-args -p use_sim_time:=False ## 위치 추정 알고리즘
+ros2 run nav2_amcl amcl --ros-args -p use_sim_time:=False 
 ```
 ```bash
 ros2 lifecycle set /amcl configure
@@ -195,6 +204,12 @@ ros2 lifecycle set /amcl activate
 ```bash
 ros2 topic echo /amcl_pose --once
 ```
+
+### 4.4 Rviz에서 지점 찾기 
+```bash
+ros2 topic echo /clicked_point
+```
+이거 하고 publish Point하기 
 
 #### A 지점
 
@@ -328,10 +343,3 @@ sudo shutdown now
 cd ~/ament_ws/src/stretch_web_teleop
 ./start_interface.sh
 ```
-
-
-
-# 파일 정리 용도 코드
-find . -maxdepth 3 -not -path '*/.*'
-
-

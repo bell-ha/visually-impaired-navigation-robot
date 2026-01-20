@@ -1,0 +1,38 @@
+running develop
+Removing /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind-nav-system.egg-link (link to .)
+running egg_info
+writing ../../build/blind_nav_system/blind_nav_system.egg-info/PKG-INFO
+writing dependency_links to ../../build/blind_nav_system/blind_nav_system.egg-info/dependency_links.txt
+writing entry points to ../../build/blind_nav_system/blind_nav_system.egg-info/entry_points.txt
+writing requirements to ../../build/blind_nav_system/blind_nav_system.egg-info/requires.txt
+writing top-level names to ../../build/blind_nav_system/blind_nav_system.egg-info/top_level.txt
+reading manifest file '../../build/blind_nav_system/blind_nav_system.egg-info/SOURCES.txt'
+writing manifest file '../../build/blind_nav_system/blind_nav_system.egg-info/SOURCES.txt'
+running build
+running build_py
+copying blind_nav_system/main_state_machine.py -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build/lib/blind_nav_system
+copying blind_nav_system/navigation_client.py -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build/lib/blind_nav_system
+running install
+running install_lib
+creating /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system
+copying /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build/lib/blind_nav_system/voice_interface.py -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system
+copying /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build/lib/blind_nav_system/sensor_monitor.py -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system
+copying /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build/lib/blind_nav_system/__init__.py -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system
+copying /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build/lib/blind_nav_system/main_state_machine.py -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system
+copying /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build/lib/blind_nav_system/navigation_client.py -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system
+byte-compiling /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system/voice_interface.py to voice_interface.cpython-310.pyc
+byte-compiling /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system/sensor_monitor.py to sensor_monitor.cpython-310.pyc
+byte-compiling /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system/__init__.py to __init__.cpython-310.pyc
+byte-compiling /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system/main_state_machine.py to main_state_machine.cpython-310.pyc
+byte-compiling /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system/navigation_client.py to navigation_client.cpython-310.pyc
+running install_data
+copying resource/blind_nav_system -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/share/ament_index/resource_index/packages
+copying package.xml -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/share/blind_nav_system
+running install_egg_info
+Copying ../../build/blind_nav_system/blind_nav_system.egg-info to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system-0.0.0-py3.10.egg-info
+running install_scripts
+Installing main_state_machine script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+Installing navigation_client script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+Installing sensor_monitor script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+Installing voice_interface script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+writing list of installed files to '/home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/install.log'

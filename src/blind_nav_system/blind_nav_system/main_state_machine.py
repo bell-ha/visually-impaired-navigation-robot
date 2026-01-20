@@ -1,113 +1,95 @@
 import rclpy
 from rclpy.node import Node
-from .voice_interface import VoiceInterface
 import threading
+import time
+import math
 import sys
 import select
-import time
+from nav_msgs.msg import Odometry
+from voice_interface import VoiceInterface
+from navigation_client import NavigationClient
 
 class MainStateMachine(Node):
     def __init__(self):
         super().__init__('main_state_machine')
+        
         self.voice = VoiceInterface()
+        self.nav = NavigationClient()
         
-        # 상태 제어 변수
-        self.is_running = True
-        self.emergency_stop = False
+        self.current_pose = None
+        self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         
-        # 목적지 정의
-        self.keywords_A = ["A", "에이", "1번", "첫번째"]
-        self.keywords_B = ["B", "비", "2번", "두번째"]
+        self.nav_thread = threading.Thread(target=rclpy.spin, args=(self, ), daemon=True)
+        self.nav_thread.start()
         
-        # 긍정어 기본 키워드
-        self.yes_words = ["맞아", "그래", "네", "응", "어", "출발", "가자", "확인"]
-
-        # 키보드(스페이스바) 입력 감시 쓰레드
-        self.input_thread = threading.Thread(target=self.check_keyboard_input)
-        self.input_thread.daemon = True
-        self.input_thread.start()
-
-        self.get_logger().info("=== 시스템 대기 중 (스페이스바를 누르면 시작합니다) ===")
+        self.destinations = {"point_a": "에이", "point_b": "비"}
         self.main_control_logic()
 
-    def check_keyboard_input(self):
-        while self.is_running:
-            if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
-                line = sys.stdin.readline()
-                self.emergency_stop = True
+    def odom_callback(self, msg):
+        self.current_pose = msg.pose.pose
+
+    def check_interrupt(self):
+        if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
+            sys.stdin.readline()
+            return True
+        return False
 
     def main_control_logic(self):
         while rclpy.ok():
-            self.emergency_stop = False
-            print("\n[대기 모드] 안내를 시작하려면 스페이스바를 누르세요...", end='', flush=True)
+            print("\n" + "="*40)
+            input("[대기] 엔터를 누르면 시작합니다...")
             
-            while not self.emergency_stop:
-                time.sleep(0.1)
+            self.voice.speak("어디로 안내해 드릴까요?")
+            choice = input("[선택] 목적지 입력 (a/b): ").lower().strip()
             
-            self.emergency_stop = False 
-            self.voice.speak("안녕하세요. 어디로 안내해 드릴까요?")
-            
-            user_input = self.voice.listen()
-            if not user_input:
-                self.voice.speak("음성을 듣지 못했습니다. 다시 버튼을 눌러주세요.")
-                continue
-
-            # 1. 목적지 판별 및 해당 목적지의 키워드 리스트 보관
-            target = None
-            target_keywords = []
-
-            if any(w in user_input.upper() for w in self.keywords_A):
-                target = "A"
-                target_keywords = self.keywords_A
-            elif any(w in user_input.upper() for w in self.keywords_B):
-                target = "B"
-                target_keywords = self.keywords_B
-            
-            if target:
-                self.voice.speak(f"{target} 지점으로 안내할까요?")
-                confirm = self.voice.listen()
+            if choice in ['a', 'b']:
+                display_name = self.destinations[f"point_{choice}"]
+                self.voice.speak(f"{display_name} 지점으로 갈까요? 다시 {choice}를 입력하세요.")
+                confirm = input(f"[확인] {choice} 입력 시 출발: ").lower().strip()
                 
-                # [개선된 긍정 판단 로직]
-                # 1. 기본 긍정어(네, 그래 등)가 포함되어 있거나
-                # 2. 이전에 말했던 목적지 키워드(A, 에이 등)를 다시 말하거나
-                # 3. 스페이스바를 다시 눌렀을 때
-                is_confirmed = (
-                    any(w in confirm for w in self.yes_words) or 
-                    any(w in confirm.upper() for w in target_keywords) or
-                    self.emergency_stop
-                )
-
-                if is_confirmed:
-                    self.emergency_stop = False
-                    self.run_navigation(target)
+                if confirm == choice:
+                    self.run_navigation(f"point_{choice}", display_name)
                 else:
-                    self.voice.speak("취소되었습니다. 다시 시작하려면 버튼을 눌러주세요.")
-            else:
-                self.voice.speak("등록되지 않은 장소입니다. 다시 시작하려면 버튼을 눌러주세요.")
+                    self.voice.speak("취소되었습니다.")
 
-    def run_navigation(self, target):
-        self.voice.speak(f"{target} 지점으로 안내를 시작합니다. 손잡이를 잡아주세요.")
-        self.voice.speak("앞으로 직진합니다.")
+    def run_navigation(self, target_key, display_name):
+        loc = self.nav.load_location(target_key)
+        self.nav.send_goal(target_key)
+        self.voice.speak(f"{display_name}로 출발합니다. 멈추려면 아무 키나 누르고 엔터를 치세요.")
         
-        for i in range(1, 11):
-            if self.emergency_stop:
-                self.voice.speak("버튼 입력이 돼서 안내를 중단하고 즉시 정지합니다.")
-                return
+        print(f"\n>>> {display_name} 주행 중... (멈추려면 엔터!)")
 
-            if i == 5:
-                self.voice.speak("잠시 후 왼쪽으로 크게 회전합니다.")
-                time.sleep(1.0)
+        while rclpy.ok():
+            # 1. 중단 체크 (현 위치 전송 방식 적용)
+            if self.check_interrupt():
+                self.nav.stop_robot(self.current_pose) 
+                self.voice.speak("안내를 중단합니다.")
+                print("\n[중단] 사용자 요청으로 정지함")
+                break
 
-            print(f"[{target} 주행 중...] {i*10}%", end='\r')
-            time.sleep(1.0)
+            # 2. 도착 감지 (범위 1.2m)
+            if self.current_pose and loc:
+                dist = math.sqrt((self.current_pose.position.x - loc['x'])**2 + 
+                                 (self.current_pose.position.y - loc['y'])**2)
+                print(f"\r남은 거리: {dist:.2f}m", end="", flush=True)
 
-        self.voice.speak(f"목적지에 도착했습니다. 안내를 종료합니다.")
+                if dist < 1.2: 
+                    print("\n[도착] 목적지에 도달했습니다.")
+                    self.voice.speak(f"목적지인 {display_name}에 도착했습니다.")
+                    # 도착 시에도 확실히 멈추도록 현 위치 전송
+                    self.nav.stop_robot(self.current_pose)
+                    break
+            
+            time.sleep(0.2)
 
 def main(args=None):
     rclpy.init(args=args)
     try:
-        node = MainStateMachine()
+        MainStateMachine()
     except KeyboardInterrupt:
         pass
     finally:
         rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,27 @@
+[0.827s] Invoking command in '/home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/src/blind_nav_system': PYTHONPATH=/home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/blind_nav_system build --build-base /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build install --record /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/install.log --single-version-externally-managed install_data
+[1.128s] running egg_info
+[1.129s] writing ../../build/blind_nav_system/blind_nav_system.egg-info/PKG-INFO
+[1.130s] writing dependency_links to ../../build/blind_nav_system/blind_nav_system.egg-info/dependency_links.txt
+[1.130s] writing entry points to ../../build/blind_nav_system/blind_nav_system.egg-info/entry_points.txt
+[1.130s] writing requirements to ../../build/blind_nav_system/blind_nav_system.egg-info/requires.txt
+[1.130s] writing top-level names to ../../build/blind_nav_system/blind_nav_system.egg-info/top_level.txt
+[1.133s] reading manifest file '../../build/blind_nav_system/blind_nav_system.egg-info/SOURCES.txt'
+[1.134s] writing manifest file '../../build/blind_nav_system/blind_nav_system.egg-info/SOURCES.txt'
+[1.134s] running build
+[1.134s] running build_py
+[1.135s] copying blind_nav_system/main_state_machine.py -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build/lib/blind_nav_system
+[1.135s] running install
+[1.136s] running install_lib
+[1.136s] copying /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build/lib/blind_nav_system/main_state_machine.py -> /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system
+[1.137s] byte-compiling /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system/main_state_machine.py to main_state_machine.cpython-310.pyc
+[1.138s] running install_data
+[1.138s] running install_egg_info
+[1.141s] removing '/home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system-0.0.0-py3.10.egg-info' (and everything under it)
+[1.141s] Copying ../../build/blind_nav_system/blind_nav_system.egg-info to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages/blind_nav_system-0.0.0-py3.10.egg-info
+[1.142s] running install_scripts
+[1.168s] Installing main_state_machine script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+[1.168s] Installing navigation_client script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+[1.168s] Installing sensor_monitor script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+[1.168s] Installing voice_interface script to /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/blind_nav_system
+[1.169s] writing list of installed files to '/home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/install.log'
+[1.203s] Invoked command in '/home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/src/blind_nav_system' returned '0': PYTHONPATH=/home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/install/blind_nav_system/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/blind_nav_system build --build-base /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/build install --record /home/jongha/Desktop/GitHub/visually-impaired-navigation-robot/build/blind_nav_system/install.log --single-version-externally-managed install_data
