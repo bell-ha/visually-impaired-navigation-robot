@@ -1,0 +1,10 @@
+[console_scripts]
+align_to_aruco = stretch_core.align_to_aruco:main
+avoider = stretch_core.avoider:main
+d435i_accel_correction = stretch_core.d435i_accel_correction:main
+detect_aruco_markers = stretch_core.detect_aruco_markers:main
+keyboard_teleop = stretch_core.keyboard_teleop:main
+remote_gamepad = stretch_core.remote_gamepad:main
+stretch_driver = stretch_core.stretch_driver:main
+usb_cam = stretch_core.usb_cam:main
+

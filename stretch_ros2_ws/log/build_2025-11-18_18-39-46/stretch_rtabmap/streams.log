@@ -1,0 +1,68 @@
+[1.067s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_rtabmap': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake /home/jongha/stretch_ros2_ws/src/stretch_ros2/stretch_rtabmap -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/jongha/stretch_ros2_ws/install/stretch_rtabmap
+[1.131s] -- The C compiler identification is GNU 11.4.0
+[1.203s] -- The CXX compiler identification is GNU 11.4.0
+[1.215s] -- Detecting C compiler ABI info
+[1.314s] -- Detecting C compiler ABI info - done
+[1.327s] -- Check for working C compiler: /usr/bin/cc - skipped
+[1.327s] -- Detecting C compile features
+[1.328s] -- Detecting C compile features - done
+[1.334s] -- Detecting CXX compiler ABI info
+[1.443s] -- Detecting CXX compiler ABI info - done
+[1.452s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[1.453s] -- Detecting CXX compile features
+[1.453s] -- Detecting CXX compile features - done
+[1.456s] -- Found ament_cmake: 1.3.12 (/opt/ros/humble/share/ament_cmake/cmake)
+[1.742s] -- Found Python3: /usr/bin/python3 (found version "3.10.12") found components: Interpreter 
+[1.843s] -- Override CMake install command with custom implementation using symlinks instead of copying resources
+[1.904s] -- Found rclcpp: 16.0.15 (/opt/ros/humble/share/rclcpp/cmake)
+[2.004s] -- Found rosidl_generator_c: 3.1.7 (/opt/ros/humble/share/rosidl_generator_c/cmake)
+[2.017s] -- Found rosidl_adapter: 3.1.7 (/opt/ros/humble/share/rosidl_adapter/cmake)
+[2.036s] -- Found rosidl_generator_cpp: 3.1.7 (/opt/ros/humble/share/rosidl_generator_cpp/cmake)
+[2.059s] -- Using all available rosidl_typesupport_c: rosidl_typesupport_fastrtps_c;rosidl_typesupport_introspection_c
+[2.089s] -- Using all available rosidl_typesupport_cpp: rosidl_typesupport_fastrtps_cpp;rosidl_typesupport_introspection_cpp
+[2.150s] -- Found rmw_implementation_cmake: 6.1.2 (/opt/ros/humble/share/rmw_implementation_cmake/cmake)
+[2.153s] -- Found rmw_fastrtps_cpp: 6.2.9 (/opt/ros/humble/share/rmw_fastrtps_cpp/cmake)
+[2.271s] -- Found OpenSSL: /usr/lib/x86_64-linux-gnu/libcrypto.so (found version "3.0.2")  
+[2.316s] -- Found FastRTPS: /opt/ros/humble/include  
+[2.377s] -- Using RMW implementation 'rmw_fastrtps_cpp' as default
+[2.388s] -- Looking for pthread.h
+[2.495s] -- Looking for pthread.h - found
+[2.495s] -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+[2.572s] -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+[2.574s] -- Found Threads: TRUE  
+[2.644s] -- Found ament_lint_auto: 0.12.14 (/opt/ros/humble/share/ament_lint_auto/cmake)
+[2.754s] -- Added test 'copyright' to check source files copyright and LICENSE
+[2.755s] -- Added test 'flake8' to check Python code syntax and style conventions
+[2.756s] -- Added test 'lint_cmake' to check CMake code style
+[2.756s] -- Added test 'pep257' to check Python code against some of the docstring style conventions in PEP 257
+[2.757s] -- Added test 'xmllint' to check XML markup files
+[2.758s] -- Configuring done
+[2.761s] -- Generating done
+[2.763s] -- Build files have been written to: /home/jongha/stretch_ros2_ws/build/stretch_rtabmap
+[2.794s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_rtabmap' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake /home/jongha/stretch_ros2_ws/src/stretch_ros2/stretch_rtabmap -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/jongha/stretch_ros2_ws/install/stretch_rtabmap
+[2.795s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_rtabmap': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --build /home/jongha/stretch_ros2_ws/build/stretch_rtabmap -- -j16 -l16
+[2.838s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_rtabmap' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --build /home/jongha/stretch_ros2_ws/build/stretch_rtabmap -- -j16 -l16
+[2.841s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_rtabmap': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --install /home/jongha/stretch_ros2_ws/build/stretch_rtabmap
+[2.848s] -- Install configuration: ""
+[2.849s] -- Execute custom install script
+[2.849s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/launch/visual_mapping.launch.py
+[2.858s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/launch/visual_navigation.launch.py
+[2.865s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/launch/visual_odometry.launch.py
+[2.876s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/rviz/rtabmap.rviz
+[2.885s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/rviz/rtabmap_nav.rviz
+[2.895s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/ament_index/resource_index/package_run_dependencies/stretch_rtabmap
+[2.905s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/ament_index/resource_index/parent_prefix_path/stretch_rtabmap
+[2.914s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/environment/ament_prefix_path.sh
+[2.921s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/environment/ament_prefix_path.dsv
+[2.930s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/environment/path.sh
+[2.940s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/environment/path.dsv
+[2.951s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/local_setup.bash
+[2.961s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/local_setup.sh
+[2.972s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/local_setup.zsh
+[2.980s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/local_setup.dsv
+[2.991s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/package.dsv
+[2.998s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/ament_index/resource_index/packages/stretch_rtabmap
+[3.010s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/cmake/stretch_rtabmapConfig.cmake
+[3.025s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/cmake/stretch_rtabmapConfig-version.cmake
+[3.033s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_rtabmap/share/stretch_rtabmap/package.xml
+[3.047s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_rtabmap' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --install /home/jongha/stretch_ros2_ws/build/stretch_rtabmap

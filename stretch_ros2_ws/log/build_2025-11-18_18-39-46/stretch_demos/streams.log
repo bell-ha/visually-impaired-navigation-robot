@@ -1,0 +1,35 @@
+[1.538s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_demos': PYTHONPATH=/home/jongha/stretch_ros2_ws/build/stretch_demos/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/stretch_ros2_ws/install/stretch_demos/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jongha/stretch_ros2_ws/build/stretch_demos/build --no-deps symlink_data
+[1.911s] running develop
+[2.122s] running egg_info
+[2.122s] creating stretch_demos.egg-info
+[2.122s] writing stretch_demos.egg-info/PKG-INFO
+[2.123s] writing dependency_links to stretch_demos.egg-info/dependency_links.txt
+[2.123s] writing entry points to stretch_demos.egg-info/entry_points.txt
+[2.123s] writing requirements to stretch_demos.egg-info/requires.txt
+[2.123s] writing top-level names to stretch_demos.egg-info/top_level.txt
+[2.123s] writing manifest file 'stretch_demos.egg-info/SOURCES.txt'
+[2.125s] reading manifest file 'stretch_demos.egg-info/SOURCES.txt'
+[2.125s] writing manifest file 'stretch_demos.egg-info/SOURCES.txt'
+[2.127s] running build_ext
+[2.128s] Creating /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/python3.10/site-packages/stretch-demos.egg-link (link to .)
+[2.128s] Installing clean_surface script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+[2.129s] Installing grasp_object script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+[2.129s] Installing handover_object script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+[2.129s] Installing hello_world script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+[2.129s] Installing open_drawer script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+[2.129s] 
+[2.130s] Installed /home/jongha/stretch_ros2_ws/build/stretch_demos
+[2.130s] running symlink_data
+[2.130s] creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/ament_index
+[2.130s] creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/ament_index/resource_index
+[2.130s] creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/ament_index/resource_index/packages
+[2.130s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/resource/stretch_demos -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/ament_index/resource_index/packages
+[2.130s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/package.xml -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos
+[2.130s] creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+[2.131s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/handover_object.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+[2.131s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/clean_surface.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+[2.131s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/open_drawer.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+[2.131s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/hello_world.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+[2.131s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/grasp_object.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+[2.131s] creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/rviz
+[2.160s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_demos' returned '0': PYTHONPATH=/home/jongha/stretch_ros2_ws/build/stretch_demos/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/stretch_ros2_ws/install/stretch_demos/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jongha/stretch_ros2_ws/build/stretch_demos/build --no-deps symlink_data

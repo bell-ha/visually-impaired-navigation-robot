@@ -1,0 +1,37 @@
+[1.518s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_deep_perception': PYTHONPATH=/home/jongha/stretch_ros2_ws/build/stretch_deep_perception/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/build --no-deps symlink_data
+[1.830s] running develop
+[2.025s] running egg_info
+[2.025s] creating stretch_deep_perception.egg-info
+[2.025s] writing stretch_deep_perception.egg-info/PKG-INFO
+[2.025s] writing dependency_links to stretch_deep_perception.egg-info/dependency_links.txt
+[2.026s] writing entry points to stretch_deep_perception.egg-info/entry_points.txt
+[2.026s] writing requirements to stretch_deep_perception.egg-info/requires.txt
+[2.026s] writing top-level names to stretch_deep_perception.egg-info/top_level.txt
+[2.026s] writing manifest file 'stretch_deep_perception.egg-info/SOURCES.txt'
+[2.028s] reading manifest file 'stretch_deep_perception.egg-info/SOURCES.txt'
+[2.029s] writing manifest file 'stretch_deep_perception.egg-info/SOURCES.txt'
+[2.031s] running build_ext
+[2.031s] Creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/python3.10/site-packages/stretch-deep-perception.egg-link (link to .)
+[2.033s] Installing detect_body_landmarks script to /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/stretch_deep_perception
+[2.033s] Installing detect_faces script to /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/stretch_deep_perception
+[2.034s] Installing detect_nearest_mouth script to /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/stretch_deep_perception
+[2.034s] Installing detect_objects script to /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/stretch_deep_perception
+[2.034s] 
+[2.034s] Installed /home/jongha/stretch_ros2_ws/build/stretch_deep_perception
+[2.034s] running symlink_data
+[2.034s] creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/ament_index
+[2.034s] creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/ament_index/resource_index
+[2.034s] creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/ament_index/resource_index/packages
+[2.035s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/resource/stretch_deep_perception -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/ament_index/resource_index/packages
+[2.035s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/package.xml -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception
+[2.035s] creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+[2.035s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/launch/stretch_detect_nearest_mouth.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+[2.035s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/launch/stretch_detect_faces.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+[2.035s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/launch/stretch_detect_body_landmarks.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+[2.036s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/launch/stretch_detect_objects.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+[2.036s] creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz
+[2.036s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/rviz/body_landmark_detection.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz
+[2.036s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/rviz/nearest_mouth_detection.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz
+[2.036s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/rviz/object_detection.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz
+[2.036s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/rviz/face_detection.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz
+[2.070s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_deep_perception' returned '0': PYTHONPATH=/home/jongha/stretch_ros2_ws/build/stretch_deep_perception/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/build --no-deps symlink_data

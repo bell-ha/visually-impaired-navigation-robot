@@ -1,0 +1,27 @@
+running develop
+running egg_info
+creating stretch_funmap.egg-info
+writing stretch_funmap.egg-info/PKG-INFO
+writing dependency_links to stretch_funmap.egg-info/dependency_links.txt
+writing entry points to stretch_funmap.egg-info/entry_points.txt
+writing requirements to stretch_funmap.egg-info/requires.txt
+writing top-level names to stretch_funmap.egg-info/top_level.txt
+writing manifest file 'stretch_funmap.egg-info/SOURCES.txt'
+reading manifest file 'stretch_funmap.egg-info/SOURCES.txt'
+writing manifest file 'stretch_funmap.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/lib/python3.10/site-packages/stretch-funmap.egg-link (link to .)
+Installing funmap script to /home/jongha/stretch_ros2_ws/install/stretch_funmap/lib/stretch_funmap
+
+Installed /home/jongha/stretch_ros2_ws/build/stretch_funmap
+running symlink_data
+creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/ament_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/ament_index/resource_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/resource/stretch_funmap -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/package.xml -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap
+creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/launch/funmap.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/launch/mapping.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/launch
+creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/rviz
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/rviz/stretch_mapping.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/rviz

@@ -1,0 +1,2 @@
+source;share/stretch_rtabmap/environment/ament_prefix_path.sh
+source;share/stretch_rtabmap/environment/path.sh

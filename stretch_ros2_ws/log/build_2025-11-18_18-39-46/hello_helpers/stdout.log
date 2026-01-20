@@ -1,0 +1,22 @@
+running develop
+running egg_info
+creating src/hello_helpers.egg-info
+writing src/hello_helpers.egg-info/PKG-INFO
+writing dependency_links to src/hello_helpers.egg-info/dependency_links.txt
+writing entry points to src/hello_helpers.egg-info/entry_points.txt
+writing requirements to src/hello_helpers.egg-info/requires.txt
+writing top-level names to src/hello_helpers.egg-info/top_level.txt
+writing manifest file 'src/hello_helpers.egg-info/SOURCES.txt'
+reading manifest file 'src/hello_helpers.egg-info/SOURCES.txt'
+writing manifest file 'src/hello_helpers.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jongha/stretch_ros2_ws/install/hello_helpers/lib/python3.10/site-packages/hello-helpers.egg-link (link to src)
+Installing configure_wrist script to /home/jongha/stretch_ros2_ws/install/hello_helpers/lib/hello_helpers
+
+Installed /home/jongha/stretch_ros2_ws/build/hello_helpers/src
+running symlink_data
+creating /home/jongha/stretch_ros2_ws/install/hello_helpers/share/ament_index
+creating /home/jongha/stretch_ros2_ws/install/hello_helpers/share/ament_index/resource_index
+creating /home/jongha/stretch_ros2_ws/install/hello_helpers/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/hello_helpers/resource/hello_helpers -> /home/jongha/stretch_ros2_ws/install/hello_helpers/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/hello_helpers/package.xml -> /home/jongha/stretch_ros2_ws/install/hello_helpers/share/hello_helpers

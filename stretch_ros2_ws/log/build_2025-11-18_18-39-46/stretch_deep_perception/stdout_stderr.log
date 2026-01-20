@@ -1,0 +1,35 @@
+running develop
+running egg_info
+creating stretch_deep_perception.egg-info
+writing stretch_deep_perception.egg-info/PKG-INFO
+writing dependency_links to stretch_deep_perception.egg-info/dependency_links.txt
+writing entry points to stretch_deep_perception.egg-info/entry_points.txt
+writing requirements to stretch_deep_perception.egg-info/requires.txt
+writing top-level names to stretch_deep_perception.egg-info/top_level.txt
+writing manifest file 'stretch_deep_perception.egg-info/SOURCES.txt'
+reading manifest file 'stretch_deep_perception.egg-info/SOURCES.txt'
+writing manifest file 'stretch_deep_perception.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/python3.10/site-packages/stretch-deep-perception.egg-link (link to .)
+Installing detect_body_landmarks script to /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/stretch_deep_perception
+Installing detect_faces script to /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/stretch_deep_perception
+Installing detect_nearest_mouth script to /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/stretch_deep_perception
+Installing detect_objects script to /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/lib/stretch_deep_perception
+
+Installed /home/jongha/stretch_ros2_ws/build/stretch_deep_perception
+running symlink_data
+creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/ament_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/ament_index/resource_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/resource/stretch_deep_perception -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/package.xml -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception
+creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/launch/stretch_detect_nearest_mouth.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/launch/stretch_detect_faces.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/launch/stretch_detect_body_landmarks.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/launch/stretch_detect_objects.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/launch
+creating /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/rviz/body_landmark_detection.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/rviz/nearest_mouth_detection.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/rviz/object_detection.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_deep_perception/rviz/face_detection.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_deep_perception/share/stretch_deep_perception/rviz

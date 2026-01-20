@@ -1,0 +1,9 @@
+source;share/stretch_funmap/hook/pythonpath.ps1
+source;share/stretch_funmap/hook/pythonpath.dsv
+source;share/stretch_funmap/hook/pythonpath.sh
+source;share/stretch_funmap/hook/ament_prefix_path.ps1
+source;share/stretch_funmap/hook/ament_prefix_path.dsv
+source;share/stretch_funmap/hook/ament_prefix_path.sh
+source;../../build/stretch_funmap/share/stretch_funmap/hook/pythonpath_develop.ps1
+source;../../build/stretch_funmap/share/stretch_funmap/hook/pythonpath_develop.dsv
+source;../../build/stretch_funmap/share/stretch_funmap/hook/pythonpath_develop.sh

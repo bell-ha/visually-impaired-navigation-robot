@@ -1,0 +1,3 @@
+[console_scripts]
+funmap = stretch_funmap.funmap:main
+

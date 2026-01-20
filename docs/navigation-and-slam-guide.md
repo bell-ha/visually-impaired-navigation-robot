@@ -73,12 +73,48 @@ export ROS_DOMAIN_ID=0
 
 ### 3.1 로봇(SSH)에서 실행
 
-| 순서 | 기능       | 명령어                                                                                                                                                                  | 핵심 포인트                  |
-| -- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| 1  | 드라이버 실행  | `ros2 launch stretch_core stretch_driver.launch.py mode:=navigation broadcast_odom_tf:=True`                                                                         | navigation 모드, True 대문자 |
-| 2  | 모드 전환    | `ros2 service call /switch_to_navigation_mode std_srvs/srv/Trigger {}`                                                                                               | 주행 모드                 |
-| 3  | LiDAR 실행 | `ros2 run rplidar_ros rplidar_composition --ros-args -p serial_port:=/dev/hello-lrf -p serial_baudrate:=115200 -p frame_id:=laser`                                   | baudrate 115200 고정       |
-| 4  | SLAM 실행  | `ros2 run slam_toolbox async_slam_toolbox_node --ros-args -p odom_frame:=odom -p base_frame:=base_link -p scan_topic:=/scan -p mode:=mapping -p use_sim_time:=false` | laser 프레임 필수            |
+
+1단계: Stretch 드라이버 실행
+
+로봇의 하드웨어를 제어하고 오도메트리(바퀴 회전량) 데이터를 생성합니다.
+
+```bash
+ros2 launch stretch_core stretch_driver.launch.py mode:=navigation broadcast_odom_tf:=True
+```
+
+2단계: 내비게이션 모드 활성화
+로봇이 주행할 수 있도록 전원을 연결하고 모드를 전환합니다.
+
+```bash
+ros2 service call /switch_to_navigation_mode std_srvs/srv/Trigger {}
+```
+
+3단계: LiDAR 실행
+주변 장애물을 감지하는 레이저 스캐너를 켭니다.
+
+```bash
+ros2 run rplidar_ros rplidar_composition --ros-args \
+-p serial_port:=/dev/hello-lrf \
+-p serial_baudrate:=115200 \
+-p frame_id:=laser
+```
+
+4단계: 정밀 SLAM 실행 (Slam Toolbox)
+이전보다 더 촘촘하고 정확하게 지도를 그리는 설정입니다.
+
+```bash
+ros2 run slam_toolbox async_slam_toolbox_node --ros-args \
+-p odom_frame:=odom \
+-p base_frame:=base_link \
+-p scan_topic:=/scan \
+-p mode:=mapping \
+-p use_sim_time:=false \
+-p max_laser_range:=15.0 \
+-p minimum_travel_distance:=0.1 \
+-p minimum_travel_heading:=0.1 \
+-p map_update_interval:=0.5 \
+-p transform_timeout:=0.2
+```
 
 ---
 
@@ -297,3 +333,10 @@ sudo shutdown now
 cd ~/ament_ws/src/stretch_web_teleop
 ./start_interface.sh
 ```
+
+
+
+# 파일 정리 용도 코드
+find . -maxdepth 3 -not -path '*/.*'
+
+

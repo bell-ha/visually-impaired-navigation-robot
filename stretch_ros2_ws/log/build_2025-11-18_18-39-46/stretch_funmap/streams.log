@@ -1,0 +1,29 @@
+[1.645s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_funmap': PYTHONPATH=/home/jongha/stretch_ros2_ws/build/stretch_funmap/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/stretch_ros2_ws/install/stretch_funmap/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jongha/stretch_ros2_ws/build/stretch_funmap/build --no-deps symlink_data
+[1.994s] running develop
+[2.188s] running egg_info
+[2.188s] creating stretch_funmap.egg-info
+[2.188s] writing stretch_funmap.egg-info/PKG-INFO
+[2.188s] writing dependency_links to stretch_funmap.egg-info/dependency_links.txt
+[2.188s] writing entry points to stretch_funmap.egg-info/entry_points.txt
+[2.189s] writing requirements to stretch_funmap.egg-info/requires.txt
+[2.189s] writing top-level names to stretch_funmap.egg-info/top_level.txt
+[2.189s] writing manifest file 'stretch_funmap.egg-info/SOURCES.txt'
+[2.190s] reading manifest file 'stretch_funmap.egg-info/SOURCES.txt'
+[2.191s] writing manifest file 'stretch_funmap.egg-info/SOURCES.txt'
+[2.193s] running build_ext
+[2.193s] Creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/lib/python3.10/site-packages/stretch-funmap.egg-link (link to .)
+[2.194s] Installing funmap script to /home/jongha/stretch_ros2_ws/install/stretch_funmap/lib/stretch_funmap
+[2.194s] 
+[2.194s] Installed /home/jongha/stretch_ros2_ws/build/stretch_funmap
+[2.194s] running symlink_data
+[2.195s] creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/ament_index
+[2.195s] creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/ament_index/resource_index
+[2.195s] creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/ament_index/resource_index/packages
+[2.195s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/resource/stretch_funmap -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/ament_index/resource_index/packages
+[2.195s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/package.xml -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap
+[2.195s] creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/launch
+[2.195s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/launch/funmap.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/launch
+[2.195s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/launch/mapping.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/launch
+[2.196s] creating /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/rviz
+[2.196s] symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_funmap/rviz/stretch_mapping.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_funmap/share/stretch_funmap/rviz
+[2.233s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_funmap' returned '0': PYTHONPATH=/home/jongha/stretch_ros2_ws/build/stretch_funmap/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/stretch_ros2_ws/install/stretch_funmap/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jongha/stretch_ros2_ws/build/stretch_funmap/build --no-deps symlink_data

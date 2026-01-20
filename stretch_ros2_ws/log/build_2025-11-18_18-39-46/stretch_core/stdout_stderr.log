@@ -1,0 +1,51 @@
+running develop
+running egg_info
+creating stretch_core.egg-info
+writing stretch_core.egg-info/PKG-INFO
+writing dependency_links to stretch_core.egg-info/dependency_links.txt
+writing entry points to stretch_core.egg-info/entry_points.txt
+writing requirements to stretch_core.egg-info/requires.txt
+writing top-level names to stretch_core.egg-info/top_level.txt
+writing manifest file 'stretch_core.egg-info/SOURCES.txt'
+reading manifest file 'stretch_core.egg-info/SOURCES.txt'
+writing manifest file 'stretch_core.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jongha/stretch_ros2_ws/install/stretch_core/lib/python3.10/site-packages/stretch-core.egg-link (link to .)
+Installing align_to_aruco script to /home/jongha/stretch_ros2_ws/install/stretch_core/lib/stretch_core
+Installing avoider script to /home/jongha/stretch_ros2_ws/install/stretch_core/lib/stretch_core
+Installing d435i_accel_correction script to /home/jongha/stretch_ros2_ws/install/stretch_core/lib/stretch_core
+Installing detect_aruco_markers script to /home/jongha/stretch_ros2_ws/install/stretch_core/lib/stretch_core
+Installing keyboard_teleop script to /home/jongha/stretch_ros2_ws/install/stretch_core/lib/stretch_core
+Installing remote_gamepad script to /home/jongha/stretch_ros2_ws/install/stretch_core/lib/stretch_core
+Installing stretch_driver script to /home/jongha/stretch_ros2_ws/install/stretch_core/lib/stretch_core
+Installing usb_cam script to /home/jongha/stretch_ros2_ws/install/stretch_core/lib/stretch_core
+
+Installed /home/jongha/stretch_ros2_ws/build/stretch_core
+running symlink_data
+creating /home/jongha/stretch_ros2_ws/install/stretch_core/share/ament_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_core/share/ament_index/resource_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_core/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/resource/stretch_core -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/package.xml -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core
+creating /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/stretch_realsense.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/d435i_basic.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/beta_navigation_camera.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/multi_camera.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/stretch_aruco.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/navigation_camera.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/beta_gripper_camera.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/d405_basic.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/rplidar.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/align_to_aruco.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/rplidar_keepout.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/stretch_driver.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/d435i_high_resolution.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/launch/d435i_low_resolution.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/launch
+creating /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/config
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/config/laser_filter_params.yaml -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/config
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/config/controller_calibration_head_factory_default.yaml -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/config
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/config/HighAccuracyPreset.json -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/config
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/config/stretch_marker_dict.yaml -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/config
+creating /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/rviz
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_core/rviz/stretch_simple_test.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_core/share/stretch_core/rviz

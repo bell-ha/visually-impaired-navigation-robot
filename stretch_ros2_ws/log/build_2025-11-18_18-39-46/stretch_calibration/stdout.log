@@ -1,0 +1,44 @@
+running develop
+running egg_info
+creating stretch_calibration.egg-info
+writing stretch_calibration.egg-info/PKG-INFO
+writing dependency_links to stretch_calibration.egg-info/dependency_links.txt
+writing entry points to stretch_calibration.egg-info/entry_points.txt
+writing requirements to stretch_calibration.egg-info/requires.txt
+writing top-level names to stretch_calibration.egg-info/top_level.txt
+writing manifest file 'stretch_calibration.egg-info/SOURCES.txt'
+reading manifest file 'stretch_calibration.egg-info/SOURCES.txt'
+writing manifest file 'stretch_calibration.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jongha/stretch_ros2_ws/install/stretch_calibration/lib/python3.10/site-packages/stretch-calibration.egg-link (link to .)
+Installing check_head_calibration script to /home/jongha/stretch_ros2_ws/install/stretch_calibration/lib/stretch_calibration
+Installing collect_head_calibration_data script to /home/jongha/stretch_ros2_ws/install/stretch_calibration/lib/stretch_calibration
+Installing process_head_calibration_data script to /home/jongha/stretch_ros2_ws/install/stretch_calibration/lib/stretch_calibration
+Installing revert_to_previous_calibration script to /home/jongha/stretch_ros2_ws/install/stretch_calibration/lib/stretch_calibration
+Installing update_uncalibrated_urdf script to /home/jongha/stretch_ros2_ws/install/stretch_calibration/lib/stretch_calibration
+Installing update_urdf_after_xacro_change script to /home/jongha/stretch_ros2_ws/install/stretch_calibration/lib/stretch_calibration
+Installing update_with_most_recent_calibration script to /home/jongha/stretch_ros2_ws/install/stretch_calibration/lib/stretch_calibration
+Installing visualize_most_recent_head_calibration script to /home/jongha/stretch_ros2_ws/install/stretch_calibration/lib/stretch_calibration
+
+Installed /home/jongha/stretch_ros2_ws/build/stretch_calibration
+running symlink_data
+creating /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/ament_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/ament_index/resource_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/resource/stretch_calibration -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/package.xml -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration
+creating /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/launch/process_head_calibration_data.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/launch/simple_test_head_calibration.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/launch/process_head_calibration_data_with_visualization.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/launch/check_head_calibration.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/launch/use_prior_head_calibration_to_update_urdf.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/launch/simple_test_head_calibration_low_resolution.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/launch/visualize_head_calibration.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/launch/collect_check_head_calibration_data.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/launch/collect_head_calibration_data.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/launch
+creating /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/config
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/config/head_calibration_options.yaml -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/config
+creating /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/rviz
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/rviz/stretch_simple_test.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/rviz
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_calibration/rviz/head_calibration.rviz -> /home/jongha/stretch_ros2_ws/install/stretch_calibration/share/stretch_calibration/rviz

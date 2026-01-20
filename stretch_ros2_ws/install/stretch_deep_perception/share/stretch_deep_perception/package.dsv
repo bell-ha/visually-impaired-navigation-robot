@@ -1,0 +1,9 @@
+source;share/stretch_deep_perception/hook/pythonpath.ps1
+source;share/stretch_deep_perception/hook/pythonpath.dsv
+source;share/stretch_deep_perception/hook/pythonpath.sh
+source;share/stretch_deep_perception/hook/ament_prefix_path.ps1
+source;share/stretch_deep_perception/hook/ament_prefix_path.dsv
+source;share/stretch_deep_perception/hook/ament_prefix_path.sh
+source;../../build/stretch_deep_perception/share/stretch_deep_perception/hook/pythonpath_develop.ps1
+source;../../build/stretch_deep_perception/share/stretch_deep_perception/hook/pythonpath_develop.dsv
+source;../../build/stretch_deep_perception/share/stretch_deep_perception/hook/pythonpath_develop.sh

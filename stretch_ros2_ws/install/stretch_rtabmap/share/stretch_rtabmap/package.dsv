@@ -1,0 +1,8 @@
+source;share/stretch_rtabmap/hook/cmake_prefix_path.ps1
+source;share/stretch_rtabmap/hook/cmake_prefix_path.dsv
+source;share/stretch_rtabmap/hook/cmake_prefix_path.sh
+source;share/stretch_rtabmap/local_setup.bash
+source;share/stretch_rtabmap/local_setup.dsv
+source;share/stretch_rtabmap/local_setup.ps1
+source;share/stretch_rtabmap/local_setup.sh
+source;share/stretch_rtabmap/local_setup.zsh

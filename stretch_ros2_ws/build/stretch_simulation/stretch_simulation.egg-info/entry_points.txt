@@ -1,0 +1,3 @@
+[console_scripts]
+stretch_mujoco_driver = stretch_mujoco_driver.stretch_mujoco_driver:main
+

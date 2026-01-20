@@ -1,0 +1,4 @@
+source;share/stretch_description/local_setup.bash
+source;share/stretch_description/local_setup.dsv
+source;share/stretch_description/local_setup.sh
+source;share/stretch_description/local_setup.zsh

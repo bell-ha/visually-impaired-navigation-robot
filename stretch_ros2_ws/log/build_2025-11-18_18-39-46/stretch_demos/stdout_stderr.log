@@ -1,0 +1,33 @@
+running develop
+running egg_info
+creating stretch_demos.egg-info
+writing stretch_demos.egg-info/PKG-INFO
+writing dependency_links to stretch_demos.egg-info/dependency_links.txt
+writing entry points to stretch_demos.egg-info/entry_points.txt
+writing requirements to stretch_demos.egg-info/requires.txt
+writing top-level names to stretch_demos.egg-info/top_level.txt
+writing manifest file 'stretch_demos.egg-info/SOURCES.txt'
+reading manifest file 'stretch_demos.egg-info/SOURCES.txt'
+writing manifest file 'stretch_demos.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/python3.10/site-packages/stretch-demos.egg-link (link to .)
+Installing clean_surface script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+Installing grasp_object script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+Installing handover_object script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+Installing hello_world script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+Installing open_drawer script to /home/jongha/stretch_ros2_ws/install/stretch_demos/lib/stretch_demos
+
+Installed /home/jongha/stretch_ros2_ws/build/stretch_demos
+running symlink_data
+creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/ament_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/ament_index/resource_index
+creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/resource/stretch_demos -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/ament_index/resource_index/packages
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/package.xml -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos
+creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/handover_object.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/clean_surface.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/open_drawer.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/hello_world.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+symbolically linking /home/jongha/stretch_ros2_ws/build/stretch_demos/launch/grasp_object.launch.py -> /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/launch
+creating /home/jongha/stretch_ros2_ws/install/stretch_demos/share/stretch_demos/rviz

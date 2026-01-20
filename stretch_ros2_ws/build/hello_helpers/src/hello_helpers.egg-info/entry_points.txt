@@ -1,0 +1,3 @@
+[console_scripts]
+configure_wrist = hello_helpers.configure_wrist:main
+

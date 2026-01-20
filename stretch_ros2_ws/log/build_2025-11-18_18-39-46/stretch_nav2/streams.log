@@ -1,0 +1,102 @@
+[1.065s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_nav2': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake /home/jongha/stretch_ros2_ws/src/stretch_ros2/stretch_nav2 -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/jongha/stretch_ros2_ws/install/stretch_nav2
+[1.122s] -- The C compiler identification is GNU 11.4.0
+[1.209s] -- The CXX compiler identification is GNU 11.4.0
+[1.221s] -- Detecting C compiler ABI info
+[1.312s] -- Detecting C compiler ABI info - done
+[1.326s] -- Check for working C compiler: /usr/bin/cc - skipped
+[1.327s] -- Detecting C compile features
+[1.328s] -- Detecting C compile features - done
+[1.333s] -- Detecting CXX compiler ABI info
+[1.428s] -- Detecting CXX compiler ABI info - done
+[1.438s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[1.438s] -- Detecting CXX compile features
+[1.439s] -- Detecting CXX compile features - done
+[1.442s] -- Found ament_cmake: 1.3.12 (/opt/ros/humble/share/ament_cmake/cmake)
+[1.670s] -- Found Python3: /usr/bin/python3 (found version "3.10.12") found components: Interpreter 
+[1.802s] -- Override CMake install command with custom implementation using symlinks instead of copying resources
+[1.870s] -- Found rclcpp: 16.0.15 (/opt/ros/humble/share/rclcpp/cmake)
+[1.930s] -- Found rosidl_generator_c: 3.1.7 (/opt/ros/humble/share/rosidl_generator_c/cmake)
+[1.943s] -- Found rosidl_adapter: 3.1.7 (/opt/ros/humble/share/rosidl_adapter/cmake)
+[1.956s] -- Found rosidl_generator_cpp: 3.1.7 (/opt/ros/humble/share/rosidl_generator_cpp/cmake)
+[1.980s] -- Using all available rosidl_typesupport_c: rosidl_typesupport_fastrtps_c;rosidl_typesupport_introspection_c
+[2.011s] -- Using all available rosidl_typesupport_cpp: rosidl_typesupport_fastrtps_cpp;rosidl_typesupport_introspection_cpp
+[2.106s] -- Found rmw_implementation_cmake: 6.1.2 (/opt/ros/humble/share/rmw_implementation_cmake/cmake)
+[2.113s] -- Found rmw_fastrtps_cpp: 6.2.9 (/opt/ros/humble/share/rmw_fastrtps_cpp/cmake)
+[2.264s] -- Found OpenSSL: /usr/lib/x86_64-linux-gnu/libcrypto.so (found version "3.0.2")  
+[2.305s] -- Found FastRTPS: /opt/ros/humble/include  
+[2.369s] -- Using RMW implementation 'rmw_fastrtps_cpp' as default
+[2.387s] -- Looking for pthread.h
+[2.485s] -- Looking for pthread.h - found
+[2.486s] -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+[2.558s] -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+[2.559s] -- Found Threads: TRUE  
+[2.620s] -- Found ament_lint_auto: 0.12.14 (/opt/ros/humble/share/ament_lint_auto/cmake)
+[2.774s] -- Added test 'copyright' to check source files copyright and LICENSE
+[2.776s] -- Added test 'flake8' to check Python code syntax and style conventions
+[2.776s] -- Added test 'lint_cmake' to check CMake code style
+[2.777s] -- Added test 'pep257' to check Python code against some of the docstring style conventions in PEP 257
+[2.778s] -- Added test 'xmllint' to check XML markup files
+[2.779s] -- Configuring done
+[2.782s] -- Generating done
+[2.784s] -- Build files have been written to: /home/jongha/stretch_ros2_ws/build/stretch_nav2
+[2.795s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_nav2' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake /home/jongha/stretch_ros2_ws/src/stretch_ros2/stretch_nav2 -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/jongha/stretch_ros2_ws/install/stretch_nav2
+[2.797s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_nav2': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --build /home/jongha/stretch_ros2_ws/build/stretch_nav2 -- -j16 -l16
+[2.855s] Built target ament_cmake_python_symlink_stretch_nav2
+[3.092s] running egg_info
+[3.092s] creating stretch_nav2.egg-info
+[3.092s] writing stretch_nav2.egg-info/PKG-INFO
+[3.093s] writing dependency_links to stretch_nav2.egg-info/dependency_links.txt
+[3.093s] writing top-level names to stretch_nav2.egg-info/top_level.txt
+[3.093s] writing manifest file 'stretch_nav2.egg-info/SOURCES.txt'
+[3.094s] reading manifest file 'stretch_nav2.egg-info/SOURCES.txt'
+[3.095s] writing manifest file 'stretch_nav2.egg-info/SOURCES.txt'
+[3.121s] Built target ament_cmake_python_build_stretch_nav2_egg
+[3.130s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_nav2' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --build /home/jongha/stretch_ros2_ws/build/stretch_nav2 -- -j16 -l16
+[3.133s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_nav2': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --install /home/jongha/stretch_ros2_ws/build/stretch_nav2
+[3.136s] -- Install configuration: ""
+[3.137s] -- Execute custom install script
+[3.137s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/launch/bringup_launch.py
+[3.145s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/launch/demo_security.launch.py
+[3.150s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/launch/navigation.launch.py
+[3.159s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/launch/navigation_launch.py
+[3.168s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/launch/offline_mapping.launch.py
+[3.176s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/launch/online_async_launch.py
+[3.184s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/launch/online_mapping.launch.py
+[3.190s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/launch/stretch_navigation.launch.py
+[3.197s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/launch/teleop_twist.launch.py
+[3.205s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/config/mapper_params_online_async.yaml
+[3.211s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/config/nav2_params.yaml
+[3.220s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/config/nav2_voxel_params.yaml
+[3.228s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/stretch_nav2/__init__.py
+[3.236s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/stretch_nav2/robot_navigator.py
+[3.245s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/stretch_nav2/simple_commander_demo.py
+[3.254s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/environment/pythonpath.sh
+[3.260s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/environment/pythonpath.dsv
+[3.270s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2-0.0.1-py3.10.egg-info/PKG-INFO
+[3.277s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2-0.0.1-py3.10.egg-info/SOURCES.txt
+[3.287s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2-0.0.1-py3.10.egg-info/dependency_links.txt
+[3.295s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2-0.0.1-py3.10.egg-info/top_level.txt
+[3.305s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2/__init__.py
+[3.314s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2/robot_navigator.py
+[3.325s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2/simple_commander_demo.py
+[3.334s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/lib/stretch_nav2/simple_commander_demo.py
+[3.342s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/ament_index/resource_index/package_run_dependencies/stretch_nav2
+[3.350s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/ament_index/resource_index/parent_prefix_path/stretch_nav2
+[3.356s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/environment/ament_prefix_path.sh
+[3.365s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/environment/ament_prefix_path.dsv
+[3.372s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/environment/path.sh
+[3.384s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/environment/path.dsv
+[3.391s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/local_setup.bash
+[3.397s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/local_setup.sh
+[3.407s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/local_setup.zsh
+[3.415s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/local_setup.dsv
+[3.421s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/package.dsv
+[3.427s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/ament_index/resource_index/packages/stretch_nav2
+[3.434s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/cmake/stretch_nav2Config.cmake
+[3.441s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/cmake/stretch_nav2Config-version.cmake
+[3.451s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_nav2/share/stretch_nav2/package.xml
+[3.501s] Listing '/home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2'...
+[3.501s] Compiling '/home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2/__init__.py'...
+[3.501s] Compiling '/home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2/robot_navigator.py'...
+[3.501s] Compiling '/home/jongha/stretch_ros2_ws/install/stretch_nav2/local/lib/python3.10/dist-packages/stretch_nav2/simple_commander_demo.py'...
+[3.509s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_nav2' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --install /home/jongha/stretch_ros2_ws/build/stretch_nav2

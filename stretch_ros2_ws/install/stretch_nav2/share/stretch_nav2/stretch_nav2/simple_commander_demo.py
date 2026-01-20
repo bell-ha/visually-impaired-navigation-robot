@@ -1,0 +1,1 @@
+/home/jongha/stretch_ros2_ws/src/stretch_ros2/stretch_nav2/stretch_nav2/simple_commander_demo.py

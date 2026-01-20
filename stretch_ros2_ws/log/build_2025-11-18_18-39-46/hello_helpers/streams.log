@@ -1,0 +1,24 @@
+[1.808s] Invoking command in '/home/jongha/stretch_ros2_ws/build/hello_helpers': PYTHONPATH=/home/jongha/stretch_ros2_ws/build/hello_helpers/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/stretch_ros2_ws/install/hello_helpers/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jongha/stretch_ros2_ws/build/hello_helpers/build --no-deps symlink_data
+[2.290s] running develop
+[2.480s] running egg_info
+[2.480s] creating src/hello_helpers.egg-info
+[2.480s] writing src/hello_helpers.egg-info/PKG-INFO
+[2.481s] writing dependency_links to src/hello_helpers.egg-info/dependency_links.txt
+[2.481s] writing entry points to src/hello_helpers.egg-info/entry_points.txt
+[2.481s] writing requirements to src/hello_helpers.egg-info/requires.txt
+[2.481s] writing top-level names to src/hello_helpers.egg-info/top_level.txt
+[2.481s] writing manifest file 'src/hello_helpers.egg-info/SOURCES.txt'
+[2.483s] reading manifest file 'src/hello_helpers.egg-info/SOURCES.txt'
+[2.483s] writing manifest file 'src/hello_helpers.egg-info/SOURCES.txt'
+[2.485s] running build_ext
+[2.485s] Creating /home/jongha/stretch_ros2_ws/install/hello_helpers/lib/python3.10/site-packages/hello-helpers.egg-link (link to src)
+[2.486s] Installing configure_wrist script to /home/jongha/stretch_ros2_ws/install/hello_helpers/lib/hello_helpers
+[2.486s] 
+[2.486s] Installed /home/jongha/stretch_ros2_ws/build/hello_helpers/src
+[2.486s] running symlink_data
+[2.486s] creating /home/jongha/stretch_ros2_ws/install/hello_helpers/share/ament_index
+[2.487s] creating /home/jongha/stretch_ros2_ws/install/hello_helpers/share/ament_index/resource_index
+[2.487s] creating /home/jongha/stretch_ros2_ws/install/hello_helpers/share/ament_index/resource_index/packages
+[2.487s] symbolically linking /home/jongha/stretch_ros2_ws/build/hello_helpers/resource/hello_helpers -> /home/jongha/stretch_ros2_ws/install/hello_helpers/share/ament_index/resource_index/packages
+[2.487s] symbolically linking /home/jongha/stretch_ros2_ws/build/hello_helpers/package.xml -> /home/jongha/stretch_ros2_ws/install/hello_helpers/share/hello_helpers
+[2.513s] Invoked command in '/home/jongha/stretch_ros2_ws/build/hello_helpers' returned '0': PYTHONPATH=/home/jongha/stretch_ros2_ws/build/hello_helpers/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jongha/stretch_ros2_ws/install/hello_helpers/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jongha/stretch_ros2_ws/build/hello_helpers/build --no-deps symlink_data

@@ -1,0 +1,44 @@
+[0.283s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_description': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake /home/jongha/stretch_ros2_ws/src/stretch_ros2/stretch_description -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/jongha/stretch_ros2_ws/install/stretch_description
+[1.083s] -- The C compiler identification is GNU 11.4.0
+[1.083s] -- The CXX compiler identification is GNU 11.4.0
+[1.083s] -- Detecting C compiler ABI info
+[1.083s] -- Detecting C compiler ABI info - done
+[1.083s] -- Check for working C compiler: /usr/bin/cc - skipped
+[1.083s] -- Detecting C compile features
+[1.083s] -- Detecting C compile features - done
+[1.083s] -- Detecting CXX compiler ABI info
+[1.083s] -- Detecting CXX compiler ABI info - done
+[1.083s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[1.083s] -- Detecting CXX compile features
+[1.083s] -- Detecting CXX compile features - done
+[1.083s] -- Found ament_cmake: 1.3.12 (/opt/ros/humble/share/ament_cmake/cmake)
+[1.083s] -- Found Python3: /usr/bin/python3 (found version "3.10.12") found components: Interpreter 
+[1.083s] -- Override CMake install command with custom implementation using symlinks instead of copying resources
+[1.083s] -- Found xacro: 2.1.1 (/opt/ros/humble/share/xacro/cmake)
+[1.083s] -- Configuring done
+[1.083s] -- Generating done
+[1.083s] -- Build files have been written to: /home/jongha/stretch_ros2_ws/build/stretch_description
+[1.087s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_description' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake /home/jongha/stretch_ros2_ws/src/stretch_ros2/stretch_description -DAMENT_CMAKE_SYMLINK_INSTALL=1 -DCMAKE_INSTALL_PREFIX=/home/jongha/stretch_ros2_ws/install/stretch_description
+[1.089s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_description': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --build /home/jongha/stretch_ros2_ws/build/stretch_description -- -j16 -l16
+[1.136s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_description' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --build /home/jongha/stretch_ros2_ws/build/stretch_description -- -j16 -l16
+[1.150s] Invoking command in '/home/jongha/stretch_ros2_ws/build/stretch_description': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --install /home/jongha/stretch_ros2_ws/build/stretch_description
+[1.158s] -- Install configuration: ""
+[1.158s] -- Execute custom install script
+[1.158s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/urdf/stretch_description.xacro
+[1.172s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/launch/display.launch.py
+[1.187s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/ament_index/resource_index/package_run_dependencies/stretch_description
+[1.196s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/ament_index/resource_index/parent_prefix_path/stretch_description
+[1.211s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/environment/ament_prefix_path.sh
+[1.225s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/environment/ament_prefix_path.dsv
+[1.238s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/environment/path.sh
+[1.251s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/environment/path.dsv
+[1.262s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/local_setup.bash
+[1.273s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/local_setup.sh
+[1.283s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/local_setup.zsh
+[1.292s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/local_setup.dsv
+[1.305s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/package.dsv
+[1.321s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/ament_index/resource_index/packages/stretch_description
+[1.336s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/cmake/stretch_descriptionConfig.cmake
+[1.348s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/cmake/stretch_descriptionConfig-version.cmake
+[1.361s] -- Symlinking: /home/jongha/stretch_ros2_ws/install/stretch_description/share/stretch_description/package.xml
+[1.376s] Invoked command in '/home/jongha/stretch_ros2_ws/build/stretch_description' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/home/jongha/stretch_ros2_ws/install/stretch_simulation:/home/jongha/stretch_ros2_ws/install/stretch_funmap:/home/jongha/stretch_ros2_ws/install/stretch_calibration:/home/jongha/stretch_ros2_ws/install/stretch_demos:/home/jongha/stretch_ros2_ws/install/stretch_deep_perception:/home/jongha/stretch_ros2_ws/install/stretch_core:/home/jongha/stretch_ros2_ws/install/hello_helpers:/opt/ros/humble /usr/bin/cmake --install /home/jongha/stretch_ros2_ws/build/stretch_description
