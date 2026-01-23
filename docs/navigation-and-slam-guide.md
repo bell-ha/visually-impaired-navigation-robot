@@ -59,6 +59,7 @@ stretch_robot_home.py
 ```bash
 sudo date -s "$(ssh hello-robot@192.168.0.89 'date')"
 sudo date -s "$(ssh hello-robot@172.20.10.3 'date')"
+sudo date -s "2026-01-23 10:37:00"
 ```
 
 5. 네트워크 동기화(두 기기 다)
@@ -166,16 +167,22 @@ ros2 run rplidar_ros rplidar_composition --ros-args -p serial_port:=/dev/hello-l
 
 #### 2단계: Navigation + 지도 서버
 
-경로 계획/제어기 가동
+경로 계획/제어기 가동(/stretch?cmd_vel로 /cmd_vel이 전달되도록 일치시켜줌)
 ```bash
-ros2 launch stretch_nav2 navigation_launch.py use_sim_time:=False 
+ros2 launch stretch_nav2 navigation_launch.py use_sim_time:=False --ros-args -r /cmd_vel:=/stretch/cmd_vel
 ```
+
+
+맵을
 home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/test1_map.yaml로 설정
 ```bash
 ros2 run nav2_map_server map_server --ros-args \
 -p yaml_filename:=/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/test1_map.yaml \
 -p use_sim_time:=False  
 ```
+
+
+
 맵 서버 실행 후 필수
 ```bash
 ros2 lifecycle set /map_server configure 
