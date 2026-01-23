@@ -154,6 +154,13 @@ ros2 run rviz2 rviz2
 
 ### 4.2 내비게이션 스택 실행 (로봇 SSH)
 
+#### 0단계(옵션): URDF를 수정한 상태라서 빌드를 해야할수도(로봇에서 수행)
+```bash
+cd ~/ament_ws
+colcon build --packages-select stretch_description --allow-overriding stretch_description
+source install/setup.bash
+```
+
 #### 1단계: 기본 노드 실행
 
 주행모드 활성화
