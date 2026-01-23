@@ -167,9 +167,11 @@ ros2 run rplidar_ros rplidar_composition --ros-args -p serial_port:=/dev/hello-l
 
 #### 2단계: Navigation + 지도 서버
 
-경로 계획/제어기 가동(/stretch?cmd_vel로 /cmd_vel이 전달되도록 일치시켜줌)
+경로 계획/제어기 가동(nav2_params.yaml을 사용해서 부풀리기 )
 ```bash
-ros2 launch stretch_nav2 navigation_launch.py use_sim_time:=False --ros-args -r /cmd_vel:=/stretch/cmd_vel
+ros2 launch stretch_nav2 navigation_launch.py \
+use_sim_time:=False \
+params_file:=/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params.yaml
 ```
 
 
