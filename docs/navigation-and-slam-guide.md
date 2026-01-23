@@ -218,6 +218,15 @@ ros2 topic echo /clicked_point
 ```
 이거 하고 publish Point하기 
 
+
+### 4.5 로봇 속도/회전/출발속도 늦추기(선택)
+```bash
+ros2 param set /controller_server FollowPath.max_vel_x 0.3
+ros2 param set /controller_server FollowPath.max_vel_theta 0.35
+ros2 param set /controller_server FollowPath.acc_lim_theta 0.5
+```
+
+
 #### A 지점
 
 <p align="center">
@@ -235,6 +244,37 @@ ros2 topic echo /clicked_point
 </p>
 
 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ### 로그 분석
 

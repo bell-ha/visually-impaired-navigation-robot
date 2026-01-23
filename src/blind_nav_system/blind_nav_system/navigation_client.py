@@ -9,14 +9,20 @@ from std_srvs.srv import Trigger
 import yaml
 import os
 import time
+import math
 
 class NavigationClient(Node):
     def __init__(self, target_key):
-        # 고유한 노드 이름 생성
         super().__init__(f'nav_client_{int(time.time())}')
         self._action_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         self.stop_publisher = self.create_publisher(Twist, '/stretch/cmd_vel', 10)
         self.path_publisher = self.create_publisher(Path, '/plan', 10)
+        
+        # [수정] 경로 대신 실제 속도 명령(Twist)을 구독하여 회전 감지
+        self.vel_sub = self.create_subscription(Twist, '/stretch/cmd_vel', self.vel_callback, 10)
+        
+        self.last_turn_announcement = 0 
+        self.turn_threshold = 0.4  # 회전 감지 임계값 (rad/s), 약 23도/s 이상의 회전일 때 알림
         
         self.target_key = target_key
         self.goal_handle = None
@@ -33,24 +39,18 @@ class NavigationClient(Node):
     def start_navigation(self):
         loc = self.load_location()
         if not loc: return False
-
-        # 1. 코스트맵 초기화
         for srv in ['/global_costmap/clear_entirely_global_costmap', '/local_costmap/clear_entirely_local_costmap']:
             cli = self.create_client(Trigger, srv)
             if cli.wait_for_service(timeout_sec=0.5):
                 cli.call_async(Trigger.Request())
-
-        # 2. 액션 서버 연결
         if not self._action_client.wait_for_server(timeout_sec=5.0):
             return False
-
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = "map"
         goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
         goal_msg.pose.pose.position.x = float(loc['x'])
         goal_msg.pose.pose.position.y = float(loc['y'])
         goal_msg.pose.pose.orientation.w = float(loc.get('w', 1.0))
-
         self._action_client.send_goal_async(goal_msg).add_done_callback(self.goal_response_callback)
         return True
 
@@ -63,18 +63,34 @@ class NavigationClient(Node):
         if future.result().status == GoalStatus.STATUS_SUCCEEDED:
             self.is_arrived = True
 
+    # === [핵심] 실제 회전 속도 기반 감지 로직 ===
+    def vel_callback(self, msg):
+        """로봇이 실제로 회전 명령을 받았을 때 즉시 안내"""
+        current_time = time.time()
+        
+        # angular.z는 초당 회전 각도(라디안)입니다.
+        angular_z = msg.angular.z 
+        
+        # 설정한 임계값보다 빠르게 회전 중인지 확인
+        if abs(angular_z) > self.turn_threshold:
+            # 5초 간격으로 중복 안내 방지
+            if current_time - self.last_turn_announcement > 5.0:
+                # ROS 표준: +는 왼쪽(시계반대방향), -는 오른쪽(시계방향)
+                direction = "왼쪽" if angular_z > 0 else "오른쪽"
+                
+                # 라디안을 각도로 변환하여 로그 출력
+                deg_per_sec = abs(math.degrees(angular_z))
+                self.get_logger().info(f"🔄 [동작 안내] {direction}으로 회전 중입니다. (속도: {deg_per_sec:.1f}°/s)")
+                self.last_turn_announcement = current_time
+
     def cleanup(self):
-        """삭제 전 초기화"""
         try:
-            # 경로 삭제
             empty_path = Path()
             empty_path.header.frame_id = "map"
             self.path_publisher.publish(empty_path)
-            # 물리적 정지
             stop_msg = Twist()
             for _ in range(5):
                 self.stop_publisher.publish(stop_msg)
-            # 액션 취소
             if self.goal_handle:
                 self.goal_handle.cancel_goal_async()
         except: pass
