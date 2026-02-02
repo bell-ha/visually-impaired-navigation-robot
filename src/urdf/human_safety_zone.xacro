@@ -1,14 +1,14 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:macro name="human_safety_zone">
-    <link name="human_safety_zone">
+    <link name="safety_zone_link">
       <visual>
         <origin xyz="0 0 0.1" rpy="0 0 0"/>
         <geometry>
           <box size="0.6 0.6 0.2"/>
         </geometry>
-        <material name="safety_red">
-          <color rgba="1.0 0.0 0.0 0.4"/>
+        <material name="red">
+          <color rgba="1 0 0 0.5"/>
         </material>
       </visual>
       <collision>
@@ -19,10 +19,9 @@
       </collision>
     </link>
 
-    <joint name="joint_human_safety_zone" type="fixed">
+    <joint name="safety_zone_joint" type="fixed">
       <parent link="base_link"/>
-      <child link="human_safety_zone"/>
-      <origin xyz="-0.55 0.4 0.0" rpy="0 0 0"/>
-    </joint>
+      <child link="safety_zone_link"/>
+      <origin xyz="-0.45 0.3 0.0" rpy="0 0 0"/> </joint>
   </xacro:macro>
 </robot>

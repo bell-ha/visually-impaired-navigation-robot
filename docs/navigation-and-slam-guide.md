@@ -154,7 +154,7 @@ ros2 run rviz2 rviz2
 
 ### 4.2 내비게이션 스택 실행 (로봇 SSH)
 
-#### 0단계(옵션): URDF를 수정한 상태라서 빌드를 해야할수도(로봇에서 수행)
+#### 0단계(옵션): URDF를 수정한 상태에서 빌드(로봇에서 수행)
 ```bash
 cd ~/ament_ws
 colcon build --packages-select stretch_description --allow-overriding stretch_description
@@ -172,9 +172,27 @@ ros2 launch stretch_core stretch_driver.launch.py mode:=navigation broadcast_odo
 ros2 run rplidar_ros rplidar_composition --ros-args -p serial_port:=/dev/hello-lrf -p serial_baudrate:=115200 -p frame_id:=laser
 ```
 
+안전구역 활성화
+```bash
+ros2 run tf2_ros static_transform_publisher --x -0.72 --y 0.72 --z 0.1 --yaw 0 --pitch 0 --roll 0 --frame-id base_link --child-frame-id safety_zone_left_back
+```
+
+
 #### 2단계: Navigation + 지도 서버
 
 경로 계획/제어기 가동(nav2_params.yaml을 사용해서 부풀리기 )
+
+파라미터 설명
+```text
+# 로봇 크기 35cm x 35cm , 사람 공간 좌측 후방에 40cm x 40cm확보
+
+footprint: "[ [0.175, -0.175], [0.175, 0.175], [-0.175, 0.575], [-0.575, 0.575], [-0.575, 0.175], [-0.175, -0.175] ]"
+
+inflaction_radius: 0.4 (로봇 중앙을 기준으로 장애물은 40cm까지 허용)
+cost_scaling_factor: 5.0 (장애물 근처의 위험비용 설정)
+크기 설정으로 lidar에 감지된 영역은 절대 침범 안함
+```
+
 ```bash
 ros2 launch stretch_nav2 navigation_launch.py \
 use_sim_time:=False \
@@ -195,8 +213,6 @@ ros2 run nav2_map_server map_server --ros-args \
 맵 서버 실행 후 필수
 ```bash
 ros2 lifecycle set /map_server configure 
-```
-```bash
 ros2 lifecycle set /map_server activate
 ```
 
@@ -208,8 +224,6 @@ ros2 run nav2_amcl amcl --ros-args -p use_sim_time:=False
 ```
 ```bash
 ros2 lifecycle set /amcl configure
-```
-```bash
 ros2 lifecycle set /amcl activate
 ```
 
@@ -399,3 +413,18 @@ sudo shutdown now
 cd ~/ament_ws/src/stretch_web_teleop
 ./start_interface.sh
 ```
+
+
+로봇 크기: 35cm x 35cm (중앙 기준)
+
+사람 공간: 로봇의 좌측 후방에 40cm x 40cm 공간 확보
+
+inflation_radius: 0.4m (40cm)
+
+사람 쪽(왼쪽)은 풋프린트가 60cm 튀어나와 있어, 인플레이션(40cm)보다 먼저 벽을 감지하고 멈춥니다. (안전 우선)
+
+로봇 쪽(오른쪽)은 풋프린트가 작으므로, 벽에서 40cm 이내로 진입하여 주행하는 것을 허용합니다. (주행성 우선)
+
+cost_scaling_factor: 5.0
+
+장애물 근처의 위험 비용을 완만하게 설정하여, 로봇이 좁은 틈새를 지나갈 때 너무 겁먹지 않도록 조정했습니다.
