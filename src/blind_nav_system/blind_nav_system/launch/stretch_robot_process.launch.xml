@@ -1,0 +1,61 @@
+<?xml version="1.0"?>
+<launch version="0.1.0">
+
+  <!-- ====== args ====== -->
+  <arg name="use_sim_time" default="false"/>
+  <arg name="params_file" default="/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params.yaml"/>
+  <arg name="map" default="/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/test1_map.yaml"/>
+
+  <!-- lifecycle 명령이 너무 빨리 실행되면 실패할 수 있어서 딜레이를 둠 -->
+  <arg name="map_lifecycle_delay" default="5"/>
+  <arg name="amcl_lifecycle_delay" default="5"/>
+
+  <!-- ====== 1단계: 기본 노드 실행 ====== -->
+
+  <!-- 1) stretch driver (mode:=navigation, broadcast_odom_tf:=True) -->
+  <include file="$(find-pkg-share stretch_core)/launch/stretch_driver.launch.py">
+    <arg name="mode" value="navigation"/>
+    <arg name="broadcast_odom_tf" value="True"/>
+  </include>
+
+  <!-- 2) rplidar -->
+  <node pkg="rplidar_ros" exec="rplidar_composition" name="rplidar" output="screen">
+    <param name="serial_port" value="/dev/hello-lrf"/>
+    <param name="serial_baudrate" value="115200"/>
+    <param name="frame_id" value="laser"/>
+  </node>
+
+  <!-- 3) safety zone static TF -->
+  <node pkg="tf2_ros" exec="static_transform_publisher" name="safety_zone_left_back_tf" output="screen"
+        args="--x -0.72 --y 0.72 --z 0.1 --yaw 0 --pitch 0 --roll 0 --frame-id base_link --child-frame-id safety_zone_left_back" />
+
+  <!-- ====== 2단계: Navigation + 지도 서버 ====== -->
+
+  <!-- 4) Nav2 navigation (stretch_nav2 navigation_launch.py) -->
+  <include file="$(find-pkg-share stretch_nav2)/launch/navigation_launch.py">
+    <arg name="use_sim_time" value="$(var use_sim_time)"/>
+    <arg name="params_file" value="$(var params_file)"/>
+  </include>
+
+  <!-- 5) map_server -->
+  <node pkg="nav2_map_server" exec="map_server" name="map_server" output="screen">
+    <param name="yaml_filename" value="$(var map)"/>
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+
+  <!-- 6) map_server lifecycle (configure -> activate) -->
+  <executable shell="true" output="screen"
+              cmd="sleep $(var map_lifecycle_delay); ros2 lifecycle set /map_server configure; ros2 lifecycle set /map_server activate" />
+
+  <!-- ====== 3단계: AMCL 실행 ====== -->
+
+  <!-- 7) amcl -->
+  <node pkg="nav2_amcl" exec="amcl" name="amcl" output="screen">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+  </node>
+
+  <!-- 8) amcl lifecycle (configure -> activate) -->
+  <executable shell="true" output="screen"
+              cmd="sleep $(var amcl_lifecycle_delay); ros2 lifecycle set /amcl configure; ros2 lifecycle set /amcl activate" />
+
+</launch>
