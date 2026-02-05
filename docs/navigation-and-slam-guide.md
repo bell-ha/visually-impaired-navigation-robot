@@ -180,7 +180,7 @@ ros2 run tf2_ros static_transform_publisher --x -0.72 --y 0.72 --z 0.1 --yaw 0 -
 
 #### 2단계: Navigation + 지도 서버
 
-경로 계획/제어기 가동(nav2_params.yaml을 사용해서 부풀리기 )
+경로 계획/제어기 가동(nav2_params.yaml을 사용해서 크기 부풀리기 )
 
 파라미터 설명
 ```text
