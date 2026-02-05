@@ -227,7 +227,11 @@ ros2 lifecycle set /amcl configure
 ros2 lifecycle set /amcl activate
 ```
 
----
+# 런치파일 실행(4.2 모든 과정 포함)
+```bash
+ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/launch/stretch_robot_process.launch.xml
+```
+
 
 ### 4.3 기준 좌표 확인 (AMCL Pose)
 
