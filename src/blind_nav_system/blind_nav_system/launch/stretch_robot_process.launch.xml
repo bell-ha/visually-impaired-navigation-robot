@@ -31,11 +31,15 @@
 
   <!-- ====== 2단계: Navigation + 지도 서버 ====== -->
 
-  <!-- 4) Nav2 navigation (stretch_nav2 navigation_launch.py) -->
+  <set_remap from="cmd_vel" to="/stretch/cmd_vel"/>
+  <set_remap from="/cmd_vel" to="/stretch/cmd_vel"/>
+
   <include file="$(find-pkg-share stretch_nav2)/launch/navigation_launch.py">
     <arg name="use_sim_time" value="$(var use_sim_time)"/>
     <arg name="params_file" value="$(var params_file)"/>
   </include>
+
+
 
   <!-- 5) map_server -->
   <node pkg="nav2_map_server" exec="map_server" name="map_server" output="screen">
