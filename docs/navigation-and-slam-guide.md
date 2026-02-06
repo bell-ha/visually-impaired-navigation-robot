@@ -274,6 +274,13 @@ ros2 param set /controller_server FollowPath.acc_lim_theta 0.5
 
 
 
+# src/blind_nav_system/blind_nav_system 기능들
+### hardware
+signal_to_python폴더: 아두이노관련
+input_bridge.py: 아두이노 신호 main_state_machine.py로 보내기
+
+### main_state_machine.py
+config내 location.yaml파일의 좌표를 통해 상태 변화 등 진행
 
 
 
@@ -285,7 +292,13 @@ ros2 param set /controller_server FollowPath.acc_lim_theta 0.5
 
 
 
+일시정지
+# Nav2 네비 스택 일시정지
+ros2 service call /lifecycle_manager_navigation/manage_nodes nav2_msgs/srv/ManageLifecycleNodes "{command: 1}"
 
+# 안전: 0속도 2초 (관성/잔류속도 제거)
+timeout 2s ros2 topic pub -r 10 /stretch/cmd_vel geometry_msgs/msg/Twist \
+"{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}"
 
 
 
