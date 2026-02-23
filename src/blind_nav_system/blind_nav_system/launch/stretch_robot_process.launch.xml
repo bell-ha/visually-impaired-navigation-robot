@@ -3,7 +3,23 @@
 
   <!-- ====== args ====== -->
   <arg name="use_sim_time" default="false"/>
+
+  
+  <!-- 사람 있는 버전, 없는 버전 선택하는 과정임! 중요!! -->
+  <!-- 사람 없음 -->
+  <!--  -->
   <arg name="params_file" default="/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params.yaml"/>
+  <!-- 사람 있음 -->
+  <!--  -->
+  <arg name="params_file" default="/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params_human.yaml"/>
+
+
+
+
+
+
+
+
   <arg name="map" default="/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/test1_map.yaml"/>
 
   <!-- Nav2(네비게이션 파트) 시작을 localization보다 살짝 늦춰서 TF/맵 준비 레이스를 줄임 -->
