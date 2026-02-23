@@ -13,12 +13,6 @@
 export ROS_DOMAIN_ID=0
 ````
 
-### 주요 패키지
-
-* `stretch_core`
-* `stretch_nav2`
-* `rplidar_ros`
-
 ### SSH 접속
 
 ```bash
@@ -54,20 +48,12 @@ stretch_free_robot_process.py
 stretch_robot_home.py
 ```
 
-4. 시간 동기화
-
-```bash
-sudo date -s "$(ssh hello-robot@192.168.0.89 'date')"
-sudo date -s "$(ssh hello-robot@172.20.10.3 'date')"
-sudo date -s "2026-01-23 10:37:00"
-```
-
-5. 네트워크 동기화(두 기기 다)
+4. 네트워크 동기화(두 기기 다)
 
 ```bash
 export ROS_DOMAIN_ID=0
 ```
-6. 팔 넣기
+5. 팔 넣기
 ```bash
 /home/hello-robot/.local/bin/stretch_robot_stow.py
 ```
@@ -227,26 +213,22 @@ ros2 lifecycle set /amcl configure
 ros2 lifecycle set /amcl activate
 ```
 
-# 런치파일 실행(4.2 모든 과정 포함)
+
+# 런치파일 실행(4.2 모든 과정 포함, 여기서 nav2_params.yaml 파일 설정은 런치파일 내에서 수정해야함)
 ```bash
 ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/launch/stretch_robot_process.launch.xml
 ```
 
 
-### 4.3 기준 좌표 확인 (AMCL Pose)
 
-```bash
-ros2 topic echo /amcl_pose --once
-```
-
-### 4.4 Rviz에서 지점 찾기 
+### 4.3 Rviz에서 지점 찾기 
 ```bash
 ros2 topic echo /clicked_point
 ```
 이거 하고 publish Point하기 
 
 
-### 4.5 로봇 속도/회전/출발속도 늦추기(선택)
+### 4.4 로봇 속도/회전/출발속도 늦추기(선택)
 ```bash
 ros2 param set /controller_server FollowPath.max_vel_x 0.3
 ros2 param set /controller_server FollowPath.max_vel_theta 0.35
@@ -316,63 +298,6 @@ timeout 2s ros2 topic pub -r 10 /stretch/cmd_vel geometry_msgs/msg/Twist \
 
 
 
-### 로그 분석
-
-#### 1. stretch_driver 실행 로그
-
-```text
-ros2 launch stretch_core stretch_driver.launch.py mode:=navigation broadcast_odom_tf:=True
-
-Base bump event: 하단 베이스에 충격 감지 센서 작동
-Wrist single tap: 손목에 두드림 감지
-New collision pair event: 자가 충돌 위험
-Dynamixel communication error: 모터와 통신이 잘 안 됨
-````
-
----
-
-#### 2. Navigation 실행 로그
-
-```text
-ros2 launch stretch_nav2 navigation_launch.py use_sim_time:=False
-
-Begin navigating: 지정된 좌표로 자율주행 시작 (정상)
-Message Filter dropping message: 센서 데이터(라이다)가 시간 차이로 인해 무시됨
-Failed to make progress: 로봇이 물리적으로 움직이지 못해 목표 도달 실패
-Aborting handle: 현재 주행 명령 강제 중단
-Running backup: 장애물 회피를 위한 비상 후진 시도
-Exceeded time allowance: 정해진 시간 내에 이동 실패
-Reached the goal!: 목적지 도착 성공 (정상)
-Goal succeeded: 전체 작업 완료 (정상)
-```
-
----
-
-#### 3. Map Server 실행 로그
-
-```text
-ros2 run nav2_map_server map_server --ros-args -p yaml_filename:=...
-
-Waiting on external lifecycle transitions: 노드가 켜졌고, 활성화 명령을 기다림
-resolution / origin / mode: 지도의 해상도, 원점 좌표, 표현 방식설정값 확인
-Loading image_file / Read map: 실제 지도 이미지(.pgm)를 메모리에 로드 완료
-Activating: 지도를 다른 노드들이 볼 수 있도록 발행 시작 (정상)
-Creating bond: 관리자 노드(Lifecycle Manager)와 연결 유지
-```
-
----
-
-#### 4. AMCL 실행 로그
-
-```text
-ros2 run nav2_amcl amcl --ros-args -p use_sim_time:=False
-Couldn't determine robot's pose: 라이다 데이터와 지도가 맞지 위치 찾지 못함
-Message Filter dropping message: 센서 데이터가 늦게 도착해 버려짐
-consecutive laser scan transforms failed: 라이다와 로봇 사이의 좌표 계산 실패
-Lookup would require extrapolation into the future: 데이터 전송 지연
-```
----
-
 ## 5. 배터리 관리 및 충전
 
 * 24V 이하 → 충전 필요 ⚡️
@@ -381,11 +306,6 @@ Lookup would require extrapolation into the future: 데이터 전송 지연
 ### 충전기: NOCO Genius10
 
 #### 기본 충전 (12V AGM)
-
-1. 로봇 전원 OFF
-2. 충전기 연결
-3. MODE → 12V AGM
-4. LED 상태 확인
 
 #### SUPPLY 모드
 
@@ -396,40 +316,6 @@ Lookup would require extrapolation into the future: 데이터 전송 지연
 
 * 배터리 복구용
 * Hello Robot 안내 없이 사용 금지
-
-### 충전 시간
-
-| 상태           | 예상 시간  |
-| ------------ | ------ |
-| 완전 방전 → 100% | 6~8시간  |
-| 절반 이하 → 100% | 3~4시간  |
-| 유지 충전        | 무제한 가능 |
-
----
-
-## 6. 로봇 전원 관리
-
-### 종료 절차
-
-```bash
-cd ~/ament_ws/src/stretch_web_teleop
-./stop_interface.sh
-pkill -f ros2
-sudo shutdown now
-```
-
-→ 팬 정지 후 전원 버튼 OFF
-
-### 전원 켜기
-
-1. 본체 전원 버튼 ON
-2. SSH 접속
-3. 웹 인터페이스 실행
-
-```bash
-cd ~/ament_ws/src/stretch_web_teleop
-./start_interface.sh
-```
 
 
 로봇 크기: 35cm x 35cm (중앙 기준)
