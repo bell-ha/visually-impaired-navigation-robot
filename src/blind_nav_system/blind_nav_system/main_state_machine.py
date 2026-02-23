@@ -1,33 +1,44 @@
 #!/usr/bin/env python3
 """
-main_state_machine.py
+main_state_machine.py (thread-safe, non-blocking)
 
-- 시작: LOCKED (아무것도 안 함)
-- 'o' (TRIG 버튼 or 키보드 o) -> READY
-- READY에서 'a'/'b' -> point_a / point_b로 이동(NAV)
-- NAV에서 'p' (PULL or 키보드 p) -> PAUSED (cancel_goal + 0속도)
-- PAUSED에서 'p' -> RESUME (마지막 목표를 다시 goal 전송)
-- NAV/PAUSED에서 'o' -> ABORT (cancel + 0속도 + 목표삭제) 후 LOCKED로 복귀
-- 도착하면 자동 LOCKED 복귀
+목표
+- 이 파일은 '상태 전이 + 네비게이션 제어'만 담당
+- 버튼/음성/키보드 등 입력은 외부에서 처리하고,
+  여기 제공하는 public 메서드만 호출해서 상태를 바꾼다.
+- autospin=True여도 안전하게 동작하도록:
+  외부 호출은 "명령 큐"에 넣기만 하고,
+  ROS 객체 접근은 executor(spin) 스레드에서만 수행한다.
 
-추가(안정화):
-- 상태전이/네비 제어는 단일 락(self._sm_lock)으로 보호 (세마포어/뮤텍스처럼)
-- 빠른 연타/연속 PULL로 인한 토글 꼬임 방지: 키별 쿨다운 적용 (특히 'p'는 넉넉히)
-- 하드웨어 큐는 한 loop tick에 1개만 처리 (폭주 방지)
+상태
+- LOCKED : 비활성/대기
+- READY  : 목적지 입력/확인 대기
+- NAV    : 이동 중
+- PAUSED : 일시정지(Goal cancel + 정지)
+
+외부 사용 예
+    rclpy.init()
+    sm = GuidanceStateMachine(autospin=True)
+
+    sm.activate()
+    sm.start_navigation("524")
+    sm.pause()
+    sm.resume()
+    sm.abort()
 """
+
+from __future__ import annotations
+
+import time
+import threading
+import queue
+from enum import Enum, auto
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import SingleThreadedExecutor
-
-import threading
-import time
-import sys
-import select
-import termios
-import tty
-import queue
-from enum import Enum, auto
 
 from geometry_msgs.msg import Twist
 from action_msgs.srv import CancelGoal
@@ -36,13 +47,6 @@ from unique_identifier_msgs.msg import UUID
 from builtin_interfaces.msg import Time as BuiltinTime
 
 from navigation_client import NavigationClient
-
-# ====== input_bridge import (설치/실행 위치에 따라 둘 중 하나가 맞을 수 있음) ======
-try:
-    from blind_nav_system.hardware.input_bridge import HardwareKeyBridge
-except Exception:
-    from hardware.input_bridge import HardwareKeyBridge  # fallback
-
 
 # ====== 환경에 맞게 고정 ======
 CMD_VEL_TOPIC = "/stretch/cmd_vel"
@@ -56,284 +60,366 @@ class State(Enum):
     PAUSED = auto()
 
 
-class KeyReader:
-    """Enter 없이 한 글자 입력 받기(리눅스 터미널)."""
-    def __init__(self):
-        self.fd = sys.stdin.fileno()
-        self.old = None
-
-    def __enter__(self):
-        self.old = termios.tcgetattr(self.fd)
-        tty.setcbreak(self.fd)
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self.old is not None:
-            termios.tcsetattr(self.fd, termios.TCSADRAIN, self.old)
-
-    def read_key(self, timeout=0.05) -> str:
-        r, _, _ = select.select([sys.stdin], [], [], timeout)
-        if r:
-            return sys.stdin.read(1)
-        return ""
+TransitionCallback = Callable[[State, State, str], None]
+# (old_state, new_state, reason) -> None
 
 
-class MainManager(Node):
-    def __init__(self, executor: SingleThreadedExecutor, enable_keyboard=True):
-        super().__init__("main_manager")
+@dataclass(frozen=True)
+class _Cmd:
+    name: str
+    arg: Optional[str] = None
 
-        self.executor = executor
+
+class GuidanceStateMachine(Node):
+    """
+    - 외부 호출은 thread-safe: command queue에 enqueue만 함
+    - 내부 처리는 executor thread에서만 수행
+    """
+
+    def __init__(
+        self,
+        executor: Optional[SingleThreadedExecutor] = None,
+        autospin: bool = True,
+        arrival_check_hz: float = 10.0,
+        cmd_process_hz: float = 50.0,
+        stop_publish_hz: float = 10.0,
+    ):
+        super().__init__("guidance_state_machine")
+
+        # --- executor / spin ownership ---
+        self._owns_executor = executor is None
+        self.executor = executor if executor is not None else SingleThreadedExecutor()
         self.executor.add_node(self)
 
-        self.state: State = State.LOCKED
-        self.last_target: str | None = None  # 'a' or 'b'
-        self.nav_node: NavigationClient | None = None
+        self._spin_thread: Optional[threading.Thread] = None
+        if autospin and self._owns_executor:
+            self._spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
+            self._spin_thread.start()
 
+        # --- ROS I/O ---
         self.cmd_pub = self.create_publisher(Twist, CMD_VEL_TOPIC, 10)
         self.cancel_cli = self.create_client(CancelGoal, CANCEL_NAV_TO_POSE_SRV)
 
-        # 입력 큐(하드웨어/키보드 모두 여기로)
-        self.key_q: queue.Queue[str] = queue.Queue()
+        # --- FSM state ---
+        self.state: State = State.LOCKED
+        self.last_target_key: Optional[str] = None
+        self.nav_node: Optional[NavigationClient] = None
 
-        # ====== 안정화(세마포어/뮤텍스 + 쿨다운) ======
-        self._sm_lock = threading.Lock()
-        self._last_key_t = {'o': 0.0, 'p': 0.0, 'a': 0.0, 'b': 0.0}
-        # p는 "당김" 연타에 민감하니 넉넉히(원하면 0.4~1.0 사이에서 조절)
-        self._cooldown = {'o': 0.25, 'p': 0.70, 'a': 0.15, 'b': 0.15}
+        # --- listeners ---
+        self._listeners: list[TransitionCallback] = []
 
-        # 하드웨어 브릿지: TRIG -> 'o', PULL -> 'p'
-        self.hw = None
-        try:
-            self.hw = HardwareKeyBridge(
-                on_o=lambda: self.key_q.put("o"),
-                on_p=lambda: self.key_q.put("p"),
-            )
-            self.hw.start()
-            self.get_logger().info("HardwareKeyBridge started. (TRIG->o, PULL->p)")
-        except Exception as e:
-            self.get_logger().warning(f"HardwareKeyBridge start failed: {e}")
+        # --- command queue (thread-safe) ---
+        self._cmd_q: "queue.SimpleQueue[_Cmd]" = queue.SimpleQueue()
 
-        # 상태별 키 핸들러 매핑
-        self.handlers = {
-            (State.LOCKED, 'o'): self.to_ready,
+        # --- cooldown (executor thread에서만 체크) ---
+        self._last_call_t = {"activate": 0.0, "pause": 0.0, "resume": 0.0, "abort": 0.0, "start": 0.0}
+        self._cooldown = {"activate": 0.20, "pause": 0.40, "resume": 0.40, "abort": 0.20, "start": 0.20}
 
-            (State.READY, 'a'): lambda: self.start_to('a'),
-            (State.READY, 'b'): lambda: self.start_to('b'),
+        # --- non-blocking stop publish control ---
+        self._stop_until: float = 0.0
+        self._stop_msg = Twist()
 
-            (State.NAV, 'p'): self.pause,
-            (State.NAV, 'o'): self.abort_to_locked,
+        # --- start worker state ---
+        self._start_worker_running = False
+        self._start_target_inflight: Optional[str] = None
 
-            (State.PAUSED, 'p'): self.resume,
-            (State.PAUSED, 'o'): self.abort_to_locked,
-        }
+        # --- timers ---
+        self._cmd_timer = self.create_timer(1.0 / max(cmd_process_hz, 1.0), self._process_cmds)
+        self._arrival_timer = self.create_timer(1.0 / max(arrival_check_hz, 1.0), self._tick_arrival)
+        self._stop_timer = self.create_timer(1.0 / max(stop_publish_hz, 1.0), self._tick_stop_publish)
 
-        # ROS spin 백그라운드
-        self.spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
-        self.spin_thread.start()
+        self.get_logger().info("FSM ready. Initial state=LOCKED")
 
-        # 키보드 입력 사용 여부(디버그용)
-        self.enable_keyboard = enable_keyboard and sys.stdin.isatty()
+    # ========= 외부 연동용 API (thread-safe) =========
+    def add_transition_listener(self, cb: TransitionCallback) -> None:
+        self._listeners.append(cb)
 
-    # ---------------- 상태/키 처리 ----------------
-    def on_key(self, key: str):
-        """키 입력(하드웨어/키보드)을 단일 락으로 직렬화 + 쿨다운으로 연타 방지."""
-        key = key.lower()
-        if key not in ('o', 'p', 'a', 'b'):
-            return
+    def activate(self) -> bool:
+        self._cmd_q.put(_Cmd("activate"))
+        return True
 
+    def start_navigation(self, target_key: str) -> bool:
+        if not target_key:
+            return False
+        self._cmd_q.put(_Cmd("start", target_key))
+        return True
+
+    def pause(self) -> bool:
+        self._cmd_q.put(_Cmd("pause"))
+        return True
+
+    def resume(self) -> bool:
+        self._cmd_q.put(_Cmd("resume"))
+        return True
+
+    def abort(self) -> bool:
+        self._cmd_q.put(_Cmd("abort"))
+        return True
+
+    def shutdown(self) -> None:
+        # 외부에서 종료 시 호출
+        self._cmd_q.put(_Cmd("_shutdown"))
+
+    # ========= executor thread에서만 실행되는 내부 로직 =========
+    def _cooldown_ok(self, key: str) -> bool:
         now = time.monotonic()
         cd = self._cooldown.get(key, 0.0)
+        last = self._last_call_t.get(key, 0.0)
+        if now - last < cd:
+            return False
+        self._last_call_t[key] = now
+        return True
 
-        # 1차 쿨다운 컷(락 밖)
-        if now - self._last_key_t.get(key, 0.0) < cd:
+    def _set_state(self, new_state: State, reason: str) -> None:
+        old = self.state
+        self.state = new_state
+
+        for cb in list(self._listeners):
+            try:
+                cb(old, new_state, reason)
+            except Exception as e:
+                self.get_logger().warning(f"transition listener error: {e}")
+
+        self.get_logger().info(f"STATE {old.name} -> {new_state.name} ({reason})")
+
+    def _process_cmds(self) -> None:
+        # 한 tick에 너무 많이 처리하지 않도록 제한(폭주 방지)
+        max_per_tick = 20
+        count = 0
+
+        while count < max_per_tick:
+            try:
+                cmd = self._cmd_q.get_nowait()
+            except Exception:
+                break
+
+            count += 1
+            name, arg = cmd.name, cmd.arg
+
+            if name == "_shutdown":
+                self._handle_shutdown()
+                return
+
+            if name == "activate":
+                self._handle_activate()
+            elif name == "start":
+                self._handle_start(arg)
+            elif name == "pause":
+                self._handle_pause()
+            elif name == "resume":
+                self._handle_resume()
+            elif name == "abort":
+                self._handle_abort()
+            elif name == "_start_done":
+                # arg = "OK:<target>" or "FAIL:<target>"
+                self._handle_start_done(arg)
+            else:
+                self.get_logger().warning(f"Unknown cmd: {name}")
+
+    # ---- handlers ----
+    def _handle_activate(self) -> None:
+        if not self._cooldown_ok("activate"):
+            return
+        if self.state != State.LOCKED:
+            return
+        self._set_state(State.READY, "activate")
+
+    def _handle_start(self, target_key: Optional[str]) -> None:
+        if not target_key:
+            return
+        if not self._cooldown_ok("start"):
+            return
+        if self.state != State.READY:
+            return
+        if self._start_worker_running:
+            # start 연속 호출 방지
             return
 
-        with self._sm_lock:
-            now = time.monotonic()
-            # 2차 쿨다운 컷(락 안)
-            if now - self._last_key_t.get(key, 0.0) < cd:
-                return
-            self._last_key_t[key] = now
-
-            fn = self.handlers.get((self.state, key))
-            if fn:
-                fn()
-
-    def to_ready(self):
-        self.state = State.READY
-        print("\n[READY] a/b 입력 대기 (p는 이동중/일시정지에서만 사용).")
-
-    # ---------------- 도착 처리 ----------------
-    def on_arrived(self):
-        self._destroy_nav_node()
-        self.last_target = None
-        self.state = State.LOCKED
-        print("\n[LOCKED] 도착했습니다. 'o'(TRIG)로 다시 명령을 받습니다.")
-
-    # ---------------- 네비게이션 제어 ----------------
-    def start_to(self, target: str):
-        """target: 'a' or 'b' -> point_a / point_b"""
-        self.last_target = target
-
+        self.last_target_key = target_key
         self._destroy_nav_node()
 
-        key = f"point_{target}"  # point_a / point_b
-        self.nav_node = NavigationClient(key)
+        # nav node 생성 + executor 등록은 executor thread에서
+        self.nav_node = NavigationClient(target_key)
         self.executor.add_node(self.nav_node)
 
-        ok = bool(self.nav_node.start_navigation())
-        if ok:
-            self.state = State.NAV
-            print(f"\n[NAV] {key} 이동 시작! (p=PULL 일시정지, o=TRIG 중단)")
-        else:
-            print("\n[ERROR] start_navigation() 실패. READY로 돌아갑니다.")
-            self._destroy_nav_node()
-            self.state = State.READY
+        # start_navigation()은 내부에서 wait_for_server(최대 5초)로 블로킹 가능
+        # -> executor thread를 막지 않도록 워커 스레드로 수행하고 결과만 큐로 반환
+        self._start_worker_running = True
+        self._start_target_inflight = target_key
 
-    def pause(self):
-        """일시정지: goal 취소 + 0속도. last_target 유지"""
-        self._cancel_all_nav_goals()
-        self._publish_zero(duration_sec=1.0)
-        self.state = State.PAUSED
-        print("\n[PAUSED] p=PULL 재개, o=TRIG 중단(LOCKED 복귀)")
+        threading.Thread(
+            target=self._start_worker,
+            args=(target_key,),
+            daemon=True,
+        ).start()
 
-    def resume(self):
-        """재개: last_target을 다시 goal 전송"""
-        if not self.last_target:
-            print("\n[WARN] 재개할 목표가 없습니다. 'o'(TRIG)로 READY 진입하세요.")
-            self.state = State.LOCKED
+    def _start_worker(self, target_key: str) -> None:
+        ok = False
+        try:
+            # NavigationClient 내부 로직(서비스 wait / action wait) 실행
+            if self.nav_node is not None:
+                ok = bool(self.nav_node.start_navigation())
+        except Exception:
+            ok = False
+
+        # 결과는 큐로 다시 전달 (ROS 상태 변경은 executor thread에서만)
+        self._cmd_q.put(_Cmd("_start_done", f"{'OK' if ok else 'FAIL'}:{target_key}"))
+
+    def _handle_start_done(self, payload: Optional[str]) -> None:
+        self._start_worker_running = False
+        target = None
+        ok = False
+
+        if payload and ":" in payload:
+            head, target = payload.split(":", 1)
+            ok = (head == "OK")
+
+        # inflight가 달라졌으면 무시(중간 abort 등)
+        if self._start_target_inflight and target != self._start_target_inflight:
             return
-        self.start_to(self.last_target)
+        self._start_target_inflight = None
 
-    def abort_to_locked(self):
-        """중단: goal 취소+정지+목표삭제 후 LOCKED로"""
-        self._cancel_all_nav_goals()
-        self._publish_zero(duration_sec=1.0)
+        if self.state != State.READY:
+            # start 도중 다른 상태로 바뀌었으면 정리
+            if not ok:
+                self._destroy_nav_node()
+            return
 
-        self.last_target = None
+        if ok:
+            self._set_state(State.NAV, f"start:{target}")
+        else:
+            self.get_logger().warning("start_navigation() failed; stay READY")
+            self._destroy_nav_node()
+            self._set_state(State.READY, "start_failed")
+
+    def _handle_pause(self) -> None:
+        if not self._cooldown_ok("pause"):
+            return
+        if self.state != State.NAV:
+            return
+
+        self._set_state(State.PAUSED, "pause")
+        self._request_stop(duration_sec=1.0)
+        self._cancel_all_nav_goals_async()
+
+    def _handle_resume(self) -> None:
+        if not self._cooldown_ok("resume"):
+            return
+        if self.state != State.PAUSED:
+            return
+        if not self.last_target_key:
+            self._set_state(State.LOCKED, "resume_no_target")
+            return
+
+        # READY를 거쳐 start 처리(명령 큐로 넣으면 동일 스레드에서 순서대로 실행됨)
+        target = self.last_target_key
+        self._set_state(State.READY, "resume_prepare")
+        self._cmd_q.put(_Cmd("start", target))
+
+    def _handle_abort(self) -> None:
+        if not self._cooldown_ok("abort"):
+            return
+        if self.state == State.LOCKED:
+            return
+
+        self.last_target_key = None
+        self._set_state(State.LOCKED, "abort")
+        self._request_stop(duration_sec=1.0)
+        self._cancel_all_nav_goals_async()
         self._destroy_nav_node()
 
-        self.state = State.LOCKED
-        print("\n[LOCKED] 중단 완료. 'o'(TRIG)로 다시 명령을 받습니다.")
+    def _handle_shutdown(self) -> None:
+        # 안전 종료
+        try:
+            self._request_stop(duration_sec=1.0)
+            self._cancel_all_nav_goals_async()
+            self._destroy_nav_node()
+        except Exception:
+            pass
+        try:
+            self.destroy_timer(self._cmd_timer)
+            self.destroy_timer(self._arrival_timer)
+            self.destroy_timer(self._stop_timer)
+        except Exception:
+            pass
 
-    # ---------------- 저수준 유틸 ----------------
-    def _publish_zero(self, duration_sec: float = 1.0, rate_hz: float = 10.0):
-        msg = Twist()
-        period = 1.0 / rate_hz
-        end_t = time.time() + duration_sec
-        while rclpy.ok() and time.time() < end_t:
-            self.cmd_pub.publish(msg)
-            time.sleep(period)
+    # ---- arrival & stop ----
+    def _tick_arrival(self) -> None:
+        if self.state != State.NAV or self.nav_node is None:
+            return
+        if getattr(self.nav_node, "is_arrived", False):
+            self._destroy_nav_node()
+            self.last_target_key = None
+            self._set_state(State.LOCKED, "arrived")
 
-    def _cancel_all_nav_goals(self, timeout_sec: float = 1.0) -> bool:
-        """RViz에서 보낸 goal까지 포함해서 NavigateToPose goal 전부 취소"""
+    def _request_stop(self, duration_sec: float) -> None:
+        until = time.time() + max(duration_sec, 0.0)
+        self._stop_until = max(self._stop_until, until)
+
+    def _tick_stop_publish(self) -> None:
+        if time.time() < self._stop_until:
+            self.cmd_pub.publish(self._stop_msg)
+
+    # ---- cancel & cleanup (non-blocking) ----
+    def _cancel_all_nav_goals_async(self) -> None:
         if not self.cancel_cli.service_is_ready():
-            if not self.cancel_cli.wait_for_service(timeout_sec=0.5):
-                self.get_logger().warning(f"Cancel service not ready: {CANCEL_NAV_TO_POSE_SRV}")
-                return False
+            # 서비스 없으면 그냥 넘어감(로그만)
+            self.get_logger().warning(f"Cancel service not ready: {CANCEL_NAV_TO_POSE_SRV}")
+            return
 
         req = CancelGoal.Request()
         req.goal_info = GoalInfo()
-        req.goal_info.goal_id = UUID(uuid=[0] * 16)            # match-all
-        req.goal_info.stamp = BuiltinTime(sec=0, nanosec=0)    # match-all
+        req.goal_info.goal_id = UUID(uuid=[0] * 16)         # match-all
+        req.goal_info.stamp = BuiltinTime(sec=0, nanosec=0) # match-all
 
         fut = self.cancel_cli.call_async(req)
-        deadline = time.time() + timeout_sec
-        while rclpy.ok() and (not fut.done()) and time.time() < deadline:
-            time.sleep(0.01)
 
-        if not fut.done():
-            self.get_logger().warning("CancelGoal request timed out.")
-            return False
-
-        res = fut.result()
-        return (res.return_code == 0)
-
-    def _destroy_nav_node(self):
-        if self.nav_node:
+        def _done(_f):
             try:
-                self.nav_node.cleanup()
-            except Exception:
-                pass
-            try:
-                self.executor.remove_node(self.nav_node)
-            except Exception:
-                pass
-            try:
-                self.nav_node.destroy_node()
-            except Exception:
-                pass
-            self.nav_node = None
+                res = _f.result()
+                if res and res.return_code != 0:
+                    self.get_logger().warning(f"CancelGoal return_code={res.return_code}")
+            except Exception as e:
+                self.get_logger().warning(f"CancelGoal error: {e}")
 
-    def shutdown(self):
-        self._destroy_nav_node()
+        fut.add_done_callback(_done)
+
+    def _destroy_nav_node(self) -> None:
+        if not self.nav_node:
+            return
         try:
-            if self.hw:
-                self.hw.stop()
+            self.nav_node.cleanup()
         except Exception:
             pass
+        try:
+            self.executor.remove_node(self.nav_node)
+        except Exception:
+            pass
+        try:
+            self.nav_node.destroy_node()
+        except Exception:
+            pass
+        self.nav_node = None
 
 
 def main():
     rclpy.init()
-    exec_obj = SingleThreadedExecutor()
-    manager = MainManager(exec_obj, enable_keyboard=True)
+    sm = GuidanceStateMachine(autospin=True)
 
-    print("\n=== INPUT MAP ===")
-    print("TRIG(버튼) or 키보드 o : LOCKED->READY, (NAV/PAUSED)->중단 후 LOCKED")
-    print("키보드 a/b           : READY에서 point_a / point_b 이동")
-    print("PULL(당김) or 키보드 p: NAV<->PAUSED 토글(일시정지/재개)")
-    print("q                    : 종료(키보드 사용 시)")
-    print("=================")
-    print("\n[LOCKED] 시작 상태. TRIG(또는 o)를 누르면 READY.")
+    def _print(old: State, new: State, reason: str):
+        print(f"[FSM] {old.name} -> {new.name} ({reason})")
 
-    use_keyboard = manager.enable_keyboard
-    kr = KeyReader() if use_keyboard else None
+    sm.add_transition_listener(_print)
 
     try:
-        if use_keyboard:
-            kr.__enter__()
-
+        print("FSM running. (No input in this module)\n")
         while rclpy.ok():
-            # 1) 하드웨어 키 처리(큐) - 한 tick에 1개만 처리(폭주 방지)
-            try:
-                hk = manager.key_q.get_nowait()
-            except queue.Empty:
-                hk = None
-            if hk:
-                manager.on_key(hk)
-
-            # 2) 키보드 키 처리(있으면)
-            if use_keyboard:
-                k = kr.read_key(timeout=0.01)
-                if k:
-                    k = k.lower()
-                    if k == 'q':
-                        break
-                    manager.on_key(k)
-
-            # 3) 도착하면 LOCKED로 자동 복귀
-            if manager.state == State.NAV and manager.nav_node:
-                if getattr(manager.nav_node, "is_arrived", False):
-                    # 도착 처리도 상태락으로 보호(간헐적 레이스 방지)
-                    with manager._sm_lock:
-                        if manager.state == State.NAV and manager.nav_node and getattr(manager.nav_node, "is_arrived", False):
-                            manager.on_arrived()
-
-            time.sleep(0.02)
-
+            time.sleep(0.2)
     except KeyboardInterrupt:
         pass
     finally:
-        try:
-            if use_keyboard and kr:
-                kr.__exit__(None, None, None)
-        except Exception:
-            pass
-
-        manager.shutdown()
+        sm.shutdown()
         rclpy.shutdown()
-        print("\n[EXIT]")
 
 
 if __name__ == "__main__":
