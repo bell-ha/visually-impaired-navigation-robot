@@ -6,60 +6,72 @@
   <arg name="params_file" default="/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params.yaml"/>
   <arg name="map" default="/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/test1_map.yaml"/>
 
-  <!-- lifecycle 명령이 너무 빨리 실행되면 실패할 수 있어서 딜레이를 둠 -->
-  <arg name="map_lifecycle_delay" default="5"/>
-  <arg name="amcl_lifecycle_delay" default="5"/>
+  <!-- Nav2(네비게이션 파트) 시작을 localization보다 살짝 늦춰서 TF/맵 준비 레이스를 줄임 -->
+  <arg name="nav_start_delay" default="5.0"/>
+  <arg name="nav_autostart" default="true"/>
 
-  <!-- ====== 1단계: 기본 노드 실행 ====== -->
-
-  <!-- 1) stretch driver (mode:=navigation, broadcast_odom_tf:=True) -->
+  <!-- ====== 1) Robot driver ====== -->
   <include file="$(find-pkg-share stretch_core)/launch/stretch_driver.launch.py">
     <arg name="mode" value="navigation"/>
     <arg name="broadcast_odom_tf" value="True"/>
   </include>
 
-  <!-- 2) rplidar -->
+  <!-- ====== 2) LiDAR (너가 쓰던 rplidar_ros) ====== -->
   <node pkg="rplidar_ros" exec="rplidar_composition" name="rplidar" output="screen">
     <param name="serial_port" value="/dev/hello-lrf"/>
     <param name="serial_baudrate" value="115200"/>
     <param name="frame_id" value="laser"/>
   </node>
 
-  <!-- 3) safety zone static TF -->
+  <!-- ====== 3) safety zone static TF ====== -->
   <node pkg="tf2_ros" exec="static_transform_publisher" name="safety_zone_left_back_tf" output="screen"
         args="--x -0.72 --y 0.72 --z 0.1 --yaw 0 --pitch 0 --roll 0 --frame-id base_link --child-frame-id safety_zone_left_back" />
 
-  <!-- ====== 2단계: Navigation + 지도 서버 ====== -->
-
+  <!-- ====== cmd_vel remap (teleop / nav2 모두 stretch cmd_vel로) ====== -->
   <set_remap from="cmd_vel" to="/stretch/cmd_vel"/>
   <set_remap from="/cmd_vel" to="/stretch/cmd_vel"/>
 
-  <include file="$(find-pkg-share stretch_nav2)/launch/navigation_launch.py">
-    <arg name="use_sim_time" value="$(var use_sim_time)"/>
-    <arg name="params_file" value="$(var params_file)"/>
-  </include>
-
-
-
-  <!-- 5) map_server -->
+  <!-- ====== 4) Localization: map_server + amcl ====== -->
   <node pkg="nav2_map_server" exec="map_server" name="map_server" output="screen">
+    <!-- nav2_params.yaml 전체 로드 -->
+    <param from="$(var params_file)"/>
+    <!-- map 경로/시간은 런치에서 확정으로 덮어씀 -->
     <param name="yaml_filename" value="$(var map)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
+
+    <!-- namespace 대응용(루트에서는 영향 거의 없음) -->
+    <remap from="/tf" to="tf"/>
+    <remap from="/tf_static" to="tf_static"/>
   </node>
 
-  <!-- 6) map_server lifecycle (configure -> activate) -->
-  <executable shell="true" output="screen"
-              cmd="sleep $(var map_lifecycle_delay); ros2 lifecycle set /map_server configure; ros2 lifecycle set /map_server activate" />
-
-  <!-- ====== 3단계: AMCL 실행 ====== -->
-
-  <!-- 7) amcl -->
   <node pkg="nav2_amcl" exec="amcl" name="amcl" output="screen">
+    <param from="$(var params_file)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
+
+    <remap from="/tf" to="tf"/>
+    <remap from="/tf_static" to="tf_static"/>
   </node>
 
-  <!-- 8) amcl lifecycle (configure -> activate) -->
-  <executable shell="true" output="screen"
-              cmd="sleep $(var amcl_lifecycle_delay); ros2 lifecycle set /amcl configure; ros2 lifecycle set /amcl activate" />
+  <!-- localization lifecycle manager: shell sleep/ros2 lifecycle set 제거 -->
+  <node pkg="nav2_lifecycle_manager" exec="lifecycle_manager"
+        name="lifecycle_manager_localization" output="screen">
+    <param name="use_sim_time" value="$(var use_sim_time)"/>
+    <param name="autostart" value="true"/>
+    <!-- 맵 로딩/시작 느릴 때 대비 -->
+    <param name="bond_timeout" value="10.0"/>
+    <param name="node_names" value="['map_server', 'amcl']"/>
+  </node>
+
+  <!-- ====== 5) Navigation (controller/planner/bt/waypoint + lifecycle_manager_navigation) ======
+       stretch_nav2/launch/navigation_launch.py 는 "네비게이션 파트만" 올림 (localization은 위에서 처리)
+  -->
+  <timer period="$(var nav_start_delay)">
+    <include file="$(find-pkg-share stretch_nav2)/launch/navigation_launch.py">
+      <arg name="namespace" value=""/>
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="autostart" value="$(var nav_autostart)"/>
+      <arg name="params_file" value="$(var params_file)"/>
+    </include>
+  </timer>
 
 </launch>
