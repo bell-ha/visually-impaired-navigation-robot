@@ -1,1367 +1,1338 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Hello Robot – Interface v3
+최종 기능 명세서 v3 기준 구현.
+ROS 없이 테스트 가능: 이동은 20초 타이머로 시뮬레이션.
+"""
 from __future__ import annotations
 
-import os
-os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
-
-import sys
-import time
-import json
-import queue
 import argparse
+import ctypes
+import ctypes.util
+import json
+import math
+import os
+import queue
+import re
+import signal
+import struct
+import sys
+import tempfile
 import threading
-import urllib.request
+import time
 import urllib.error
-from dataclasses import dataclass
+import urllib.request
+import wave
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple, Callable
-import importlib.util
-import re
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import speech_recognition as sr
 
+try:
+    import serial as _serial_mod
+    _SERIAL_OK = True
+except ImportError:
+    _SERIAL_OK = False
 
+# ──────────────────────────────────────────────
+# 경로 기본값
+# ──────────────────────────────────────────────
 THIS_DIR = Path(__file__).resolve().parent
 DEFAULT_LOCATIONS = (THIS_DIR / "../config/location.yaml").resolve()
-DEFAULT_ENV_FILE = (THIS_DIR / "../../.env").resolve()
+DEFAULT_ENV_FILE  = (THIS_DIR / "../../.env").resolve()
+
+# ──────────────────────────────────────────────
+# 숫자 파라미터 (명세서 §6)
+# ──────────────────────────────────────────────
+BUTTON_GUARD_SEC            = 0.8
+PULL_GUARD_SEC              = 1.0
+
+LISTEN_OPEN_DELAY_SEC       = 0.35
+LISTEN_TIMEOUT_SEC          = 10.0
+LISTEN_PHRASE_TIME_LIMIT_SEC= 10.0
+LISTEN_PAUSE_THRESHOLD_SEC  = 0.8
+DEDUP_WINDOW_SEC            = 2.2
+
+NO_RESPONSE_SESSION_SEC     = 10.0
+NO_RESPONSE_MAX_SESSIONS    = 3
+REMINDER_MAX_COUNT          = 2
+
+READY_RETRY_MAX             = 3
+PAUSED_RETRY_MAX            = 3
+CONFIRM_TIMEOUT_SEC         = 30.0
+
+START_LISTEN_BEEP_HZ        = 1350
+START_LISTEN_BEEP_MS        = 110
+END_LISTEN_BEEP_HZ          = 900
+END_LISTEN_BEEP_MS          = 90
+
+NAV_STOP_PUBLISH_SEC        = 1.0   # 시뮬레이션에서는 참고용
+NAV_SIM_DURATION_SEC        = 20.0  # 로봇 없을 때 자동 도착 타이머
+
+TTS_MAX_CHARS               = 120
+
+# ──────────────────────────────────────────────
+# 고정 TTS 문구 (명세서 §13)
+# ──────────────────────────────────────────────
+MSG = {
+    1:  "버튼이 눌렸습니다. 어디로 가실 건가요?",
+    2:  "목적지를 다시 짧게 말씀해 주세요.",
+    3:  "현재 갈 수 있는 장소가 아닙니다. 다시 말씀해 주세요.",
+    # 4: 복수 후보 – 동적 생성
+    # 5: 단일 후보 확인 – 동적 생성
+    6:  "확인했습니다. 출발하려면 버튼을 눌러주세요.",
+    7:  "알겠습니다. 목적지를 다시 말씀해 주세요.",
+    8:  "일시정지되었습니다. 문제가 있으신가요?",
+    9:  "다시 원래 목적지로 이동할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요.",
+    10: "안내를 종료할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요.",
+    11: "목적지를 변경할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요.",
+    # 12: 새 목적지 변경 확인 – 동적 생성
+    13: "어디로 변경할까요? 목적지를 말씀해 주세요.",
+    14: "안내를 시작하지 못했습니다. 다시 시도해 주세요.",
+    15: "안내를 계속할 수 없어 중지했습니다. 필요하면 버튼을 눌러 다시 시작해 주세요.",
+    16: "목적지에 도착했습니다.",
+    17: "응답이 없어 안내를 종료합니다.",
+    18: "안내를 종료합니다. 필요하면 버튼을 눌러 다시 시작해 주세요.",
+    19: "말씀해 주세요.",          # 리마인드 1
+    20: "필요하시면 말씀해 주세요.", # 리마인드 2
+    21: "종료, 변경, 다시 이동 중 하나로 말씀해 주세요.",
+    22: "알겠습니다. 원하시는 내용을 말씀해 주세요.",
+    23: "확인했습니다. 진행하려면 버튼을 눌러주세요.",
+}
+
+def msg4(candidates: List[str]) -> str:
+    return "후보가 여러 개 있습니다. " + ", ".join(candidates[:3]) + " 중 어디로 가실까요?"
+
+def msg5(dest: str) -> str:
+    return f"{dest}로 이동할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
+
+def msg12(dest: str) -> str:
+    return f"{dest}로 목적지를 변경할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
 
 
-# =========================
-# YAML
-# =========================
-def load_locations_yaml_simple(path: Path) -> Dict[str, Dict[str, float]]:
+# ══════════════════════════════════════════════
+# ALSA 오류 억제
+# ══════════════════════════════════════════════
+def _suppress_alsa() -> None:
+    try:
+        asound = ctypes.cdll.LoadLibrary(ctypes.util.find_library("asound") or "")
+        HANDLER = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int,
+                                   ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
+        _h = HANDLER(lambda *_: None)
+        asound.snd_lib_error_set_handler(_h)
+        _suppress_alsa._ref = _h
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════
+# YAML 파서
+# ══════════════════════════════════════════════
+def load_locations(path: Path) -> Dict[str, Dict[str, float]]:
     locs: Dict[str, Dict[str, float]] = {}
     if not path.exists():
         return locs
-
-    cur = None
-    in_locations = False
-    key_re = re.compile(r"^\s{2}([^:#]+)\s*:\s*$")
-    val_re = re.compile(r"^\s{4}(x|y|w)\s*:\s*([-\d.eE]+)\s*$")
-    loc_re = re.compile(r"^\s*locations\s*:\s*$")
-
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            if not in_locations:
-                if loc_re.match(line):
-                    in_locations = True
-                continue
-
-            mk = key_re.match(line)
-            if mk:
-                cur = mk.group(1).strip()
-                locs[cur] = {}
-                continue
-
-            mv = val_re.match(line)
-            if mv and cur:
-                k = mv.group(1)
-                v = float(mv.group(2))
-                locs[cur][k] = v
-
-    out: Dict[str, Dict[str, float]] = {}
-    for k, v in locs.items():
-        if all(t in v for t in ("x", "y", "w")):
-            out[k] = {"x": v["x"], "y": v["y"], "w": v["w"]}
-    return out
-
-
-# =========================
-# env
-# =========================
-def read_env_openai_key(env_path: Path) -> str:
-    if not env_path.exists():
-        return ""
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
+    in_loc = False
+    cur: Optional[str] = None
+    key_re = re.compile(r"^\s{2}([^:#\s][^:#]*)\s*:\s*$")
+    val_re = re.compile(r"^\s{4}(x|y|w)\s*:\s*([-\d.eE]+)")
+    for line in path.read_text("utf-8").splitlines():
+        if not in_loc:
+            if re.match(r"^\s*locations\s*:\s*$", line):
+                in_loc = True
             continue
-        if s.startswith("OPENAI_API_KEY="):
-            return s.split("=", 1)[1].strip().strip('"').strip("'")
-    return ""
+        m = key_re.match(line)
+        if m:
+            cur = m.group(1).strip(); locs.setdefault(cur, {}); continue
+        m = val_re.match(line)
+        if m and cur:
+            locs[cur][m.group(1)] = float(m.group(2))
+    return {k: v for k, v in locs.items() if all(t in v for t in ("x","y","w"))}
 
 
+# ══════════════════════════════════════════════
+# .env
+# ══════════════════════════════════════════════
 def load_openai_key(env_path: Path) -> str:
     k = os.environ.get("OPENAI_API_KEY", "").strip()
     if k:
         return k
-    return read_env_openai_key(env_path)
+    if env_path.exists():
+        for line in env_path.read_text("utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("OPENAI_API_KEY="):
+                return s.split("=", 1)[1].strip().strip('"\'')
+    return ""
 
 
-# =========================
-# Audio gate
-# =========================
-class AudioGate:
-    """
-    TTS/삑음/안내음 재생 중 또는 끝난 직후 마이크를 잠깐 막는 게이트.
-    """
-    def __init__(self, post_audio_cooldown_sec: float = 0.7):
-        self.post_audio_cooldown_sec = float(post_audio_cooldown_sec)
-        self._lock = threading.Lock()
-        self._blocked_until = 0.0
-
-    def block_for(self, sec: float) -> None:
-        with self._lock:
-            self._blocked_until = max(self._blocked_until, time.time() + max(0.0, sec))
-
-    def block_audio(self, playback_sec: float) -> None:
-        self.block_for(playback_sec + self.post_audio_cooldown_sec)
-
-    def is_open(self) -> bool:
-        with self._lock:
-            return time.time() >= self._blocked_until
-
-    def seconds_left(self) -> float:
-        with self._lock:
-            return max(0.0, self._blocked_until - time.time())
-
-
-# =========================
-# Beep
-# =========================
-class Beeper:
-    """
-    콘솔벨('\a') + 가능하면 pygame tone 파일 재생.
-    """
-    def __init__(self, audio_gate: Optional[AudioGate] = None, debug: bool = False):
-        self.audio_gate = audio_gate
+# ══════════════════════════════════════════════
+# TTS  (gTTS + pygame, 동기)
+# ══════════════════════════════════════════════
+class TTS:
+    def __init__(self, debug: bool = False, enabled: bool = True):
         self.debug = debug
+        self.enabled = enabled
+        self._lock = threading.Lock()
         self._ok = False
-        self._pygame = None
-        self._tmpdir = None
-        self._cache: Dict[Tuple[int, int], str] = {}
-
-        try:
-            import pygame
-            import wave
-            import math
-            import struct
-            import tempfile
-            self._pygame = pygame
-            self._wave = wave
-            self._math = math
-            self._struct = struct
-            self._tempfile = tempfile
-            self._ok = True
+        if enabled:
             try:
+                import pygame
+                from gtts import gTTS as _gTTS
+                self._pygame = pygame
+                self._gTTS = _gTTS
                 pygame.mixer.init()
-            except Exception:
-                self._ok = False
-        except Exception as e:
-            self._ok = False
-            if self.debug:
-                print(f"[DEBUG][BEEP] disabled: {e}", file=sys.stderr)
+                self._ok = True
+            except Exception as e:
+                if debug:
+                    print(f"[TTS] init failed: {e}", file=sys.stderr)
 
-    def _wav_path(self, freq_hz: int, duration_ms: int) -> Optional[str]:
+    def say(self, text: str) -> None:
+        t = (text or "").strip()[:TTS_MAX_CHARS]
+        if not t:
+            return
+        print(f"[ROBOT] {t}")
         if not self._ok:
-            return None
-        key = (freq_hz, duration_ms)
+            return
+        with self._lock:
+            try:
+                import tempfile, os
+                fd, path = tempfile.mkstemp(suffix=".mp3")
+                os.close(fd)
+                self._gTTS(text=t, lang="ko").save(path)
+                self._pygame.mixer.music.load(path)
+                self._pygame.mixer.music.play()
+                while self._pygame.mixer.music.get_busy():
+                    time.sleep(0.02)
+                self._pygame.mixer.music.unload()
+                os.remove(path)
+            except Exception as e:
+                if self.debug:
+                    print(f"[TTS] say error: {e}", file=sys.stderr)
+
+
+# ══════════════════════════════════════════════
+# Beeper (wav 생성 후 pygame 재생)
+# ══════════════════════════════════════════════
+class Beeper:
+    def __init__(self, debug: bool = False, enabled: bool = True):
+        self.debug = debug
+        self.enabled = enabled
+        self._ok = False
+        self._cache: Dict[Tuple[int,int], str] = {}
+        self._tmpdir = tempfile.mkdtemp(prefix="beep_")
+        if enabled:
+            try:
+                import pygame
+                self._pygame = pygame
+                pygame.mixer.init()
+                self._ok = True
+            except Exception as e:
+                if debug:
+                    print(f"[BEEP] init failed: {e}", file=sys.stderr)
+
+    def _make_wav(self, hz: int, ms: int) -> str:
+        key = (hz, ms)
         if key in self._cache:
             return self._cache[key]
+        path = os.path.join(self._tmpdir, f"beep_{hz}_{ms}.wav")
+        n = int(44100 * ms / 1000)
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(44100)
+            data = bytearray()
+            for i in range(n):
+                s = int(12000 * math.sin(2 * math.pi * hz * i / 44100))
+                data.extend(struct.pack("<h", s))
+            wf.writeframes(bytes(data))
+        self._cache[key] = path
+        return path
 
-        try:
-            if self._tmpdir is None:
-                self._tmpdir = self._tempfile.mkdtemp(prefix="beep_cache_")
-            path = os.path.join(self._tmpdir, f"beep_{freq_hz}_{duration_ms}.wav")
-            framerate = 44100
-            amplitude = 12000
-            nframes = int(framerate * (duration_ms / 1000.0))
-
-            with self._wave.open(path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(framerate)
-                frames = bytearray()
-                for i in range(nframes):
-                    t = i / framerate
-                    sample = int(amplitude * self._math.sin(2.0 * self._math.pi * freq_hz * t))
-                    frames.extend(self._struct.pack("<h", sample))
-                wf.writeframes(bytes(frames))
-
-            self._cache[key] = path
-            return path
-        except Exception as e:
-            if self.debug:
-                print(f"[DEBUG][BEEP] wav gen error: {e}", file=sys.stderr)
-            return None
-
-    def beep(self, freq_hz: int = 1200, duration_ms: int = 120) -> None:
-        sec = duration_ms / 1000.0
-        if self.audio_gate:
-            self.audio_gate.block_audio(sec)
-
-        # 콘솔벨
+    def beep(self, hz: int, ms: int) -> None:
         try:
             print("\a", end="", flush=True)
         except Exception:
             pass
-
         if not self._ok:
             return
-
         try:
-            path = self._wav_path(freq_hz, duration_ms)
-            if path is None:
-                return
+            path = self._make_wav(hz, ms)
             self._pygame.mixer.music.load(path)
             self._pygame.mixer.music.play()
             while self._pygame.mixer.music.get_busy():
-                time.sleep(0.01)
+                time.sleep(0.005)
             self._pygame.mixer.music.unload()
         except Exception as e:
             if self.debug:
-                print(f"[DEBUG][BEEP] play error: {e}", file=sys.stderr)
+                print(f"[BEEP] error: {e}", file=sys.stderr)
 
-    def start_listen_beep(self) -> None:
-        self.beep(freq_hz=1350, duration_ms=110)
+    def start(self) -> None:
+        self.beep(START_LISTEN_BEEP_HZ, START_LISTEN_BEEP_MS)
 
-    def end_listen_beep(self) -> None:
-        self.beep(freq_hz=900, duration_ms=90)
-
-
-# =========================
-# TTS
-# =========================
-class GttsTTS:
-    def __init__(self, lang: str = "ko", debug: bool = False, audio_gate: Optional[AudioGate] = None):
-        self.lang = lang
-        self.debug = debug
-        self.audio_gate = audio_gate
-        self._q: "queue.Queue[str]" = queue.Queue()
-        self._stop = threading.Event()
-        self._ok = False
-
-        try:
-            from gtts import gTTS  # noqa
-            import pygame  # noqa
-            self._ok = True
-        except Exception as e:
-            self._ok = False
-            if self.debug:
-                print(f"[DEBUG][TTS] disabled: {e}", file=sys.stderr)
-
-        self._th = threading.Thread(target=self._worker, daemon=True)
-        if self._ok:
-            self._th.start()
-
-    @staticmethod
-    def estimate_duration_sec(text: str) -> float:
-        chars = len((text or "").strip())
-        return min(9.0, max(1.2, 0.085 * chars + 0.9))
-
-    def say(self, text: str) -> float:
-        if not self._ok:
-            return 0.0
-        t = (text or "").strip()
-        if not t:
-            return 0.0
-        if len(t) > 260:
-            t = t[:260] + "…"
-
-        estimated = self.estimate_duration_sec(t)
-        if self.audio_gate:
-            self.audio_gate.block_audio(estimated)
-
-        self._q.put(t)
-        return estimated
-
-    def stop(self) -> None:
-        self._stop.set()
-        try:
-            self._q.put_nowait("")
-        except Exception:
-            pass
-
-    def _worker(self) -> None:
-        try:
-            from gtts import gTTS
-            import pygame
-        except Exception:
-            return
-
-        try:
-            pygame.mixer.init()
-        except Exception as e:
-            if self.debug:
-                print(f"[DEBUG][TTS] pygame init failed: {e}", file=sys.stderr)
-            return
-
-        import tempfile
-
-        while not self._stop.is_set():
-            try:
-                text = self._q.get(timeout=0.2)
-            except Exception:
-                continue
-            if self._stop.is_set():
-                break
-            if not text:
-                continue
-
-            path = None
-            try:
-                fd, path = tempfile.mkstemp(prefix="gtts_", suffix=".mp3")
-                os.close(fd)
-                gTTS(text=text, lang=self.lang, slow=False).save(path)
-
-                pygame.mixer.music.load(path)
-                pygame.mixer.music.play()
-                while pygame.mixer.music.get_busy() and (not self._stop.is_set()):
-                    time.sleep(0.03)
-                pygame.mixer.music.unload()
-            except Exception as e:
-                if self.debug:
-                    print(f"[DEBUG][TTS] speak error: {e}", file=sys.stderr)
-            finally:
-                if path:
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
+    def end(self) -> None:
+        self.beep(END_LISTEN_BEEP_HZ, END_LISTEN_BEEP_MS)
 
 
-# =========================
-# Hardware bridge
-# =========================
-def _load_hardware_key_bridge(debug: bool = False):
-    candidates = [
-        (THIS_DIR / "hardware/input_bridge.py").resolve(),
-        (THIS_DIR / "../hardware/input_bridge.py").resolve(),
-        (THIS_DIR / "../../hardware/input_bridge.py").resolve(),
-    ]
-    found = None
-    for p in candidates:
-        if p.exists():
-            found = p
-            break
-    if found is None:
-        return None
+# ══════════════════════════════════════════════
+# AudioGate – TTS/beep 중 마이크 차단
+# ══════════════════════════════════════════════
+class AudioGate:
+    def __init__(self) -> None:
+        self._until = 0.0
+        self._lock  = threading.Lock()
 
-    spec = importlib.util.spec_from_file_location("input_bridge_local", str(found))
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # type: ignore
-    if not hasattr(module, "HardwareKeyBridge"):
-        return None
-    if debug:
-        print(f"[INFO] Loaded HardwareKeyBridge from: {found}", file=sys.stderr)
-    return module.HardwareKeyBridge
+    def block(self, sec: float) -> None:
+        with self._lock:
+            self._until = max(self._until, time.time() + sec)
+
+    def is_open(self) -> bool:
+        with self._lock:
+            return time.time() >= self._until
 
 
-# =========================
-# OpenAI Responses API
-# =========================
-def _extract_output_text(resp_json: dict) -> str:
-    out = resp_json.get("output", [])
-    for item in out:
-        if item.get("type") == "message" and item.get("role") == "assistant":
-            for c in item.get("content", []):
-                if c.get("type") == "output_text":
-                    return c.get("text", "")
-    return ""
+# ══════════════════════════════════════════════
+# 상태 / 국면 / 이벤트 정의
+# ══════════════════════════════════════════════
+class State(Enum):
+    LOCKED  = auto()
+    READY   = auto()
+    NAV     = auto()
+    PAUSED  = auto()
+
+class Phase(Enum):
+    # READY
+    READY_DEST_INPUT   = auto()
+    READY_DISAMBIGUATE = auto()
+    READY_CONFIRM      = auto()
+    # PAUSED
+    PAUSED_INTENT_INPUT = auto()
+    PAUSED_CONFIRM      = auto()
+    # NAV / LOCKED (phase 불필요하나 타입 완성용)
+    NONE = auto()
+
+@dataclass
+class PendingConfirm:
+    action:      str             # start|resume|abort|change_ready|change_start
+    destination: Optional[str]
+    deadline:    float
+
+@dataclass
+class Event:
+    kind: str                    # button|pull|text|stt_empty|stt_timeout
+    text: Optional[str] = None
+    ts:   float = field(default_factory=time.time)
 
 
+# ══════════════════════════════════════════════
+# GPT Planner (명세서 §12)
+# ══════════════════════════════════════════════
 PLAN_SCHEMA = {
     "type": "object",
     "properties": {
-        "say": {"type": "string"},
         "action": {
             "type": "string",
             "enum": [
-                "ask_again",
-                "list",
-                "propose",
-                "cancel_confirm",
-                "resume_propose",
-                "change_dest_request",
-                "change_dest_propose",
-                "abort_propose",
-                "noop",
+                "noop", "propose", "ask_again", "disambiguate",
+                "resume_propose", "abort_propose",
+                "change_dest_request", "change_dest_propose",
             ],
         },
         "destination": {"type": ["string", "null"]},
-        "confidence": {"type": "number"},
+        "candidates":  {"type": "array", "items": {"type": "string"}},
         "need_button": {"type": "boolean"},
         "button_action": {
             "type": "string",
             "enum": ["none", "start", "resume", "abort", "change_ready", "change_start"],
         },
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "reason": {
+            "type": "string",
+            "enum": ["none", "out_of_list", "ambiguous", "low_confidence", "stt_failed"],
+        },
     },
-    "required": ["say", "action", "destination", "confidence", "need_button", "button_action"],
+    "required": ["action","destination","candidates","need_button",
+                 "button_action","confidence","reason"],
     "additionalProperties": False,
 }
 
-
-class OpenAIPlanner:
-    def __init__(self, api_key: str, model: str, debug: bool = False):
+class GPTPlanner:
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini", debug: bool = False):
         self.api_key = api_key
-        self.model = model
-        self.debug = debug
-        self.base_url = "https://api.openai.com/v1"
-        self._prev_id: Optional[str] = None
+        self.model   = model
+        self.debug   = debug
 
-        self.instructions = (
-            "너는 시각장애인 안내 로봇의 장소 선택/재질문 비서다.\n"
-            "정답 후보 목적지는 locations 리스트뿐이다.\n"
-            "반드시 스키마 JSON만 출력해라.\n"
-            "\n"
-            "[공통 규칙]\n"
-            "- 사용자의 발화(user_text)를 보고 action, destination, need_button, button_action을 정해라.\n"
-            "- 확실한 목적지가 있으면 destination에 넣어라.\n"
-            "- 버튼 확인이 필요한 행동이면 need_button=true로 하라.\n"
-            "- say에는 사용자에게 실제로 말할 문장을 한국어로 자연스럽게 써라.\n"
-            "- 잡음/혼잣말/짧은 중얼거림처럼 의도가 불분명하면 ask_again 또는 noop을 사용해라.\n"
-            "\n"
-            "[READY 상태]\n"
-            "- 목적지를 확실히 이해하면 action='propose', need_button=true, button_action='start'.\n"
-            "- 사용자가 목록/뭐가 있어/몇 호 있어 라고 물으면 action='list'.\n"
-            "- 애매하면 action='ask_again'.\n"
-            "\n"
-            "[PAUSED 상태]\n"
-            "- '다시 가', '계속 가', '재개' 계열이면 action='resume_propose', need_button=true, button_action='resume'.\n"
-            "- '종료해줘', '그만해줘', '안내 끝' 계열이면 action='abort_propose', need_button=true, button_action='abort'.\n"
-            "- '목적지 바꿔', '다른 곳 가고 싶어'처럼 바꾸고 싶지만 새 목적지가 없으면 "
-            "action='change_dest_request', destination=null, need_button=true, button_action='change_ready'.\n"
-            "- '3호 가자', '편의점으로 바꿔', '화장실 가고 싶어'처럼 새 목적지가 같이 있으면 "
-            "action='change_dest_propose', destination에 그 장소, need_button=true, button_action='change_start'.\n"
-            "- 목적지가 locations에 없거나 불명확하면 action='ask_again'.\n"
+    def _system(self, locations: List[str], state_name: str) -> str:
+        joined = ", ".join(locations) if locations else "(없음)"
+        return (
+            "너는 시각장애인 안내 로봇의 의도 해석기다.\n"
+            "반드시 JSON schema만 출력해라. 자유 문장 금지.\n"
+            f"공식 목적지 목록(이 외는 모두 out_of_list): {joined}\n"
+            f"현재 상태: {state_name}\n\n"
+            "[후보 수 규칙]\n"
+            "- 후보 1개 → action=propose\n"
+            "- 후보 2~3개 → action=disambiguate\n"
+            "- 후보 4개 이상 또는 confidence=low → action=ask_again\n\n"
+            "[READY 허용 action]: propose, ask_again, disambiguate\n"
+            "[PAUSED 허용 action]: resume_propose, abort_propose, "
+            "change_dest_request, change_dest_propose, ask_again\n\n"
+            "[PAUSED 해석 규칙]\n"
+            "- '다시 가/계속/재개' → resume_propose, button_action=resume\n"
+            "- '종료/그만/끝' → abort_propose, button_action=abort\n"
+            "- '바꾸고 싶어/다른 곳' (새 목적지 없음) → change_dest_request, button_action=change_ready\n"
+            "- '3호로 바꿔/편의점으로 가자' (새 목적지 포함) → change_dest_propose, button_action=change_start\n"
+            "- 불명확 → ask_again\n\n"
+            "[reason 규칙]\n"
+            "- out_of_list: 목록 밖 목적지\n"
+            "- ambiguous: 후보 복수 또는 불명확\n"
+            "- low_confidence: 확신 부족\n"
+            "- stt_failed: STT 실패\n"
+            "- none: 해당 없음\n"
         )
 
-    def plan(self, context: dict) -> Tuple[Optional[dict], Optional[str]]:
-        url = f"{self.base_url}/responses"
-        payload: Dict[str, Any] = {
+    def plan(self, *, state_name: str, locations: List[str], user_text: str) -> Dict[str, Any]:
+        payload = {
             "model": self.model,
-            "instructions": self.instructions,
-            "input": json.dumps(context, ensure_ascii=False),
-            "max_output_tokens": 260,
+            "instructions": self._system(locations, state_name),
+            "input": user_text,
+            "max_output_tokens": 300,
             "text": {
                 "format": {
                     "type": "json_schema",
-                    "name": "location_plan",
+                    "name": "voice_plan",
                     "schema": PLAN_SCHEMA,
                     "strict": True,
                 }
             },
         }
-        if self._prev_id:
-            payload["previous_response_id"] = self._prev_id
-
-        data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
-            url=url,
-            data=data,
+            "https://api.openai.com/v1/responses",
+            data=json.dumps(payload).encode(),
             method="POST",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
         )
-
         try:
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                resp_json = json.loads(resp.read().decode("utf-8"))
-
-            rid = resp_json.get("id")
-            if isinstance(rid, str) and rid:
-                self._prev_id = rid
-
-            raw = _extract_output_text(resp_json).strip()
-            if not raw:
-                return None, "empty_output_text"
-            return json.loads(raw), None
-
+            with urllib.request.urlopen(req, timeout=35) as r:
+                resp = json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
-            body = ""
-            try:
-                body = e.read().decode("utf-8", errors="ignore")
-            except Exception:
-                pass
-            return None, f"HTTP {e.code}: {body[:300]}"
+            raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='ignore')}")
         except Exception as e:
-            return None, f"{type(e).__name__}: {e}"
+            raise RuntimeError(str(e))
+
+        # output 추출
+        for item in resp.get("output", []):
+            if item.get("type") == "message" and item.get("role") == "assistant":
+                for c in item.get("content", []):
+                    if c.get("type") == "output_text":
+                        raw = c["text"].strip()
+                        if self.debug:
+                            print(f"[GPT] {raw}", file=sys.stderr)
+                        return json.loads(raw)
+        raise RuntimeError("empty GPT output")
 
 
-# =========================
-# Mic bridge
-# =========================
-class MicTextBridge:
+# ══════════════════════════════════════════════
+# MicSession – 수음 1회 (§8 순서 엄수)
+# ══════════════════════════════════════════════
+class MicSession:
     """
-    마이크 입력:
-    - TTS/삑음 중에는 닫힘
-    - 시작 삑이 난 뒤 수집
-    - 끝나면 종료 삑
-    - 중복/노이즈/너무 짧은 텍스트 필터
+    명세서 §8 절대 순서:
+    TTS 완전 종료 → AudioGate 열림 확인 → 0.35초 대기
+    → 시작 beep → 수음 → 종료 beep → STT
     """
     def __init__(
         self,
-        on_text: Callable[[str], None],
-        is_listen_allowed: Callable[[], bool],
-        audio_gate: AudioGate,
+        tts:    TTS,
         beeper: Beeper,
-        debug: bool = False,
-        timeout: float = 0.8,
-        phrase_time_limit: float = 5.0,
-        pause_threshold: float = 1.0,
-        energy_threshold: int = 350,
-        ambient_duration: float = 1.0,
-        min_text_chars: int = 2,
-        dedup_window_sec: float = 2.2,
-        listen_open_delay_sec: float = 0.35,
+        gate:   AudioGate,
+        debug:  bool = False,
     ):
-        self.on_text = on_text
-        self.is_listen_allowed = is_listen_allowed
-        self.audio_gate = audio_gate
+        self.tts    = tts
         self.beeper = beeper
-        self.debug = debug
+        self.gate   = gate
+        self.debug  = debug
 
-        self.timeout = timeout
-        self.phrase_time_limit = phrase_time_limit
-        self.pause_threshold = pause_threshold
-        self.energy_threshold = energy_threshold
-        self.ambient_duration = ambient_duration
-        self.min_text_chars = min_text_chars
-        self.dedup_window_sec = dedup_window_sec
-        self.listen_open_delay_sec = listen_open_delay_sec
+        self._r = sr.Recognizer()
+        self._r.pause_threshold          = LISTEN_PAUSE_THRESHOLD_SEC
+        self._r.non_speaking_duration    = 0.4
+        self._r.dynamic_energy_threshold = True
 
-        self._stop = threading.Event()
-        self._th = threading.Thread(target=self._worker, daemon=True)
-
-        self._last_text = ""
+        self._last_text    = ""
         self._last_text_ts = 0.0
-        self._listen_session_armed = False
 
-    def start(self):
-        self._th.start()
-
-    def stop(self):
-        self._stop.set()
-
-    @staticmethod
-    def normalize_text(s: str) -> str:
-        s = (s or "").strip()
-        s = re.sub(r"\s+", "", s)
-        return s
-
-    def _is_noise_text(self, text: str) -> bool:
-        t = self.normalize_text(text)
-        if len(t) < self.min_text_chars:
-            return True
-        bads = {
-            "음", "어", "아", "어어", "음음", "그", "저", "흠",
-            "응", "네", "예", "아니", "뭐", "잠깐", "잠시",
-        }
-        return t in bads
-
-    def _is_duplicate(self, text: str) -> bool:
+    # 중복 체크 (§9.2)
+    def _is_dup(self, text: str) -> bool:
         now = time.time()
-        t = self.normalize_text(text)
-        if t == self._last_text and (now - self._last_text_ts) <= self.dedup_window_sec:
+        t   = re.sub(r"\s+", "", text)
+        if t == self._last_text and (now - self._last_text_ts) <= DEDUP_WINDOW_SEC:
             return True
-        self._last_text = t
+        self._last_text    = t
         self._last_text_ts = now
         return False
 
-    def _worker(self):
-        r = sr.Recognizer()
-        r.energy_threshold = self.energy_threshold
-        r.dynamic_energy_threshold = True
-        r.pause_threshold = self.pause_threshold
-        r.non_speaking_duration = 0.5
+    def listen(self) -> Tuple[Optional[str], str]:
+        """
+        Returns (text, status)
+        status: 'ok' | 'empty' | 'timeout' | 'dup'
+        """
+        _suppress_alsa()
 
+        # Gate 열릴 때까지 대기
+        waited = 0.0
+        while not self.gate.is_open():
+            time.sleep(0.05)
+            waited += 0.05
+            if waited > 60:
+                return None, "timeout"
+
+        # 0.35초 대기 후 시작 beep
+        time.sleep(LISTEN_OPEN_DELAY_SEC)
+        self.beeper.start()
+
+        # 수음
         try:
             mic = sr.Microphone()
+            with mic as src:
+                self._r.adjust_for_ambient_noise(src, duration=0.3)
+                audio = self._r.listen(
+                    src,
+                    timeout=LISTEN_TIMEOUT_SEC,
+                    phrase_time_limit=LISTEN_PHRASE_TIME_LIMIT_SEC,
+                )
+        except sr.WaitTimeoutError:
+            self.beeper.end()
+            return None, "timeout"
         except Exception as e:
             if self.debug:
-                print(f"[DEBUG][MIC] microphone open failed: {e}", file=sys.stderr)
-            return
+                print(f"[MIC] listen error: {e}", file=sys.stderr)
+            self.beeper.end()
+            return None, "timeout"
 
-        with mic as source:
-            try:
-                r.adjust_for_ambient_noise(source, duration=self.ambient_duration)
-                if self.debug:
-                    print(f"[DEBUG][MIC] ambient calibrated threshold={r.energy_threshold:.1f}", file=sys.stderr)
-            except Exception as e:
-                if self.debug:
-                    print(f"[DEBUG][MIC] ambient calibration failed: {e}", file=sys.stderr)
+        # 종료 beep
+        self.beeper.end()
 
+        # STT (§9.3)
+        try:
+            text = self._r.recognize_google(audio, language="ko-KR").strip()
+        except sr.UnknownValueError:
+            return "", "empty"
+        except Exception as e:
+            if self.debug:
+                print(f"[MIC] STT error: {e}", file=sys.stderr)
+            return "", "empty"
+
+        if not text:
+            return "", "empty"
+        if self._is_dup(text):
+            return None, "dup"
+        print(f"[MIC] {text}")
+        return text, "ok"
+
+
+# ══════════════════════════════════════════════
+# NavSimulator – 20초 뒤 arrive 이벤트
+# ══════════════════════════════════════════════
+class NavSimulator:
+    def __init__(self, on_arrive: Callable[[], None], duration: float = NAV_SIM_DURATION_SEC):
+        self._on_arrive = on_arrive
+        self._duration  = duration
+        self._timer: Optional[threading.Timer] = None
+        self._lock = threading.Lock()
+
+    def start(self, dest: str) -> bool:
+        self.stop()
+        print(f"[NAV] 이동 시작 → {dest} ({self._duration:.0f}초 후 도착)")
+        with self._lock:
+            self._timer = threading.Timer(self._duration, self._on_arrive)
+            self._timer.daemon = True
+            self._timer.start()
+        return True
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+        print("[NAV] 이동 정지")
+
+
+# ══════════════════════════════════════════════
+# 하드웨어 브리지 (시리얼 버튼 / Pull 센서)
+# ══════════════════════════════════════════════
+_GRIP_ARM   = 3000
+_PULL_TRIG  = 3700
+_QUICK_SEC  = 0.25
+_GRIP_RESET = 2900
+_HW_DEBOUNCE_SEC = 0.25
+
+
+class _PullDetector:
+    def __init__(self) -> None:
+        self.armed = False
+        self.armed_time = 0.0
+        self.triggered_this_arm = False
+
+    def update(self, val: int) -> Optional[str]:
+        now = time.monotonic()
+        if val < _GRIP_RESET:
+            self.armed = False
+            self.triggered_this_arm = False
+            return None
+        if (not self.armed) and val >= _GRIP_ARM:
+            self.armed = True
+            self.armed_time = now
+            self.triggered_this_arm = False
+            return None
+        if self.armed:
+            if self.triggered_this_arm:
+                return None
+            dt = now - self.armed_time
+            if val >= _PULL_TRIG and dt <= _QUICK_SEC:
+                self.triggered_this_arm = True
+                return "PULL"
+            if val >= _PULL_TRIG and dt > _QUICK_SEC:
+                self.triggered_this_arm = True
+                return None
+        return None
+
+
+class HardwareKeyBridge:
+    """
+    시리얼 포트에서 CSV 라인을 읽어 버튼/pull 이벤트를 콜백으로 전달.
+    - 'TRIG' 태그        → on_o() (버튼)
+    - val >= PULL_TRIG  → on_p() (pull)
+    없거나 열기 실패 시 자동으로 None 반환 후 비활성화.
+    """
+    def __init__(self, on_o: Callable, on_p: Callable,
+                 port: str = "/dev/ttyUSB0", baud: int = 115200,
+                 debug: bool = False) -> None:
+        self.on_o  = on_o
+        self.on_p  = on_p
+        self.port  = port
+        self.baud  = baud
+        self.debug = debug
+
+        self._stop  = threading.Event()
+        self._thr: Optional[threading.Thread] = None
+        self._ser   = None
+        self._buf   = ""
+        self._pull  = _PullDetector()
+        self._last_o_t = 0.0
+        self._last_p_t = 0.0
+
+    def start(self) -> bool:
+        try:
+            import serial
+            self._ser = serial.Serial(self.port, self.baud, timeout=0)
+        except Exception as e:
+            if self.debug:
+                print(f"[HW] serial open failed ({self.port}): {e}", file=sys.stderr)
+            return False
+        self._thr = threading.Thread(target=self._loop, daemon=True)
+        self._thr.start()
+        print(f"[HW] 시리얼 연결됨: {self.port} @ {self.baud}")
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            if self._ser:
+                self._ser.close()
+        except Exception:
+            pass
+
+    def _debounced(self, kind: str) -> None:
+        now = time.monotonic()
+        if kind == "o":
+            if now - self._last_o_t >= _HW_DEBOUNCE_SEC:
+                self._last_o_t = now
+                self.on_o()
+        elif kind == "p":
+            if now - self._last_p_t >= _HW_DEBOUNCE_SEC:
+                self._last_p_t = now
+                self.on_p()
+
+    def _loop(self) -> None:
         while not self._stop.is_set():
-            if not self.is_listen_allowed():
-                self._listen_session_armed = False
-                time.sleep(0.05)
-                continue
-
-            if not self.audio_gate.is_open():
-                self._listen_session_armed = False
-                time.sleep(0.03)
-                continue
-
-            # 처음 열리는 시점에만 시작 삑
-            if not self._listen_session_armed:
-                time.sleep(self.listen_open_delay_sec)
-                if self._stop.is_set() or (not self.is_listen_allowed()) or (not self.audio_gate.is_open()):
-                    continue
-                self.beeper.start_listen_beep()
-                self._listen_session_armed = True
-
             try:
-                with mic as source:
-                    audio = r.listen(
-                        source,
-                        timeout=self.timeout,
-                        phrase_time_limit=self.phrase_time_limit,
-                    )
-            except sr.WaitTimeoutError:
-                continue
+                if self._ser.in_waiting > 0:
+                    self._buf += self._ser.read(self._ser.in_waiting).decode("utf-8", errors="ignore")
+                    if "\n" in self._buf:
+                        lines = self._buf.split("\n")
+                        self._buf = lines.pop()
+                        for line in lines:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            parts = line.split(",")
+                            if len(parts) < 3:
+                                continue
+                            tag = parts[0].strip()
+                            try:
+                                press_val = int(parts[2].strip())
+                            except Exception:
+                                continue
+                            if tag == "TRIG":
+                                self._debounced("o")
+                            evt = self._pull.update(press_val)
+                            if evt == "PULL":
+                                self._debounced("p")
             except Exception as e:
                 if self.debug:
-                    print(f"[DEBUG][MIC] listen error: {e}", file=sys.stderr)
-                time.sleep(0.15)
-                continue
-
-            # 수집 끝 삑
-            self.beeper.end_listen_beep()
-
-            try:
-                text = r.recognize_google(audio, language="ko-KR").strip()
-                if self.debug and text:
-                    print(f"[MIC] {text}", file=sys.stderr)
-
-                if not text:
-                    self._listen_session_armed = False
-                    continue
-                if self._is_noise_text(text):
-                    self._listen_session_armed = False
-                    continue
-                if self._is_duplicate(text):
-                    self._listen_session_armed = False
-                    continue
-
-                self.on_text(text)
-            except sr.UnknownValueError:
-                pass
-            except Exception as e:
-                if self.debug:
-                    print(f"[DEBUG][MIC] STT error: {e}", file=sys.stderr)
-            finally:
-                self._listen_session_armed = False
+                    print(f"[HW] loop error: {e}", file=sys.stderr)
+            time.sleep(0.005)
 
 
-# =========================
-# State / Event
-# =========================
-class State(Enum):
-    LOCKED = auto()
-    READY = auto()
-    NAV = auto()
-    PAUSED = auto()
-
-
-@dataclass
-class PendingConfirm:
-    action: str  # start/resume/abort/change_ready/change_start
-    destination: Optional[str]
-    deadline: float
-
-
-@dataclass
-class Event:
-    type: str   # text/button/pull/arrive
-    text: Optional[str] = None
-    ts: float = 0.0
-
-
-# =========================
-# Main app
-# =========================
+# ══════════════════════════════════════════════
+# 메인 앱
+# ══════════════════════════════════════════════
 class InterfaceApp:
     def __init__(
         self,
         *,
         locations_path: Path,
-        env_path: Path,
-        model: str,
-        confirm_sec: float,
-        ready_idle_sec: float,
-        arrival_sec: float,
-        no_tts: bool,
-        no_hw: bool,
-        no_mic: bool,
-        port: str,
-        baud: int,
-        mic_timeout: float,
-        mic_phrase_time_limit: float,
-        mic_pause_threshold: float,
-        mic_energy_threshold: int,
-        post_audio_cooldown_sec: float,
-        listen_open_delay_sec: float,
-        debug: bool,
+        env_path:       Path,
+        debug:          bool  = False,
+        no_tts:         bool  = False,
+        no_mic:         bool  = False,
+        no_hw:          bool  = False,
+        hw_port:        str   = "/dev/ttyUSB0",
+        hw_baud:        int   = 115200,
+        model:          str   = "gpt-4o-mini",
     ):
-        self.debug = debug
-        self.state = State.LOCKED
-
+        self.debug          = debug
         self.locations_path = locations_path
-        self.locations = load_locations_yaml_simple(self.locations_path)
-        self._loc_mtime = self.locations_path.stat().st_mtime if self.locations_path.exists() else 0.0
+        self.locations      = load_locations(locations_path)
 
-        # 시간 기준
-        self.confirm_sec = float(confirm_sec)
-        self.ready_idle_sec = float(ready_idle_sec)
-        self.arrival_sec = float(arrival_sec)
-        self.listen_open_delay_sec = float(listen_open_delay_sec)
+        # 출력
+        self.tts    = TTS(debug=debug, enabled=not no_tts)
+        self.beeper = Beeper(debug=debug, enabled=not no_tts)
+        self.gate   = AudioGate()
+        self.no_mic = no_mic
 
-        # NAV 경과시간
-        self.nav_start_t: float = 0.0
-        self.nav_elapsed: float = 0.0
-        self.nav_target: Optional[str] = None
-
-        # 버튼 연속입력 보호
-        self._btn_guard_until: float = 0.0
-        self._btn_guard_sec: float = 0.40
-
-        self.pending_destination: Optional[str] = None
-        self.pending: Optional[PendingConfirm] = None
-        self.ready_last_activity = 0.0
-
-        # 말 끝난 뒤 특정 작업 예약
-        self._scheduled_tasks: List[Tuple[float, Callable[[], None]]] = []
-
-        self.ev_q: "queue.Queue[Event]" = queue.Queue()
-        self._stop = threading.Event()
-
-        self.audio_gate = AudioGate(post_audio_cooldown_sec=post_audio_cooldown_sec)
-        self.beeper = Beeper(audio_gate=self.audio_gate, debug=debug)
-
-        self.tts: Optional[GttsTTS] = None
-        if not no_tts:
-            self.tts = GttsTTS(lang="ko", debug=debug, audio_gate=self.audio_gate)
-
+        # GPT
         api_key = load_openai_key(env_path)
         if not api_key:
-            raise RuntimeError(f"OPENAI_API_KEY not found (env var or {env_path})")
+            raise RuntimeError("OPENAI_API_KEY 없음 – .env 파일 또는 환경변수를 설정하세요.")
+        self.gpt = GPTPlanner(api_key=api_key, model=model, debug=debug)
 
-        self.gpt = OpenAIPlanner(api_key=api_key, model=model, debug=debug)
+        # 마이크 세션
+        self.mic_session = MicSession(tts=self.tts, beeper=self.beeper, gate=self.gate, debug=debug)
 
-        self._req_q: "queue.Queue[Tuple[Event, dict]]" = queue.Queue()
-        self._res_q: "queue.Queue[Tuple[Event, Optional[dict], Optional[str]]]" = queue.Queue()
-        self._inflight = False
-        threading.Thread(target=self._gpt_worker, daemon=True).start()
+        # 내비게이션 시뮬레이터
+        self.nav = NavSimulator(on_arrive=self._on_arrive)
 
-        # stdin 테스트용
+        # 상태
+        self.state:   State            = State.LOCKED
+        self.phase:   Phase            = Phase.NONE
+        self.pending: Optional[PendingConfirm] = None
+        self.last_target: Optional[str] = None
+
+        # retry 카운터
+        self.ready_retry  = 0
+        self.paused_retry = 0
+
+        # 무응답 세션 카운터
+        self._no_resp_sessions = 0
+
+        # guard
+        self._btn_guard_until:  float = 0.0
+        self._pull_guard_until: float = 0.0
+
+        # 이벤트 큐
+        self._ev_q: queue.Queue[Event] = queue.Queue()
+        self._stop = threading.Event()
+
+        # 하드웨어 버튼/pull (시리얼)
+        self.hw: Optional[HardwareKeyBridge] = None
+        if not no_hw:
+            self.hw = HardwareKeyBridge(
+                on_o=lambda: self._ev_q.put(Event(kind="button")),
+                on_p=lambda: self._ev_q.put(Event(kind="pull")),
+                port=hw_port,
+                baud=hw_baud,
+                debug=debug,
+            )
+            ok = self.hw.start()
+            if not ok:
+                print("[HW] 시리얼 연결 실패 – stdin(/button, /pull)으로 테스트하세요.")
+                self.hw = None
+
+        # stdin 테스트용 (항상 켜둠)
         threading.Thread(target=self._stdin_worker, daemon=True).start()
 
-        # 마이크
-        self.mic = None
-        if not no_mic:
-            self.mic = MicTextBridge(
-                on_text=lambda text: self.ev_q.put(Event(type="text", text=text, ts=time.time())),
-                is_listen_allowed=self._is_mic_listen_allowed,
-                audio_gate=self.audio_gate,
-                beeper=self.beeper,
-                debug=debug,
-                timeout=mic_timeout,
-                phrase_time_limit=mic_phrase_time_limit,
-                pause_threshold=mic_pause_threshold,
-                energy_threshold=mic_energy_threshold,
-                ambient_duration=1.0,
-                min_text_chars=2,
-                dedup_window_sec=2.2,
-                listen_open_delay_sec=listen_open_delay_sec,
-            )
-            try:
-                self.mic.start()
-            except Exception as e:
-                if self.debug:
-                    print(f"[DEBUG] MIC start failed: {e}", file=sys.stderr)
-                self.mic = None
-
-        # 하드웨어 버튼/pull
-        self.hw = None
-        if not no_hw:
-            HardwareKeyBridge = _load_hardware_key_bridge(debug=debug)
-            if HardwareKeyBridge is not None:
-                self.hw = HardwareKeyBridge(
-                    on_o=lambda: self.ev_q.put(Event(type="button", ts=time.time())),
-                    on_p=lambda: self.ev_q.put(Event(type="pull", ts=time.time())),
-                    port=port,
-                    baud=baud,
-                )
-                try:
-                    self.hw.start()
-                except Exception as e:
-                    if self.debug:
-                        print(f"[DEBUG] HW start failed: {e}", file=sys.stderr)
-                    self.hw = None
-
-    # -----------------
-    # basic helpers
-    # -----------------
+    # ──────────────────────────────────────────
+    # 유틸
+    # ──────────────────────────────────────────
     def destinations(self) -> List[str]:
-        return list(self.locations.keys())
+        return sorted(self.locations.keys())
 
-    def say(self, text: str) -> float:
-        t = (text or "").strip()
-        if not t:
-            return 0.0
-        print(f"[ROBOT] {t}")
-        if self.tts:
-            return self.tts.say(t)
-        return 0.0
+    def _say(self, text: str) -> None:
+        """TTS 재생 + AudioGate 차단. TTS는 동기이므로 재생 끝나면 바로 gate 해제."""
+        # 말하는 동안 gate 차단 (대략 추산: 글자당 0.09초 + 여유)
+        est = max(1.5, len(text) * 0.09 + 1.0)
+        self.gate.block(est)
+        self.tts.say(text)
+        # 실제로는 say()가 동기이므로 여기서 gate는 이미 만료됨
+        # 하지만 beep/다음 액션 전 짧은 쿨다운 보장
+        self.gate.block(0.3)
 
-    def say_and_then(self, text: str, cb: Optional[Callable[[], None]] = None, extra_delay: float = 0.0) -> None:
-        dur = self.say(text)
-        total_delay = dur + self.audio_gate.post_audio_cooldown_sec + max(0.0, extra_delay)
-        if cb is not None:
-            self._scheduled_tasks.append((time.time() + total_delay, cb))
+    def _state_log(self) -> None:
+        p = self.phase.name if self.phase != Phase.NONE else ""
+        print(f"[STATE] {self.state.name}" + (f" / {p}" if p else ""))
 
-    def _run_scheduled_tasks(self) -> None:
-        if not self._scheduled_tasks:
-            return
-        now = time.time()
-        remaining = []
-        for when, cb in self._scheduled_tasks:
-            if now >= when:
-                try:
-                    cb()
-                except Exception as e:
-                    if self.debug:
-                        print(f"[DEBUG] scheduled task error: {e}", file=sys.stderr)
-            else:
-                remaining.append((when, cb))
-        self._scheduled_tasks = remaining
+    # ──────────────────────────────────────────
+    # PendingConfirm
+    # ──────────────────────────────────────────
+    def _set_pending(self, action: str, destination: Optional[str]) -> None:
+        self.pending = PendingConfirm(
+            action=action,
+            destination=destination,
+            deadline=time.time() + CONFIRM_TIMEOUT_SEC,
+        )
 
-    def _state_log(self, reason: str) -> None:
-        print(f"[STATE] {self.state.name} ({reason})")
+    def _reset_pending_deadline(self) -> None:
+        if self.pending:
+            self.pending.deadline = time.time() + CONFIRM_TIMEOUT_SEC
 
-    def _is_mic_listen_allowed(self) -> bool:
-        # 실사용 안정성을 위해 READY/PAUSED 위주로 듣기
-        return self.state in (State.READY, State.PAUSED) and (not self._inflight)
+    def _clear_pending(self) -> None:
+        self.pending = None
 
-    # -----------------
-    # stdin worker
-    # -----------------
+    # ──────────────────────────────────────────
+    # 도착 콜백 (NavSimulator → 메인 스레드)
+    # ──────────────────────────────────────────
+    def _on_arrive(self) -> None:
+        self._ev_q.put(Event(kind="arrive"))
+
+    # ──────────────────────────────────────────
+    # stdin 테스트 입력
+    # ──────────────────────────────────────────
     def _stdin_worker(self) -> None:
         """
-        테스트용:
-        /button
-        /pull
-        /arrive
-        그 외 텍스트
+        /button  → 버튼 이벤트
+        /pull    → pull 이벤트
+        그 외    → text 이벤트
         """
         while not self._stop.is_set():
-            line = sys.stdin.readline()
+            try:
+                line = sys.stdin.readline()
+            except Exception:
+                break
             if not line:
-                time.sleep(0.05)
-                continue
+                break
             s = line.strip()
             if not s:
                 continue
             if s == "/button":
-                self.ev_q.put(Event(type="button", ts=time.time()))
+                self._ev_q.put(Event(kind="button"))
             elif s == "/pull":
-                self.ev_q.put(Event(type="pull", ts=time.time()))
-            elif s == "/arrive":
-                self.ev_q.put(Event(type="arrive", ts=time.time()))
+                self._ev_q.put(Event(kind="pull"))
             else:
-                self.ev_q.put(Event(type="text", text=s, ts=time.time()))
+                self._ev_q.put(Event(kind="text", text=s))
 
-    # -----------------
-    # GPT worker
-    # -----------------
-    def _gpt_worker(self) -> None:
-        while not self._stop.is_set():
-            try:
-                ev, ctx = self._req_q.get(timeout=0.2)
-            except Exception:
-                continue
-            plan, err = self.gpt.plan(ctx)
-            self._res_q.put((ev, plan, err))
-
-    # -----------------
-    # reload locations
-    # -----------------
-    def _reload_locations_if_changed(self) -> None:
-        if not self.locations_path.exists():
-            return
-        mt = self.locations_path.stat().st_mtime
-        if mt <= self._loc_mtime:
-            return
-        self._loc_mtime = mt
-        self.locations = load_locations_yaml_simple(self.locations_path)
-        if self.pending_destination and self.pending_destination not in self.destinations():
-            self.pending_destination = None
-        if self.pending and self.pending.destination and self.pending.destination not in self.destinations():
-            self.pending = None
-        if self.nav_target and self.nav_target not in self.destinations():
-            self.nav_target = None
-
-    # -----------------
-    # confirm helpers
-    # -----------------
-    def _set_confirm(self, action: str, destination: Optional[str]) -> None:
-        self.pending = PendingConfirm(
-            action=action,
-            destination=destination,
-            deadline=time.time() + self.confirm_sec
-        )
-
-    def _clear_confirm(self) -> None:
-        self.pending = None
-
-    def _set_confirm_after_prompt(self, action: str, destination: Optional[str], prompt_text: str) -> None:
-        def _cb():
-            self._set_confirm(action, destination)
-        self.say_and_then(prompt_text, cb=_cb, extra_delay=self.listen_open_delay_sec)
-
-    # -----------------
-    # NAV timer
-    # -----------------
-    def _nav_timer_start(self) -> None:
-        if self.arrival_sec <= 0:
-            return
-        if self.nav_start_t <= 0:
-            self.nav_start_t = time.time()
-
-    def _nav_timer_pause(self) -> None:
-        if self.arrival_sec <= 0:
-            return
-        if self.nav_start_t > 0:
-            self.nav_elapsed += (time.time() - self.nav_start_t)
-            self.nav_start_t = 0.0
-
-    def _nav_timer_reset(self) -> None:
-        self.nav_start_t = 0.0
-        self.nav_elapsed = 0.0
-        self.nav_target = None
-
-    def _nav_total_elapsed(self) -> float:
-        total = self.nav_elapsed
-        if self.nav_start_t > 0:
-            total += (time.time() - self.nav_start_t)
-        return total
-
-    def _arrive_now(self, reason: str = "arrived_sim") -> None:
-        dest = self.nav_target or self.pending_destination
-        self.state = State.LOCKED
-        self.pending_destination = None
-        self._clear_confirm()
-        self._nav_timer_reset()
-        self._state_log(reason)
-        if dest:
-            self.say(f"{dest}에 도착했습니다.")
-        else:
-            self.say("목적지에 도착했습니다.")
-
-    # -----------------
-    # timeout들
-    # -----------------
-    def _confirm_timeout_tick(self) -> None:
-        if not self.pending:
-            return
-        if time.time() < self.pending.deadline:
+    # ──────────────────────────────────────────
+    # 마이크 세션 실행 (별도 스레드)
+    # 명세서 §8, §10 구조: 최대 3세션 + 리마인드 2회
+    # ──────────────────────────────────────────
+    def _run_mic_sessions(self, context: str) -> None:
+        """
+        context: 'ready' | 'paused'
+        3세션, 리마인드 2회 구조.
+        결과를 ev_q에 넣는다.
+        """
+        if self.no_mic:
             return
 
-        expired = self.pending
-        self.pending = None
+        def worker():
+            for session_idx in range(NO_RESPONSE_MAX_SESSIONS):
+                # 리마인드 (2차, 3차 수음 전)
+                if session_idx == 1:
+                    self._say(MSG[19])   # 리마인드 1
+                elif session_idx == 2:
+                    self._say(MSG[20])   # 리마인드 2
 
-        if self.state == State.READY:
-            self.say_and_then("확인이 없어 취소했어요. 목적지를 다시 말씀해 주세요.")
-            self.ready_last_activity = time.time()
-            return
+                text, status = self.mic_session.listen()
 
-        if self.state == State.PAUSED:
-            if expired.action == "change_ready":
-                self.say_and_then("확인이 없어 목적지 변경을 취소했어요. 계속 멈춰 있을게요.")
-            elif expired.action == "change_start":
-                self.say_and_then("확인이 없어 새 목적지 변경을 취소했어요. 계속 멈춰 있을게요.")
-            elif expired.action == "abort":
-                self.say_and_then("확인이 없어 종료를 취소했어요. 계속 멈춰 있을게요.")
-            elif expired.action == "resume":
-                self.say_and_then("확인이 없어 재개를 취소했어요. 계속 멈춰 있을게요.")
-            else:
-                self.say_and_then("확인이 없어 계속 멈춰 있을게요.")
-            return
+                if status == "ok" and text:
+                    self._ev_q.put(Event(kind="text", text=text))
+                    return
+                elif status == "empty":
+                    # 인식 실패 → retry count 증가 (메인에서 처리)
+                    self._ev_q.put(Event(kind="stt_empty"))
+                    return
+                elif status == "dup":
+                    # 중복이면 조용히 재시도
+                    continue
+                else:
+                    # timeout → 무응답 세션 소모, 다음 세션으로
+                    continue
 
-    def _ready_idle_tick(self) -> None:
-        if self.state != State.READY:
-            return
-        if self.pending:
-            return
-        if self.ready_last_activity <= 0:
-            return
-        if (time.time() - self.ready_last_activity) >= self.ready_idle_sec:
-            self.state = State.LOCKED
-            self.pending_destination = None
-            self._clear_confirm()
-            self._nav_timer_reset()
-            self._state_log("idle_timeout")
-            self.say("오래 응답이 없어 안내를 종료할게요. 필요하면 버튼을 눌러 주세요.")
+            # 3세션 모두 무응답
+            self._ev_q.put(Event(kind="stt_timeout"))
 
-    def _nav_arrival_tick(self) -> None:
-        if self.arrival_sec <= 0:
-            return
-        if self.state != State.NAV:
-            return
-        if self.nav_start_t <= 0:
-            return
-        if self._nav_total_elapsed() >= self.arrival_sec:
-            self._arrive_now("arrived_auto")
+        threading.Thread(target=worker, daemon=True).start()
 
-    # -----------------
+    # ──────────────────────────────────────────
     # 상태 전이 헬퍼
-    # -----------------
-    def _go_ready_for_new_destination(self) -> None:
-        self.state = State.READY
-        self.pending_destination = None
-        self._clear_confirm()
-        self._nav_timer_reset()
-        self.ready_last_activity = time.time()
-        self._state_log("confirm_change_ready")
-        self.say_and_then("확인했습니다. 새로운 목적지를 말씀해 주세요.")
+    # ──────────────────────────────────────────
+    def _go_locked(self, reason: str = "") -> None:
+        self.state  = State.LOCKED
+        self.phase  = Phase.NONE
+        self._clear_pending()
+        self.nav.stop()
+        self._state_log()
 
-    def _go_nav_with_destination(self, dest: str, reason: str) -> None:
+    def _go_ready_dest_input(self) -> None:
+        self.state       = State.READY
+        self.phase       = Phase.READY_DEST_INPUT
+        self.ready_retry = 0
+        self._clear_pending()
+        self._state_log()
+        self._run_mic_sessions("ready")
+
+    def _go_ready_disambiguate(self) -> None:
+        self.phase = Phase.READY_DISAMBIGUATE
+        self._state_log()
+        self._run_mic_sessions("ready")
+
+    def _go_ready_confirm(self, dest: str) -> None:
+        self.phase = Phase.READY_CONFIRM
+        self._set_pending("start", dest)
+        self._state_log()
+        # 수음 열기 (음성 긍정/부정 가능)
+        self._run_mic_sessions("ready")
+
+    def _go_nav(self, dest: str) -> None:
+        ok = self.nav.start(dest)
+        if not ok:
+            self._say(MSG[14])
+            # READY 유지
+            self.state = State.READY
+            self.phase = Phase.READY_DEST_INPUT
+            self._state_log()
+            return
+        self.last_target = dest
         self.state = State.NAV
-        self.pending_destination = dest
-        self.nav_target = dest
-        self.nav_elapsed = 0.0
-        self.nav_start_t = time.time() if self.arrival_sec > 0 else 0.0
-        self._state_log(reason)
-        self.say(f"확인했습니다. 목적지를 {dest}로 변경하고 안내를 시작하겠습니다.")
+        self.phase = Phase.NONE
+        self._clear_pending()
+        self._state_log()
+        self._say(f"{dest}로 안내를 시작합니다.")
 
-    def _go_paused(self, reason: str, say_text: Optional[str] = None) -> None:
-        self.state = State.PAUSED
-        self._nav_timer_pause()
-        self._clear_confirm()
-        self._state_log(reason)
-        if say_text:
-            self.say_and_then(say_text)
+    def _go_paused(self) -> None:
+        self.nav.stop()
+        self.state        = State.PAUSED
+        self.phase        = Phase.PAUSED_INTENT_INPUT
+        self.paused_retry = 0
+        self._clear_pending()
+        self._state_log()
+        self._say(MSG[8])
+        self._run_mic_sessions("paused")
 
-    # -----------------
-    # 버튼
-    # -----------------
+    def _go_paused_confirm(self, action: str, dest: Optional[str], prompt_msg: str) -> None:
+        self.phase = Phase.PAUSED_CONFIRM
+        self._set_pending(action, dest)
+        self._state_log()
+        self._say(prompt_msg)
+        self._run_mic_sessions("paused")
+
+    # ──────────────────────────────────────────
+    # 버튼 처리 (명세서 §14)
+    # ──────────────────────────────────────────
     def _handle_button(self) -> None:
         now = time.time()
         if now < self._btn_guard_until:
             return
+        self._btn_guard_until = now + BUTTON_GUARD_SEC
 
-        if self.pending:
-            pc = self.pending
-            self.pending = None
-            self._btn_guard_until = now + self._btn_guard_sec
+        s, ph = self.state, self.phase
 
-            if pc.action == "start" and self.state == State.READY and pc.destination:
-                self.state = State.NAV
-                self.pending_destination = pc.destination
-                self.nav_target = pc.destination
-                self.nav_elapsed = 0.0
-                self.nav_start_t = time.time() if self.arrival_sec > 0 else 0.0
-                self._state_log("confirm_start")
-                self.say(f"확인했습니다. {pc.destination}로 안내를 시작하겠습니다.")
-                return
-
-            if pc.action == "resume" and self.state == State.PAUSED:
-                self.state = State.NAV
-                self._nav_timer_start()
-                self._state_log("confirm_resume")
-                self.say("확인했습니다. 다시 이동하겠습니다.")
-                return
-
-            if pc.action == "change_ready" and self.state == State.PAUSED:
-                self._go_ready_for_new_destination()
-                return
-
-            if pc.action == "change_start" and self.state == State.PAUSED and pc.destination:
-                self._go_nav_with_destination(pc.destination, "confirm_change_start")
-                return
-
-            if pc.action == "abort" and self.state == State.PAUSED:
-                self.state = State.LOCKED
-                self.pending_destination = None
-                self._clear_confirm()
-                self._nav_timer_reset()
-                self._state_log("confirm_abort")
-                self.say("확인했습니다. 안내를 종료합니다.")
-                return
-
-            self.say("지금은 그 확인을 적용할 수 없어요.")
+        # ── LOCKED ──────────────────────────────
+        if s == State.LOCKED:
+            self._say(MSG[1])
+            self._go_ready_dest_input()
             return
 
-        if self.state == State.LOCKED:
+        # ── READY_CONFIRM ────────────────────────
+        if s == State.READY and ph == Phase.READY_CONFIRM:
+            if self.pending and self.pending.action == "start" and self.pending.destination:
+                dest = self.pending.destination
+                self._clear_pending()
+                self._go_nav(dest)
+            return
+
+        # ── READY (그 외) ─────────────────────────
+        if s == State.READY:
+            # 입력 무시 (§11: READY_DEST_INPUT, READY_DISAMBIGUATE는 button 무시)
+            return
+
+        # ── NAV ──────────────────────────────────
+        if s == State.NAV:
+            self._go_paused()
+            return
+
+        # ── PAUSED_INTENT_INPUT ──────────────────
+        if s == State.PAUSED and ph == Phase.PAUSED_INTENT_INPUT:
+            # 버튼 → 재개 확인 (§14.4)
+            self._go_paused_confirm("resume", self.last_target, MSG[9])
+            return
+
+        # ── PAUSED_CONFIRM ───────────────────────
+        if s == State.PAUSED and ph == Phase.PAUSED_CONFIRM:
+            if not self.pending:
+                return
+            self._exec_paused_confirm_button()
+            return
+
+    def _exec_paused_confirm_button(self) -> None:
+        """PAUSED_CONFIRM에서 버튼 → 확정 실행"""
+        pc = self.pending
+        if not pc:
+            return
+        self._clear_pending()
+
+        if pc.action == "resume":
+            # PAUSED → READY → NAV
             self.state = State.READY
-            self.pending_destination = None
-            self._clear_confirm()
-            self._nav_timer_reset()
-            self.ready_last_activity = time.time()
-            self._btn_guard_until = now + self._btn_guard_sec
-            self._state_log("button_start")
-            self.say_and_then("어디로 안내해 드릴까요?")
-            return
+            self.phase = Phase.NONE
+            self._state_log()
+            if self.last_target:
+                self._go_nav(self.last_target)
+            else:
+                self._say(MSG[14])
+                self._go_ready_dest_input()
 
-        if self.state == State.READY:
-            self._btn_guard_until = now + self._btn_guard_sec
-            if self._inflight:
-                self.say("목적지를 확인 중이에요. 잠시만 기다려 주세요.")
-                return
-            self.say_and_then("목적지를 말씀해 주세요.")
-            return
+        elif pc.action == "abort":
+            self._say("안내를 종료합니다.")
+            self.last_target = None
+            self._go_locked()
 
-        if self.state == State.PAUSED:
-            self._btn_guard_until = now + self._btn_guard_sec
-            self._set_confirm_after_prompt(
-                "resume",
-                None,
-                f"다시 이동할까요? 맞으면 {int(self.confirm_sec)}초 안에 버튼을 눌러 주세요."
-            )
-            return
+        elif pc.action == "change_ready":
+            self._clear_pending()
+            # last_target 유지
+            self.state       = State.READY
+            self.phase       = Phase.READY_DEST_INPUT
+            self.ready_retry = 0
+            self._state_log()
+            self._say(MSG[13])
+            self._run_mic_sessions("ready")
 
-        if self.state == State.NAV:
-            self._btn_guard_until = now + self._btn_guard_sec
-            self._go_paused("button_pause", "일시정지했습니다. 원하시는 요청을 말씀해 주세요.")
-            return
+        elif pc.action == "change_start":
+            if pc.destination:
+                self.last_target = pc.destination
+                self.state = State.READY
+                self.phase = Phase.NONE
+                self._state_log()
+                self._go_nav(pc.destination)
+            else:
+                self._say(MSG[14])
 
-    # -----------------
-    # pull
-    # -----------------
+    # ──────────────────────────────────────────
+    # Pull 처리 (§14.3)
+    # ──────────────────────────────────────────
     def _handle_pull(self) -> None:
+        now = time.time()
+        if now < self._pull_guard_until:
+            return
+        self._pull_guard_until = now + PULL_GUARD_SEC
+
         if self.state == State.NAV:
-            self._go_paused("pull_pause", "멈췄습니다. 원하시는 요청을 말씀해 주세요.")
+            self._go_paused()
+
+    # ──────────────────────────────────────────
+    # Text (음성 인식 결과) 처리
+    # ──────────────────────────────────────────
+    def _handle_text(self, text: str) -> None:
+        s, ph = self.state, self.phase
+
+        # 입력 무시 규칙 (§11)
+        if s == State.LOCKED:
+            return
+        if s == State.NAV:
+            return
+        if s == State.READY and ph in (Phase.READY_DEST_INPUT, Phase.READY_DISAMBIGUATE):
+            self._process_ready_text(text)
+            return
+        if s == State.READY and ph == Phase.READY_CONFIRM:
+            self._process_ready_confirm_voice(text)
+            return
+        if s == State.PAUSED and ph == Phase.PAUSED_INTENT_INPUT:
+            self._process_paused_text(text)
+            return
+        if s == State.PAUSED and ph == Phase.PAUSED_CONFIRM:
+            self._process_paused_confirm_voice(text)
             return
 
-    # -----------------
-    # GPT
-    # -----------------
-    def _dispatch_to_gpt(self, ev: Event) -> None:
-        if self._inflight:
+    # ── READY: 목적지 / 후보 입력 ─────────────
+    def _process_ready_text(self, text: str) -> None:
+        try:
+            plan = self.gpt.plan(
+                state_name="READY",
+                locations=self.destinations(),
+                user_text=text,
+            )
+        except Exception as e:
+            print(f"[GPT-ERR] {e}", file=sys.stderr)
+            self._say(MSG[2])
+            self._run_mic_sessions("ready")
             return
 
-        ctx = {
-            "state": self.state.name,
-            "locations": self.destinations(),
-            "user_text": ev.text if ev.type == "text" else None,
-            "pending_destination": self.pending_destination,
-            "nav_target": self.nav_target,
-            "pending_confirm": None if not self.pending else {
-                "action": self.pending.action,
-                "destination": self.pending.destination,
-                "time_left": round(max(0.0, self.pending.deadline - time.time()), 2),
-            },
-        }
-        self._req_q.put((ev, ctx))
-        self._inflight = True
+        action     = plan.get("action", "noop")
+        dest       = plan.get("destination")
+        candidates = plan.get("candidates", [])
+        reason     = plan.get("reason", "none")
 
-    def _apply_plan(self, plan: dict) -> None:
-        say = (plan.get("say") or "").strip()
+        if action == "propose" and dest and dest in self.destinations():
+            self._say(msg5(dest))
+            self._go_ready_confirm(dest)
+
+        elif action == "disambiguate":
+            self.ready_retry += 1
+            if self.ready_retry > READY_RETRY_MAX:
+                self._say(MSG[18])
+                self._go_locked()
+                return
+            self._say(msg4(candidates))
+            self._go_ready_disambiguate()
+
+        elif action == "ask_again":
+            self.ready_retry += 1
+            if self.ready_retry > READY_RETRY_MAX:
+                self._say(MSG[18])
+                self._go_locked()
+                return
+            if reason == "out_of_list":
+                self._say(MSG[3])
+            else:
+                self._say(MSG[2])
+            self._run_mic_sessions("ready")
+
+        else:
+            # noop 등
+            self._say(MSG[2])
+            self._run_mic_sessions("ready")
+
+    # ── READY_CONFIRM: 음성 긍정/부정 ──────────
+    def _process_ready_confirm_voice(self, text: str) -> None:
+        affirmative = {"네", "예", "응", "맞아요", "맞아", "좋아", "그래"}
+        negative    = {"아니요", "아니", "틀렸어요", "아니에요"}
+
+        t = text.strip()
+        if t in affirmative:
+            self._reset_pending_deadline()
+            self._say(MSG[6])
+            # 버튼 대기 유지 (수음은 다시 열어 둠)
+            self._run_mic_sessions("ready")
+            return
+
+        if t in negative:
+            self._clear_pending()
+            self.phase = Phase.READY_DEST_INPUT
+            self._say(MSG[7])
+            self._run_mic_sessions("ready")
+            return
+
+        # 수정 발화 ("아니요 2동이요" 등) → 새 목적지로 재처리
+        self._clear_pending()
+        self.phase = Phase.READY_DEST_INPUT
+        self._process_ready_text(t)
+
+    # ── PAUSED: 의도 입력 ─────────────────────
+    def _process_paused_text(self, text: str) -> None:
+        try:
+            plan = self.gpt.plan(
+                state_name="PAUSED",
+                locations=self.destinations(),
+                user_text=text,
+            )
+        except Exception as e:
+            print(f"[GPT-ERR] {e}", file=sys.stderr)
+            self._say(MSG[21])
+            self._run_mic_sessions("paused")
+            return
+
         action = plan.get("action", "noop")
-        dest = plan.get("destination", None)
-        need_button = bool(plan.get("need_button", False))
-        button_action = plan.get("button_action", "none")
+        dest   = plan.get("destination")
 
-        if action == "noop":
-            if say:
-                self.say_and_then(say)
+        if action == "resume_propose":
+            self._go_paused_confirm("resume", self.last_target, MSG[9])
+
+        elif action == "abort_propose":
+            self._go_paused_confirm("abort", None, MSG[10])
+
+        elif action == "change_dest_request":
+            self._go_paused_confirm("change_ready", None, MSG[11])
+
+        elif action == "change_dest_propose" and dest and dest in self.destinations():
+            self._go_paused_confirm("change_start", dest, msg12(dest))
+
+        elif action == "ask_again":
+            self.paused_retry += 1
+            if self.paused_retry > PAUSED_RETRY_MAX:
+                self._say(MSG[18])
+                self._go_locked()
+                return
+            self._say(MSG[21])
+            self._run_mic_sessions("paused")
+
+        else:
+            self.paused_retry += 1
+            if self.paused_retry > PAUSED_RETRY_MAX:
+                self._say(MSG[18])
+                self._go_locked()
+                return
+            self._say(MSG[21])
+            self._run_mic_sessions("paused")
+
+    # ── PAUSED_CONFIRM: 음성 긍정/부정 ─────────
+    def _process_paused_confirm_voice(self, text: str) -> None:
+        affirmative = {"네", "예", "응", "맞아요", "맞아", "좋아", "그래"}
+        negative    = {"아니요", "아니", "틀렸어요", "아니에요"}
+
+        t = text.strip()
+        if t in affirmative:
+            self._reset_pending_deadline()
+            self._say(MSG[23])
+            self._run_mic_sessions("paused")
             return
 
-        if action == "list":
-            d = self.destinations()
-            if say:
-                self.say_and_then(say)
-            else:
-                self.say_and_then("여기에는 " + (", ".join(d) if d else "(없음)") + "가 있습니다. 어떤 곳을 원하시나요?")
-            self.ready_last_activity = time.time()
+        if t in negative:
+            self._clear_pending()
+            self.phase = Phase.PAUSED_INTENT_INPUT
+            self._say(MSG[22])
+            self._run_mic_sessions("paused")
             return
 
-        if action == "cancel_confirm":
-            self._clear_confirm()
-            if say:
-                self.say_and_then(say)
+        # 수정 발화 → PAUSED_INTENT_INPUT으로 재처리
+        self._clear_pending()
+        self.phase = Phase.PAUSED_INTENT_INPUT
+        self._process_paused_text(t)
+
+    # ──────────────────────────────────────────
+    # STT 결과: 빈 텍스트 (인식 실패)
+    # ──────────────────────────────────────────
+    def _handle_stt_empty(self) -> None:
+        s, ph = self.state, self.phase
+        if s == State.READY:
+            self.ready_retry += 1
+            if self.ready_retry > READY_RETRY_MAX:
+                self._say(MSG[18])
+                self._go_locked()
+                return
+            self._say(MSG[2])
+            self._run_mic_sessions("ready")
+        elif s == State.PAUSED:
+            self.paused_retry += 1
+            if self.paused_retry > PAUSED_RETRY_MAX:
+                self._say(MSG[18])
+                self._go_locked()
+                return
+            self._say(MSG[21])
+            self._run_mic_sessions("paused")
+
+    # ──────────────────────────────────────────
+    # STT 결과: 3세션 무응답
+    # ──────────────────────────────────────────
+    def _handle_stt_timeout(self) -> None:
+        self._say(MSG[17])
+        self._go_locked()
+
+    # ──────────────────────────────────────────
+    # 도착 이벤트 (§14.3)
+    # ──────────────────────────────────────────
+    def _handle_arrive(self) -> None:
+        if self.state == State.NAV:
+            self.last_target = None
+            self._say(MSG[16])
+            self._go_locked()
+
+    # ──────────────────────────────────────────
+    # Tick: confirm timeout, READY idle (§14)
+    # ──────────────────────────────────────────
+    def _tick(self) -> None:
+        now = time.time()
+
+        # confirm timeout
+        if self.pending and now >= self.pending.deadline:
+            self._clear_pending()
+            self._say(MSG[17])
+            self._go_locked()
             return
 
-        if action == "ask_again":
-            if self.state == State.READY:
-                self.ready_last_activity = time.time()
-                self.say_and_then(say if say else "목적지를 다시 말씀해 주세요.")
-            elif self.state == State.PAUSED:
-                self.say_and_then(say if say else "다시 말씀해 주세요. 예: 다시 가줘, 목적지 바꿔, 종료해줘.")
-            return
-
-        if action == "propose" and self.state == State.READY:
-            if dest and dest in self.destinations() and need_button and button_action == "start":
-                self.pending_destination = dest
-                self.ready_last_activity = time.time()
-                prompt = say if say else f"{dest}로 안내할까요? 맞으면 {int(self.confirm_sec)}초 안에 버튼을 눌러 주세요."
-                self._set_confirm_after_prompt("start", dest, prompt)
-            return
-
-        if action == "resume_propose" and self.state == State.PAUSED:
-            if need_button and button_action == "resume":
-                prompt = say if say else f"다시 이동할까요? 맞으면 {int(self.confirm_sec)}초 안에 버튼을 눌러 주세요."
-                self._set_confirm_after_prompt("resume", None, prompt)
-            return
-
-        if action == "change_dest_request" and self.state == State.PAUSED:
-            if need_button and button_action == "change_ready":
-                prompt = say if say else f"목적지를 변경하시겠습니까? 맞으면 {int(self.confirm_sec)}초 안에 버튼을 눌러 주세요."
-                self._set_confirm_after_prompt("change_ready", None, prompt)
-            return
-
-        if action == "change_dest_propose" and self.state == State.PAUSED:
-            if dest and dest in self.destinations() and need_button and button_action == "change_start":
-                prompt = say if say else f"{dest}로 목적지를 변경할까요? 맞으면 {int(self.confirm_sec)}초 안에 버튼을 눌러 주세요."
-                self._set_confirm_after_prompt("change_start", dest, prompt)
-            else:
-                self.say_and_then("변경할 목적지를 다시 말씀해 주세요.")
-            return
-
-        if action == "abort_propose" and self.state == State.PAUSED:
-            if need_button and button_action == "abort":
-                prompt = say if say else f"안내를 종료할까요? 맞으면 {int(self.confirm_sec)}초 안에 버튼을 눌러 주세요."
-                self._set_confirm_after_prompt("abort", None, prompt)
-            return
-
-    # -----------------
+    # ──────────────────────────────────────────
     # 메인 루프
-    # -----------------
+    # ──────────────────────────────────────────
     def run(self) -> None:
-        last_reload = 0.0
-
+        print("[APP] 시작. LOCKED 상태.")
+        print("      stdin: /button | /pull | <텍스트>")
         while not self._stop.is_set():
-            now = time.time()
-
-            if now - last_reload > 0.5:
-                self._reload_locations_if_changed()
-                last_reload = now
-
-            self._run_scheduled_tasks()
-            self._confirm_timeout_tick()
-            self._ready_idle_tick()
-            self._nav_arrival_tick()
-
+            self._tick()
             try:
-                ev = self.ev_q.get_nowait()
-            except Exception:
-                ev = None
+                ev = self._ev_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
 
-            if ev is not None:
-                if ev.type == "button":
-                    self._handle_button()
+            if ev.kind == "button":
+                self._handle_button()
+            elif ev.kind == "pull":
+                self._handle_pull()
+            elif ev.kind == "text" and ev.text:
+                self._handle_text(ev.text)
+            elif ev.kind == "stt_empty":
+                self._handle_stt_empty()
+            elif ev.kind == "stt_timeout":
+                self._handle_stt_timeout()
+            elif ev.kind == "arrive":
+                self._handle_arrive()
 
-                elif ev.type == "pull":
-                    self._handle_pull()
-
-                elif ev.type == "arrive":
-                    if self.state == State.NAV:
-                        self._arrive_now("arrived_manual")
-
-                elif ev.type == "text":
-                    if ev.text in ("q", "quit", "exit"):
-                        self._stop.set()
-                        break
-
-                    if self.state == State.READY:
-                        self.ready_last_activity = time.time()
-
-                    # READY / PAUSED에서만 GPT 처리
-                    if self.state in (State.READY, State.PAUSED):
-                        self._dispatch_to_gpt(ev)
-
-            try:
-                _done_ev, plan, err = self._res_q.get_nowait()
-                self._inflight = False
-                if plan is None:
-                    if self.debug:
-                        print(f"[GPT-ERR] {err}", file=sys.stderr)
-                    if self.state in (State.READY, State.PAUSED):
-                        self.say_and_then("연결이 불안정해요. 다시 말씀해 주세요.")
-                else:
-                    self._apply_plan(plan)
-            except Exception:
-                pass
-
-            time.sleep(0.02)
-
-        try:
-            if self.hw:
-                self.hw.stop()
-        except Exception:
-            pass
-
-        try:
-            if self.mic:
-                self.mic.stop()
-        except Exception:
-            pass
-
-        if self.tts:
-            self.tts.stop()
+    def close(self) -> None:
+        self._stop.set()
+        self.nav.stop()
+        if self.hw:
+            self.hw.stop()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-
-    ap.add_argument("--locations", default=str(DEFAULT_LOCATIONS))
-    ap.add_argument("--env", default=str(DEFAULT_ENV_FILE))
-    ap.add_argument("--model", default=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
-
-    # 상태 관련 시간
-    ap.add_argument("--confirm-sec", type=float, default=14.0,
-                    help="버튼 확인 대기 시간(초) - 질문을 다 말한 뒤부터 시작")
-    ap.add_argument("--ready-idle-sec", type=float, default=30.0,
-                    help="READY에서 무응답 시 LOCKED로 돌아가는 시간(초)")
-    ap.add_argument("--arrival-sec", type=float, default=0.0,
-                    help="테스트용 자동 도착 시간(초), 0이면 비활성")
-
-    # 출력 / 입력 옵션
-    ap.add_argument("--no-tts", action="store_true")
-    ap.add_argument("--no-hw", action="store_true")
-    ap.add_argument("--no-mic", action="store_true")
-
-    # 하드웨어 포트
-    ap.add_argument("--port", default="/dev/ttyUSB0")
-    ap.add_argument("--baud", type=int, default=115200)
-
-    # 마이크/STT
-    ap.add_argument("--mic-timeout", type=float, default=0.8,
-                    help="말 시작을 기다리는 최대 시간(초)")
-    ap.add_argument("--mic-phrase-time-limit", type=float, default=5.0,
-                    help="한 번 발화를 최대 몇 초까지 들을지")
-    ap.add_argument("--mic-pause-threshold", type=float, default=1.0,
-                    help="이 시간만큼 조용하면 말 끝으로 판단")
-    ap.add_argument("--mic-energy-threshold", type=int, default=350,
-                    help="마이크 입력 민감도 기준")
-
-    # 오디오 게이트
-    ap.add_argument("--post-audio-cooldown-sec", type=float, default=0.7,
-                    help="TTS/삑음 끝난 뒤 마이크를 더 닫아둘 시간")
-    ap.add_argument("--listen-open-delay-sec", type=float, default=0.35,
-                    help="마이크를 열기 전 추가 지연 후 시작 삑")
-
-    ap.add_argument("--debug", action="store_true")
-
+# ══════════════════════════════════════════════
+# Entry point
+# ══════════════════════════════════════════════
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Hello Robot Interface v3")
+    ap.add_argument("--locations",  type=Path, default=DEFAULT_LOCATIONS)
+    ap.add_argument("--env-file",   type=Path, default=DEFAULT_ENV_FILE)
+    ap.add_argument("--model",      default=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"))
+    ap.add_argument("--no-tts",     action="store_true", help="TTS 비활성 (콘솔 출력만)")
+    ap.add_argument("--no-mic",     action="store_true", help="마이크 비활성 (stdin만)")
+    ap.add_argument("--no-hw",      action="store_true", help="하드웨어 브리지 비활성")
+    ap.add_argument("--hw-port",    default="/dev/ttyUSB0", help="시리얼 포트 (기본: /dev/ttyUSB0)")
+    ap.add_argument("--hw-baud",    type=int, default=115200, help="시리얼 보드레이트 (기본: 115200)")
+    ap.add_argument("--debug",      action="store_true")
     args = ap.parse_args()
 
     app = InterfaceApp(
-        locations_path=Path(args.locations).resolve(),
-        env_path=Path(args.env).resolve(),
-        model=args.model,
-        confirm_sec=args.confirm_sec,
-        ready_idle_sec=args.ready_idle_sec,
-        arrival_sec=args.arrival_sec,
-        no_tts=args.no_tts,
-        no_hw=args.no_hw,
-        no_mic=args.no_mic,
-        port=args.port,
-        baud=args.baud,
-        mic_timeout=args.mic_timeout,
-        mic_phrase_time_limit=args.mic_phrase_time_limit,
-        mic_pause_threshold=args.mic_pause_threshold,
-        mic_energy_threshold=args.mic_energy_threshold,
-        post_audio_cooldown_sec=args.post_audio_cooldown_sec,
-        listen_open_delay_sec=args.listen_open_delay_sec,
+        locations_path=args.locations,
+        env_path=args.env_file,
         debug=args.debug,
+        no_tts=args.no_tts,
+        no_mic=args.no_mic,
+        no_hw=args.no_hw,
+        hw_port=args.hw_port,
+        hw_baud=args.hw_baud,
+        model=args.model,
     )
-    app.run()
+
+    def _sig(*_):
+        app.close()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT,  _sig)
+    signal.signal(signal.SIGTERM, _sig)
+
+    try:
+        app.run()
+    finally:
+        app.close()
 
 
 if __name__ == "__main__":
