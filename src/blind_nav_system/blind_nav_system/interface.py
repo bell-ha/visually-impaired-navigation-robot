@@ -47,7 +47,7 @@ DEFAULT_ENV_FILE  = (THIS_DIR / "../../.env").resolve()
 # ──────────────────────────────────────────────
 # 숫자 파라미터 (명세서 §6)
 # ──────────────────────────────────────────────
-BUTTON_GUARD_SEC            = 0.8
+BUTTON_GUARD_SEC            = 1.5
 PULL_GUARD_SEC              = 1.0
 
 LISTEN_OPEN_DELAY_SEC       = 0.35
@@ -377,11 +377,16 @@ class GPTPlanner:
             "[PAUSED 허용 action]: resume_propose, abort_propose, "
             "change_dest_request, change_dest_propose, ask_again\n\n"
             "[PAUSED 해석 규칙]\n"
-            "- '다시 가/계속/재개' → resume_propose, button_action=resume\n"
-            "- '종료/그만/끝' → abort_propose, button_action=abort\n"
-            "- '바꾸고 싶어/다른 곳' (새 목적지 없음) → change_dest_request, button_action=change_ready\n"
-            "- '3호로 바꿔/편의점으로 가자' (새 목적지 포함) → change_dest_propose, button_action=change_start\n"
-            "- 불명확 → ask_again\n\n"
+            "- '다시 가/계속/재개/그냥 가' → resume_propose, button_action=resume\n"
+            "- '종료/그만/끝/멈춰' → abort_propose, button_action=abort\n"
+            "- '바꾸고 싶어/다른 곳/변경' (새 목적지 없음) → change_dest_request, button_action=change_ready\n"
+            "- 목적지 이름이 발화에 포함된 경우 (예: '503호', '503호로 바꿔', '그냥 503호', '편의점으로') → change_dest_propose, button_action=change_start, destination=해당목적지\n"
+            "- 위 어디에도 해당 안 되면 → ask_again\n\n"
+            "[중요] PAUSED에서 목적지 이름이 들리면 반드시 change_dest_propose로 처리할 것. ask_again 금지.\n\n"
+            "[유사 목적지 매칭 규칙]\n"
+            "- 발화가 목록의 목적지와 완전히 일치하지 않아도, 숫자/발음이 유사하면 가장 가까운 목적지로 매칭할 것.\n"
+            "- 예: '1501호' → '501호', '오백삼호' → '503호', '5영3' → '503호'\n"
+            "- 단, 후보가 2개 이상으로 애매하면 disambiguate 또는 ask_again 사용.\n\n"
             "[reason 규칙]\n"
             "- out_of_list: 목록 밖 목적지\n"
             "- ambiguous: 후보 복수 또는 불명확\n"
@@ -533,30 +538,185 @@ class MicSession:
 
 
 # ══════════════════════════════════════════════
-# NavSimulator – 20초 뒤 arrive 이벤트
+# ROS2 Navigation (GuidanceStateMachine + NavigationClient)
 # ══════════════════════════════════════════════
-class NavSimulator:
-    def __init__(self, on_arrive: Callable[[], None], duration: float = NAV_SIM_DURATION_SEC):
-        self._on_arrive = on_arrive
-        self._duration  = duration
-        self._timer: Optional[threading.Timer] = None
-        self._lock = threading.Lock()
+# rclpy / ROS2 import – 없으면 시뮬레이션 모드로 폴백
+try:
+    import rclpy as _rclpy
+    from rclpy.executors import SingleThreadedExecutor as _SingleThreadedExecutor
+    from rclpy.node import Node as _Node
+    from geometry_msgs.msg import Twist as _Twist
+    from action_msgs.srv import CancelGoal as _CancelGoal
+    from action_msgs.msg import GoalInfo as _GoalInfo
+    from unique_identifier_msgs.msg import UUID as _UUID
+    from builtin_interfaces.msg import Time as _BuiltinTime
+    _ROS_OK = True
+except ImportError:
+    _ROS_OK = False
 
-    def start(self, dest: str) -> bool:
+
+class GuidanceStateMachine:
+    """
+    ROS2가 있으면 NavigationClient로 실제 로봇 제어.
+    없으면 NavSimulator(20초 타이머)로 폴백.
+    interface.py의 _go_nav / _go_paused / _go_locked 에서 직접 호출.
+    """
+    def __init__(self, on_arrive: Callable[[], None],
+                 on_turn: Callable[[str], None],
+                 sim_duration: float = NAV_SIM_DURATION_SEC,
+                 debug: bool = False):
+        self._on_arrive  = on_arrive
+        self._on_turn    = on_turn
+        self._sim_duration = sim_duration
+        self._debug      = debug
+        self._ros        = _ROS_OK
+
+        # ── 공통 상태 ──
+        self._lock       = threading.Lock()
+        self._nav_node   = None          # NavigationClient 인스턴스
+        self._executor   = None
+        self._spin_thr   = None
+        self._arrive_thr: Optional[threading.Thread] = None
+        self._stop_arrive = threading.Event()
+
+        # ── 시뮬레이션 타이머 ──
+        self._sim_timer: Optional[threading.Timer] = None
+
+        if self._ros:
+            if not _rclpy.ok():
+                _rclpy.init()
+            self._executor = _SingleThreadedExecutor()
+            self._spin_thr = threading.Thread(
+                target=self._executor.spin, daemon=True)
+            self._spin_thr.start()
+            if debug:
+                print("[NAV] ROS2 모드")
+        else:
+            print("[NAV] ROS2 없음 – 시뮬레이션 모드")
+
+    # ── public API ────────────────────────────
+    def start(self, dest_key: str) -> bool:
         self.stop()
-        print(f"[NAV] 이동 시작 → {dest} ({self._duration:.0f}초 후 도착)")
-        with self._lock:
-            self._timer = threading.Timer(self._duration, self._on_arrive)
-            self._timer.daemon = True
-            self._timer.start()
-        return True
+        if self._ros:
+            return self._ros_start(dest_key)
+        else:
+            return self._sim_start(dest_key)
 
     def stop(self) -> None:
-        with self._lock:
-            if self._timer:
-                self._timer.cancel()
-                self._timer = None
-        print("[NAV] 이동 정지")
+        """정지: goal cancel + stop 퍼블리시 + 노드 정리"""
+        self._stop_arrive.set()
+        if self._ros:
+            self._ros_stop()
+        else:
+            self._sim_stop()
+        self._stop_arrive = threading.Event()   # 다음 start를 위해 리셋
+
+    def shutdown(self) -> None:
+        self.stop()
+        if self._ros and self._executor:
+            try:
+                self._executor.shutdown()
+            except Exception:
+                pass
+
+    # ── ROS2 경로 ─────────────────────────────
+    def _ros_start(self, dest_key: str) -> bool:
+        try:
+            # NavigationClient import (같은 디렉터리)
+            import importlib, sys as _sys
+            _mod_name = "navigation_client"
+            if _mod_name not in _sys.modules:
+                import importlib.util, pathlib
+                _p = pathlib.Path(__file__).resolve().parent / "navigation_client.py"
+                spec = importlib.util.spec_from_file_location(_mod_name, str(_p))
+                mod  = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                _sys.modules[_mod_name] = mod
+            NavClient = _sys.modules[_mod_name].NavigationClient
+
+            self._nav_node = NavClient(dest_key)
+            # ROS2 subscription은 등록 시점에 콜백이 바인딩되므로
+            # 기존 subscription을 destroy하고 새로 등록해야 패치가 적용됨
+            _on_turn = self._on_turn
+            _nav     = self._nav_node
+            try:
+                _nav.destroy_subscription(_nav.vel_sub)
+            except Exception:
+                pass
+            def _patched_vel(msg):
+                import math as _math, time as _t
+                now = _t.time()
+                az  = msg.angular.z
+                if abs(az) > _nav.turn_threshold:
+                    if now - _nav.last_turn_announcement > 5.0:
+                        direction = "왼쪽" if az > 0 else "오른쪽"
+                        _on_turn(direction)
+                        _nav.last_turn_announcement = now
+            from geometry_msgs.msg import Twist as _TwistMsg
+            _nav.vel_sub = _nav.create_subscription(
+                _TwistMsg, "/stretch/cmd_vel", _patched_vel, 10)
+
+            self._executor.add_node(self._nav_node)
+            ok = bool(self._nav_node.start_navigation())
+            if not ok:
+                self._ros_cleanup_node()
+                return False
+
+            print(f"[NAV] ROS2 이동 시작 → {dest_key}")
+            # 도착 감지 스레드
+            stop_ev = self._stop_arrive
+            def _watch():
+                while not stop_ev.is_set():
+                    if getattr(self._nav_node, "is_arrived", False):
+                        self._on_arrive()
+                        return
+                    threading.Event().wait(0.1)
+            self._arrive_thr = threading.Thread(target=_watch, daemon=True)
+            self._arrive_thr.start()
+            return True
+
+        except Exception as e:
+            if self._debug:
+                print(f"[NAV] ROS2 start error: {e}", file=__import__("sys").stderr)
+            return False
+
+    def _ros_stop(self) -> None:
+        try:
+            if self._nav_node:
+                self._nav_node.cleanup()
+        except Exception:
+            pass
+        self._ros_cleanup_node()
+
+    def _ros_cleanup_node(self) -> None:
+        if self._nav_node and self._executor:
+            try:
+                self._executor.remove_node(self._nav_node)
+            except Exception:
+                pass
+            try:
+                self._nav_node.destroy_node()
+            except Exception:
+                pass
+        self._nav_node = None
+
+    # ── 시뮬레이션 경로 ───────────────────────
+    def _sim_start(self, dest_key: str) -> bool:
+        print(f"[NAV] 시뮬 이동 시작 → {dest_key} ({self._sim_duration:.0f}초 후 도착)")
+        stop_ev = self._stop_arrive
+        def _fire():
+            if not stop_ev.is_set():
+                self._on_arrive()
+        self._sim_timer = threading.Timer(self._sim_duration, _fire)
+        self._sim_timer.daemon = True
+        self._sim_timer.start()
+        return True
+
+    def _sim_stop(self) -> None:
+        if self._sim_timer:
+            self._sim_timer.cancel()
+            self._sim_timer = None
+        print("[NAV] 시뮬 이동 정지")
 
 
 # ══════════════════════════════════════════════
@@ -722,8 +882,13 @@ class InterfaceApp:
         # 마이크 세션
         self.mic_session = MicSession(tts=self.tts, beeper=self.beeper, gate=self.gate, debug=debug)
 
-        # 내비게이션 시뮬레이터
-        self.nav = NavSimulator(on_arrive=self._on_arrive)
+        # 내비게이션 (ROS2 있으면 실제, 없으면 시뮬레이션)
+        self.nav = GuidanceStateMachine(
+            on_arrive=self._on_arrive,
+            on_turn=self._on_turn_announce,
+            sim_duration=NAV_SIM_DURATION_SEC,
+            debug=debug,
+        )
 
         # 상태
         self.state:   State            = State.LOCKED
@@ -745,6 +910,9 @@ class InterfaceApp:
         # 이벤트 큐
         self._ev_q: queue.Queue[Event] = queue.Queue()
         self._stop = threading.Event()
+
+        # 마이크 세션 취소 토큰 (새 세션 시작 시 이전 스레드를 무효화)
+        self._mic_cancel = threading.Event()
 
         # 하드웨어 버튼/pull (시리얼)
         self.hw: Optional[HardwareKeyBridge] = None
@@ -778,7 +946,7 @@ class InterfaceApp:
         self.tts.say(text)
         # 실제로는 say()가 동기이므로 여기서 gate는 이미 만료됨
         # 하지만 beep/다음 액션 전 짧은 쿨다운 보장
-        self.gate.block(0.3)
+        self.gate.block(0.8)
 
     def _state_log(self) -> None:
         p = self.phase.name if self.phase != Phase.NONE else ""
@@ -802,10 +970,15 @@ class InterfaceApp:
         self.pending = None
 
     # ──────────────────────────────────────────
-    # 도착 콜백 (NavSimulator → 메인 스레드)
+    # 도착 / 회전 콜백 (GuidanceStateMachine → 메인 스레드)
     # ──────────────────────────────────────────
     def _on_arrive(self) -> None:
         self._ev_q.put(Event(kind="arrive"))
+
+    def _on_turn_announce(self, direction: str) -> None:
+        """NAV 상태에서만 회전 안내 (vel_callback 스레드에서 호출되므로 큐 경유)"""
+        if self.state == State.NAV:
+            self._ev_q.put(Event(kind="turn", text=direction))
 
     # ──────────────────────────────────────────
     # stdin 테스트 입력
@@ -842,43 +1015,62 @@ class InterfaceApp:
         context: 'ready' | 'paused'
         3세션, 리마인드 2회 구조.
         결과를 ev_q에 넣는다.
+        새로 호출될 때마다 이전 스레드를 취소 토큰으로 무효화.
         """
         if self.no_mic:
             return
 
+        # 이전 세션 취소 – 새 Event 객체로 교체
+        self._mic_cancel.set()
+        cancel = threading.Event()
+        self._mic_cancel = cancel
+
         def worker():
             for session_idx in range(NO_RESPONSE_MAX_SESSIONS):
+                if cancel.is_set():
+                    return  # 새 세션이 시작됐으면 조용히 종료
+
                 # 리마인드 (2차, 3차 수음 전)
                 if session_idx == 1:
-                    self._say(MSG[19])   # 리마인드 1
+                    self._say(MSG[19])
                 elif session_idx == 2:
-                    self._say(MSG[20])   # 리마인드 2
+                    self._say(MSG[20])
+
+                if cancel.is_set():
+                    return
 
                 text, status = self.mic_session.listen()
+
+                if cancel.is_set():
+                    return  # 수음 중 새 세션이 시작됐으면 결과 버림
 
                 if status == "ok" and text:
                     self._ev_q.put(Event(kind="text", text=text))
                     return
                 elif status == "empty":
-                    # 인식 실패 → retry count 증가 (메인에서 처리)
                     self._ev_q.put(Event(kind="stt_empty"))
                     return
                 elif status == "dup":
-                    # 중복이면 조용히 재시도
                     continue
                 else:
-                    # timeout → 무응답 세션 소모, 다음 세션으로
+                    # timeout → 다음 세션으로
                     continue
 
-            # 3세션 모두 무응답
-            self._ev_q.put(Event(kind="stt_timeout"))
+            if not cancel.is_set():
+                self._ev_q.put(Event(kind="stt_timeout"))
 
         threading.Thread(target=worker, daemon=True).start()
 
     # ──────────────────────────────────────────
     # 상태 전이 헬퍼
     # ──────────────────────────────────────────
+    def _cancel_mic(self) -> None:
+        """진행 중인 마이크 세션을 즉시 취소 (마이크가 필요 없는 상태로 전환 시 호출)."""
+        self._mic_cancel.set()
+        self._mic_cancel = threading.Event()
+
     def _go_locked(self, reason: str = "") -> None:
+        self._cancel_mic()
         self.state  = State.LOCKED
         self.phase  = Phase.NONE
         self._clear_pending()
@@ -914,6 +1106,7 @@ class InterfaceApp:
             self.phase = Phase.READY_DEST_INPUT
             self._state_log()
             return
+        self._cancel_mic()          # READY_CONFIRM 등에서 열린 마이크 세션 취소
         self.last_target = dest
         self.state = State.NAV
         self.phase = Phase.NONE
@@ -929,6 +1122,8 @@ class InterfaceApp:
         self._clear_pending()
         self._state_log()
         self._say(MSG[8])
+        # MSG[8] TTS 잔향이 마이크에 잡히지 않도록 추가 쿨다운
+        self.gate.block(1.2)
         self._run_mic_sessions("paused")
 
     def _go_paused_confirm(self, action: str, dest: Optional[str], prompt_msg: str) -> None:
@@ -944,6 +1139,9 @@ class InterfaceApp:
     def _handle_button(self) -> None:
         now = time.time()
         if now < self._btn_guard_until:
+            return
+        # TTS 재생 중이면 버튼 무시 (AudioGate가 닫혀있는 동안)
+        if not self.gate.is_open():
             return
         self._btn_guard_until = now + BUTTON_GUARD_SEC
 
@@ -1084,9 +1282,19 @@ class InterfaceApp:
         candidates = plan.get("candidates", [])
         reason     = plan.get("reason", "none")
 
-        if action == "propose" and dest and dest in self.destinations():
+        if action in ("propose", "change_dest_propose") and dest and dest in self.destinations():
             self._say(msg5(dest))
             self._go_ready_confirm(dest)
+
+        elif action in ("propose", "change_dest_propose") and dest and dest not in self.destinations():
+            # 목적지 이름은 인식됐지만 목록에 없음
+            self.ready_retry += 1
+            if self.ready_retry > READY_RETRY_MAX:
+                self._say(MSG[18])
+                self._go_locked()
+                return
+            self._say(MSG[3])   # "현재 갈 수 있는 장소가 아닙니다."
+            self._run_mic_sessions("ready")
 
         elif action == "disambiguate":
             self.ready_retry += 1
@@ -1165,8 +1373,18 @@ class InterfaceApp:
         elif action == "change_dest_request":
             self._go_paused_confirm("change_ready", None, MSG[11])
 
-        elif action == "change_dest_propose" and dest and dest in self.destinations():
-            self._go_paused_confirm("change_start", dest, msg12(dest))
+        elif action == "change_dest_propose":
+            if dest and dest in self.destinations():
+                self._go_paused_confirm("change_start", dest, msg12(dest))
+            else:
+                # 목적지가 목록에 없음 → 안내 후 재입력
+                self.paused_retry += 1
+                if self.paused_retry > PAUSED_RETRY_MAX:
+                    self._say(MSG[18])
+                    self._go_locked()
+                    return
+                self._say(MSG[3])   # "현재 갈 수 있는 장소가 아닙니다."
+                self._run_mic_sessions("paused")
 
         elif action == "ask_again":
             self.paused_retry += 1
@@ -1286,10 +1504,14 @@ class InterfaceApp:
                 self._handle_stt_timeout()
             elif ev.kind == "arrive":
                 self._handle_arrive()
+            elif ev.kind == "turn" and ev.text:
+                # NAV 중 회전 안내 – 메인 스레드에서 안전하게 TTS
+                if self.state == State.NAV:
+                    self._say(f"{ev.text}으로 회전합니다.")
 
     def close(self) -> None:
         self._stop.set()
-        self.nav.stop()
+        self.nav.shutdown()
         if self.hw:
             self.hw.stop()
 
