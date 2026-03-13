@@ -11,15 +11,7 @@
   <arg name="params_file" default="/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params.yaml"/>
   -->
   <!-- 사람 있음 -->
-  <!--  -->
   <arg name="params_file" default="/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params_human.yaml"/>
-
-
-
-
-
-
-
 
   <arg name="map" default="/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/test1_map.yaml"/>
 
@@ -33,11 +25,31 @@
     <arg name="broadcast_odom_tf" value="True"/>
   </include>
 
-  <!-- ====== 2) LiDAR (너가 쓰던 rplidar_ros) ====== -->
+  <!-- ====== 2) LiDAR (rplidar_ros) ====== -->
   <node pkg="rplidar_ros" exec="rplidar_composition" name="rplidar" output="screen">
     <param name="serial_port" value="/dev/hello-lrf"/>
     <param name="serial_baudrate" value="115200"/>
     <param name="frame_id" value="laser"/>
+  </node>
+
+  <!-- ====== 2-2) RealSense D435i 카메라 드라이버 ====== -->
+  <!--
+    [목적] Local costmap에서 LiDAR가 못 잡는 중간 높이 장애물 (책상 상판, 선반, 사람 몸통 등) 감지
+    [토픽] 이 노드가 올라오면 아래 토픽이 생성됨:
+      - /camera/depth/color/points  (PointCloud2, nav2_params_human.yaml에 설정된 토픽)
+    [확인] ros2 topic list | grep camera
+  -->
+  <node pkg="realsense2_camera" exec="realsense2_camera_node" name="camera" output="screen">
+    <!-- PointCloud2 활성화 (nav2 obstacle layer가 이 토픽을 구독) -->
+    <param name="pointcloud.enable" value="true"/>
+    <!-- [성능 최적화] 해상도 낮춰서 포인트클라우드 Hz 향상 -->
+    <!-- 424x240x15: 장애물 감지 용도로 충분, CPU 부하 대폭 감소 -->
+    <param name="depth_module.profile" value="424x240x15"/>
+    <!-- color 정렬/RGB 스트림 끔: 장애물 감지에 색상 불필요, CPU 절약 -->
+    <param name="align_depth.enable" value="false"/>
+    <param name="enable_color" value="false"/>
+    <!-- QoS를 SENSOR_DATA로: 데이터 손실보다 속도 우선 -->
+    <param name="pointcloud.pointcloud_qos" value="SENSOR_DATA"/>
   </node>
 
   <!-- ====== 3) safety zone static TF ====== -->
@@ -50,13 +62,9 @@
 
   <!-- ====== 4) Localization: map_server + amcl ====== -->
   <node pkg="nav2_map_server" exec="map_server" name="map_server" output="screen">
-    <!-- nav2_params.yaml 전체 로드 -->
     <param from="$(var params_file)"/>
-    <!-- map 경로/시간은 런치에서 확정으로 덮어씀 -->
     <param name="yaml_filename" value="$(var map)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
-
-    <!-- namespace 대응용(루트에서는 영향 거의 없음) -->
     <remap from="/tf" to="tf"/>
     <remap from="/tf_static" to="tf_static"/>
   </node>
@@ -64,24 +72,19 @@
   <node pkg="nav2_amcl" exec="amcl" name="amcl" output="screen">
     <param from="$(var params_file)"/>
     <param name="use_sim_time" value="$(var use_sim_time)"/>
-
     <remap from="/tf" to="tf"/>
     <remap from="/tf_static" to="tf_static"/>
   </node>
 
-  <!-- localization lifecycle manager: shell sleep/ros2 lifecycle set 제거 -->
   <node pkg="nav2_lifecycle_manager" exec="lifecycle_manager"
         name="lifecycle_manager_localization" output="screen">
     <param name="use_sim_time" value="$(var use_sim_time)"/>
     <param name="autostart" value="true"/>
-    <!-- 맵 로딩/시작 느릴 때 대비 -->
     <param name="bond_timeout" value="10.0"/>
     <param name="node_names" value="['map_server', 'amcl']"/>
   </node>
 
-  <!-- ====== 5) Navigation (controller/planner/bt/waypoint + lifecycle_manager_navigation) ======
-       stretch_nav2/launch/navigation_launch.py 는 "네비게이션 파트만" 올림 (localization은 위에서 처리)
-  -->
+  <!-- ====== 5) Navigation ====== -->
   <timer period="$(var nav_start_delay)">
     <include file="$(find-pkg-share stretch_nav2)/launch/navigation_launch.py">
       <arg name="namespace" value=""/>
