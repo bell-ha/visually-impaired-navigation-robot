@@ -133,25 +133,21 @@ def _suppress_alsa() -> None:
 # YAML 파서
 # ══════════════════════════════════════════════
 def load_locations(path: Path) -> Dict[str, Dict[str, float]]:
-    locs: Dict[str, Dict[str, float]] = {}
     if not path.exists():
-        return locs
-    in_loc = False
-    cur: Optional[str] = None
-    key_re = re.compile(r"^\s{2}([^:#\s][^:#]*)\s*:\s*$")
-    val_re = re.compile(r"^\s{4}(x|y|w)\s*:\s*([-\d.eE]+)")
-    for line in path.read_text("utf-8").splitlines():
-        if not in_loc:
-            if re.match(r"^\s*locations\s*:\s*$", line):
-                in_loc = True
-            continue
-        m = key_re.match(line)
-        if m:
-            cur = m.group(1).strip(); locs.setdefault(cur, {}); continue
-        m = val_re.match(line)
-        if m and cur:
-            locs[cur][m.group(1)] = float(m.group(2))
-    return {k: v for k, v in locs.items() if all(t in v for t in ("x","y","w"))}
+        return {}
+    import yaml
+    data = yaml.safe_load(path.read_text("utf-8")) or {}
+    locs: Dict[str, Dict[str, float]] = {}
+    for name, vals in (data.get("locations") or {}).items():
+        try:
+            locs[str(name)] = {
+                "x": float(vals["x"]),
+                "y": float(vals["y"]),
+                "w": float(vals["w"]),
+            }
+        except Exception:
+            pass
+    return locs
 
 
 # ══════════════════════════════════════════════
@@ -170,22 +166,21 @@ def load_openai_key(env_path: Path) -> str:
 
 
 # ══════════════════════════════════════════════
-# TTS  (gTTS + pygame, 동기)
+# TTS  (gTTS + ffmpeg + pyaudio, 동기)
 # ══════════════════════════════════════════════
 class TTS:
-    def __init__(self, debug: bool = False, enabled: bool = True):
+    def __init__(self, debug: bool = False, enabled: bool = True, audio_device: int = 0):
         self.debug = debug
         self.enabled = enabled
+        self.audio_device = audio_device
         self._lock = threading.Lock()
         self._ok = False
         if enabled:
             try:
-                import pygame
                 from gtts import gTTS as _gTTS
-                self._pygame = pygame
+                import pyaudio as _pyaudio
                 self._gTTS = _gTTS
-                os.environ.setdefault("SDL_AUDIODRIVER", "pulse")
-                pygame.mixer.init()
+                self._pa = _pyaudio.PyAudio()
                 self._ok = True
             except Exception as e:
                 if debug:
@@ -199,37 +194,58 @@ class TTS:
         if not self._ok:
             return
         with self._lock:
+            mp3_path = wav_path = None
             try:
-                import tempfile, os
-                fd, path = tempfile.mkstemp(suffix=".mp3")
+                import subprocess
+                fd, mp3_path = tempfile.mkstemp(suffix=".mp3")
                 os.close(fd)
-                self._gTTS(text=t, lang="ko").save(path)
-                self._pygame.mixer.music.load(path)
-                self._pygame.mixer.music.play()
-                while self._pygame.mixer.music.get_busy():
-                    time.sleep(0.02)
-                self._pygame.mixer.music.unload()
-                os.remove(path)
+                wav_path = mp3_path.replace(".mp3", ".wav")
+                self._gTTS(text=t, lang="ko").save(mp3_path)
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", mp3_path, "-ar", "44100", "-ac", "1", wav_path],
+                    capture_output=True, timeout=15,
+                )
+                with wave.open(wav_path, "rb") as wf:
+                    stream = self._pa.open(
+                        format=self._pa.get_format_from_width(wf.getsampwidth()),
+                        channels=wf.getnchannels(),
+                        rate=wf.getframerate(),
+                        output=True,
+                        output_device_index=self.audio_device,
+                    )
+                    data = wf.readframes(1024)
+                    while data:
+                        stream.write(data)
+                        data = wf.readframes(1024)
+                    stream.stop_stream()
+                    stream.close()
             except Exception as e:
                 if self.debug:
                     print(f"[TTS] say error: {e}", file=sys.stderr)
+            finally:
+                for p in [mp3_path, wav_path]:
+                    if p:
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
 
 
 # ══════════════════════════════════════════════
 # Beeper (wav 생성 후 pygame 재생)
 # ══════════════════════════════════════════════
 class Beeper:
-    def __init__(self, debug: bool = False, enabled: bool = True):
+    def __init__(self, debug: bool = False, enabled: bool = True, audio_device: int = 0):
         self.debug = debug
         self.enabled = enabled
+        self.audio_device = audio_device
         self._ok = False
         self._cache: Dict[Tuple[int,int], str] = {}
         self._tmpdir = tempfile.mkdtemp(prefix="beep_")
         if enabled:
             try:
-                import pygame
-                self._pygame = pygame
-                pygame.mixer.init()
+                import pyaudio as _pyaudio
+                self._pa = _pyaudio.PyAudio()
                 self._ok = True
             except Exception as e:
                 if debug:
@@ -260,11 +276,20 @@ class Beeper:
             return
         try:
             path = self._make_wav(hz, ms)
-            self._pygame.mixer.music.load(path)
-            self._pygame.mixer.music.play()
-            while self._pygame.mixer.music.get_busy():
-                time.sleep(0.005)
-            self._pygame.mixer.music.unload()
+            with wave.open(path, "rb") as wf:
+                stream = self._pa.open(
+                    format=self._pa.get_format_from_width(wf.getsampwidth()),
+                    channels=wf.getnchannels(),
+                    rate=wf.getframerate(),
+                    output=True,
+                    output_device_index=self.audio_device,
+                )
+                data = wf.readframes(1024)
+                while data:
+                    stream.write(data)
+                    data = wf.readframes(1024)
+                stream.stop_stream()
+                stream.close()
         except Exception as e:
             if self.debug:
                 print(f"[BEEP] error: {e}", file=sys.stderr)
@@ -863,18 +888,19 @@ class InterfaceApp:
         no_tts:         bool  = False,
         no_mic:         bool  = False,
         no_hw:          bool  = False,
-        hw_port:        str   = "/dev/ttyUSB3",
+        hw_port:        str   = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0",
         hw_baud:        int   = 115200,
         model:          str   = "gpt-4o-mini",
-        mic_index:      int   = 0,
+        mic_index:      int   = 5,
+        audio_device:   int   = 0,
     ):
         self.debug          = debug
         self.locations_path = locations_path
         self.locations      = load_locations(locations_path)
 
         # 출력
-        self.tts    = TTS(debug=debug, enabled=not no_tts)
-        self.beeper = Beeper(debug=debug, enabled=not no_tts)
+        self.tts    = TTS(debug=debug, enabled=not no_tts, audio_device=audio_device)
+        self.beeper = Beeper(debug=debug, enabled=not no_tts, audio_device=audio_device)
         self.gate   = AudioGate()
         self.no_mic = no_mic
 
@@ -1532,9 +1558,10 @@ def main() -> None:
     ap.add_argument("--no-tts",     action="store_true", help="TTS 비활성 (콘솔 출력만)")
     ap.add_argument("--no-mic",     action="store_true", help="마이크 비활성 (stdin만)")
     ap.add_argument("--no-hw",      action="store_true", help="하드웨어 브리지 비활성")
-    ap.add_argument("--hw-port",    default="/dev/ttyUSB3", help="시리얼 포트 (기본: /dev/ttyUSB3)")
+    ap.add_argument("--hw-port",    default="/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0", help="시리얼 포트 (기본: by-id 고정 경로)")
     ap.add_argument("--hw-baud",    type=int, default=115200, help="시리얼 보드레이트 (기본: 115200)")
-    ap.add_argument("--mic-index",  type=int, default=0,     help="마이크 장치 index (기본: 0, 내장 마이크)")
+    ap.add_argument("--mic-index",    type=int, default=5, help="마이크 장치 index (기본: 5, ReSpeaker)")
+    ap.add_argument("--audio-device", type=int, default=0, help="스피커 출력 장치 index (기본: 0)")
     ap.add_argument("--debug",      action="store_true")
     args = ap.parse_args()
 
@@ -1549,6 +1576,7 @@ def main() -> None:
         hw_baud=args.hw_baud,
         model=args.model,
         mic_index=args.mic_index,
+        audio_device=args.audio_device,
     )
 
     def _sig(*_):
