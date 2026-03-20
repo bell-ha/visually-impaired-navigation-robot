@@ -42,7 +42,8 @@ except ImportError:
 # ──────────────────────────────────────────────
 THIS_DIR = Path(__file__).resolve().parent
 DEFAULT_LOCATIONS = (THIS_DIR / "../config/location.yaml").resolve()
-DEFAULT_ENV_FILE  = (THIS_DIR / "../../.env").resolve()
+
+DEFAULT_ENV_FILE = Path("/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/.env")
 
 # ──────────────────────────────────────────────
 # 숫자 파라미터 (명세서 §6)
@@ -183,6 +184,7 @@ class TTS:
                 from gtts import gTTS as _gTTS
                 self._pygame = pygame
                 self._gTTS = _gTTS
+                os.environ.setdefault("SDL_AUDIODRIVER", "pulse")
                 pygame.mixer.init()
                 self._ok = True
             except Exception as e:
@@ -450,15 +452,17 @@ class MicSession:
     """
     def __init__(
         self,
-        tts:    TTS,
-        beeper: Beeper,
-        gate:   AudioGate,
-        debug:  bool = False,
+        tts:       TTS,
+        beeper:    Beeper,
+        gate:      AudioGate,
+        debug:     bool = False,
+        mic_index: Optional[int] = 5,
     ):
-        self.tts    = tts
-        self.beeper = beeper
-        self.gate   = gate
-        self.debug  = debug
+        self.tts       = tts
+        self.beeper    = beeper
+        self.gate      = gate
+        self.debug     = debug
+        self.mic_index = mic_index
 
         self._r = sr.Recognizer()
         self._r.pause_threshold          = LISTEN_PAUSE_THRESHOLD_SEC
@@ -499,7 +503,7 @@ class MicSession:
 
         # 수음
         try:
-            mic = sr.Microphone()
+            mic = sr.Microphone(device_index=self.mic_index)
             with mic as src:
                 self._r.adjust_for_ambient_noise(src, duration=0.3)
                 audio = self._r.listen(
@@ -859,9 +863,10 @@ class InterfaceApp:
         no_tts:         bool  = False,
         no_mic:         bool  = False,
         no_hw:          bool  = False,
-        hw_port:        str   = "/dev/ttyUSB0",
+        hw_port:        str   = "/dev/ttyUSB3",
         hw_baud:        int   = 115200,
         model:          str   = "gpt-4o-mini",
+        mic_index:      int   = 0,
     ):
         self.debug          = debug
         self.locations_path = locations_path
@@ -880,7 +885,7 @@ class InterfaceApp:
         self.gpt = GPTPlanner(api_key=api_key, model=model, debug=debug)
 
         # 마이크 세션
-        self.mic_session = MicSession(tts=self.tts, beeper=self.beeper, gate=self.gate, debug=debug)
+        self.mic_session = MicSession(tts=self.tts, beeper=self.beeper, gate=self.gate, debug=debug, mic_index=mic_index)
 
         # 내비게이션 (ROS2 있으면 실제, 없으면 시뮬레이션)
         self.nav = GuidanceStateMachine(
@@ -1527,8 +1532,9 @@ def main() -> None:
     ap.add_argument("--no-tts",     action="store_true", help="TTS 비활성 (콘솔 출력만)")
     ap.add_argument("--no-mic",     action="store_true", help="마이크 비활성 (stdin만)")
     ap.add_argument("--no-hw",      action="store_true", help="하드웨어 브리지 비활성")
-    ap.add_argument("--hw-port",    default="/dev/ttyUSB0", help="시리얼 포트 (기본: /dev/ttyUSB0)")
+    ap.add_argument("--hw-port",    default="/dev/ttyUSB3", help="시리얼 포트 (기본: /dev/ttyUSB3)")
     ap.add_argument("--hw-baud",    type=int, default=115200, help="시리얼 보드레이트 (기본: 115200)")
+    ap.add_argument("--mic-index",  type=int, default=0,     help="마이크 장치 index (기본: 0, 내장 마이크)")
     ap.add_argument("--debug",      action="store_true")
     args = ap.parse_args()
 
@@ -1542,6 +1548,7 @@ def main() -> None:
         hw_port=args.hw_port,
         hw_baud=args.hw_baud,
         model=args.model,
+        mic_index=args.mic_index,
     )
 
     def _sig(*_):
