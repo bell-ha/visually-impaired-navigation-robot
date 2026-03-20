@@ -42,7 +42,7 @@ class MouseTeleop(Node):
             '  스크롤 위/아래 : 전진/후진\n'
             '  좌클릭(누름)   : 좌회전\n'
             '  우클릭(누름)   : 우회전\n'
-            '  중간 클릭      : 즉시 정지\n'
+            '  중간 클릭      : 정지\n'
             '  Ctrl+C         : 종료'
         )
 
@@ -88,6 +88,7 @@ def main():
         pass
     finally:
         node._listener.stop()
+        # 정지 명령 전송
         stop = Twist()
         node.pub.publish(stop)
         node.destroy_node()

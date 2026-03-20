@@ -27,7 +27,7 @@ class NavigationClient(Node):
         self.target_key = target_key
         self.goal_handle = None
         self.is_arrived = False
-        self.yaml_path = os.path.expanduser('~/Desktop/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/config/location.yaml')
+        self.yaml_path = os.path.expanduser('~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/config/location.yaml')
 
     def load_location(self):
         try:
