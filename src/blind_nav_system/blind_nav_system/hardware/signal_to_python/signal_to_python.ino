@@ -1,30 +1,42 @@
-const int buttonPin = 18;
+const int buttonPin1 = 18;  // 기존 버튼
+const int buttonPin2 = 19;  // 추가된 버튼 (I019)
 const int pressurePin = 39;
-int lastButtonState = LOW;
+
+int lastButtonState1 = LOW;
+int lastButtonState2 = LOW;
 
 void setup() {
   Serial.begin(115200);
-  pinMode(buttonPin, INPUT);
+  pinMode(buttonPin1, INPUT);
+  pinMode(buttonPin2, INPUT); // 19번 핀을 입력으로 설정
 }
 
 void loop() {
-  int currentButtonState = digitalRead(buttonPin);
+  int state1 = digitalRead(buttonPin1);
+  int state2 = digitalRead(buttonPin2);
   int pressureVal = analogRead(pressurePin);
 
-  // 근거: 트리거가 발생하면 Serial.flush() 효과를 내기 위해 
-  // 다른 데이터보다 우선적으로 즉시 전송합니다.
-  if (currentButtonState == HIGH && lastButtonState == LOW) {
-    Serial.print("TRIG,1,");
+  // 근거: 어느 버튼이 눌렸는지 구분하기 위해 TRIG 번호를 부여합니다.
+  if (state1 == HIGH && lastButtonState1 == LOW) {
+    Serial.print("TRIG,1,"); // 18번 버튼 트리거
     Serial.println(pressureVal); 
-  } else {
+  } 
+  else if (state2 == HIGH && lastButtonState2 == LOW) {
+    Serial.print("TRIG,2,"); // 19번 버튼 트리거
+    Serial.println(pressureVal); 
+  }
+  else {
+    // 일반 데이터 전송 시 두 버튼의 상태를 모두 보냅니다.
     Serial.print("DATA,");
-    Serial.print(currentButtonState);
+    Serial.print(state1);
+    Serial.print(",");
+    Serial.print(state2);
     Serial.print(",");
     Serial.println(pressureVal);
   }
 
-  lastButtonState = currentButtonState;
+  lastButtonState1 = state1;
+  lastButtonState2 = state2;
   
-  // 근거: delay가 너무 길면 버튼 반응이 둔해집니다. 10ms로 줄여 반응성을 높입니다.
   delay(10); 
 }
