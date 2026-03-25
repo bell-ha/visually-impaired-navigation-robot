@@ -413,6 +413,10 @@ class GPTPlanner:
             "[유사 목적지 매칭 규칙]\n"
             "- 발화가 목록의 목적지와 완전히 일치하지 않아도, 숫자/발음이 유사하면 가장 가까운 목적지로 매칭할 것.\n"
             "- 예: '1501호' → '501호', '오백삼호' → '503호', '5영3' → '503호'\n"
+            "- 목적지 이름 괄호 안 내용은 별칭이다. 예: '504호(연구실)'은 '504호' 또는 '연구실'로 불릴 수 있다.\n"
+            "- 발화가 별칭과 일치하면 해당 목적지를 후보로 포함한다. 별칭이 동일한 목적지가 여러 개면 모두 후보에 넣어 disambiguate.\n"
+            "- [중요] destination 필드에는 반드시 목록에 있는 정확한 전체 이름을 그대로 써야 한다. "
+            "예: 사용자가 '504호'라고 해도 목록에 '504호(연구실)'이 있으면 destination='504호(연구실)'로 반환.\n"
             "- 단, 후보가 2개 이상으로 애매하면 disambiguate 또는 ask_again 사용.\n\n"
             "[reason 규칙]\n"
             "- out_of_list: 목록 밖 목적지\n"
@@ -592,10 +596,12 @@ class GuidanceStateMachine:
     """
     def __init__(self, on_arrive: Callable[[], None],
                  on_turn: Callable[[str], None],
+                 on_obstacle: Callable[[], None] = lambda: None,
                  sim_duration: float = NAV_SIM_DURATION_SEC,
                  debug: bool = False):
-        self._on_arrive  = on_arrive
-        self._on_turn    = on_turn
+        self._on_arrive   = on_arrive
+        self._on_turn     = on_turn
+        self._on_obstacle = on_obstacle
         self._sim_duration = sim_duration
         self._debug      = debug
         self._ros        = _ROS_OK
@@ -666,21 +672,37 @@ class GuidanceStateMachine:
             self._nav_node = NavClient(dest_key)
             # ROS2 subscription은 등록 시점에 콜백이 바인딩되므로
             # 기존 subscription을 destroy하고 새로 등록해야 패치가 적용됨
-            _on_turn = self._on_turn
-            _nav     = self._nav_node
+            _on_turn     = self._on_turn
+            _on_obstacle = self._on_obstacle
+            _nav         = self._nav_node
+            _nav.last_stuck_announce = 0.0
+            _nav.still_since         = None
             try:
                 _nav.destroy_subscription(_nav.vel_sub)
             except Exception:
                 pass
             def _patched_vel(msg):
-                import math as _math, time as _t
+                import time as _t
                 now = _t.time()
                 az  = msg.angular.z
+                lx  = msg.linear.x
+                # 회전 안내 (기존)
                 if abs(az) > _nav.turn_threshold:
                     if now - _nav.last_turn_announcement > 5.0:
                         direction = "왼쪽" if az > 0 else "오른쪽"
                         _on_turn(direction)
                         _nav.last_turn_announcement = now
+                # 장애물 감지: 속도가 3초 이상 거의 0 → "비켜주세요" 안내
+                if abs(lx) < 0.02 and abs(az) < 0.05:
+                    if _nav.still_since is None:
+                        _nav.still_since = now
+                    elif now - _nav.still_since >= 3.0:
+                        if now - _nav.last_stuck_announce > 30.0:
+                            _on_obstacle()
+                            _nav.last_stuck_announce = now
+                        _nav.still_since = None
+                else:
+                    _nav.still_since = None
             from geometry_msgs.msg import Twist as _TwistMsg
             _nav.vel_sub = _nav.create_subscription(
                 _TwistMsg, "/stretch/cmd_vel", _patched_vel, 10)
@@ -917,6 +939,7 @@ class InterfaceApp:
         self.nav = GuidanceStateMachine(
             on_arrive=self._on_arrive,
             on_turn=self._on_turn_announce,
+            on_obstacle=self._on_obstacle_announce,
             sim_duration=NAV_SIM_DURATION_SEC,
             debug=debug,
         )
@@ -1011,6 +1034,11 @@ class InterfaceApp:
         if self.state == State.NAV:
             self._ev_q.put(Event(kind="turn", text=direction))
 
+    def _on_obstacle_announce(self) -> None:
+        """NAV 중 로봇이 멈췄을 때 장애물 안내 (vel_callback 스레드 → 큐 경유)"""
+        if self.state == State.NAV:
+            self._ev_q.put(Event(kind="obstacle"))
+
     # ──────────────────────────────────────────
     # stdin 테스트 입력
     # ──────────────────────────────────────────
@@ -1034,6 +1062,8 @@ class InterfaceApp:
                 self._ev_q.put(Event(kind="button"))
             elif s == "/pull":
                 self._ev_q.put(Event(kind="pull"))
+            elif s == "/cancel":
+                self._ev_q.put(Event(kind="cancel"))
             else:
                 self._ev_q.put(Event(kind="text", text=s))
 
@@ -1535,6 +1565,11 @@ class InterfaceApp:
                 self._handle_stt_timeout()
             elif ev.kind == "arrive":
                 self._handle_arrive()
+            elif ev.kind == "cancel":
+                self._go_locked("수동 모드 전환")
+            elif ev.kind == "obstacle":
+                if self.state == State.NAV:
+                    self._say("앞에 장애물이 있습니다. 잠시 비켜주세요.")
             elif ev.kind == "turn" and ev.text:
                 # NAV 중 회전 안내 – 메인 스레드에서 안전하게 TTS
                 if self.state == State.NAV:
