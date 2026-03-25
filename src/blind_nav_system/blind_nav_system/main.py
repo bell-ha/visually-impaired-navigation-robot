@@ -35,8 +35,8 @@ BAUD = 115200
 
 # ── 스피커 설정 ───────────────────────────────────────────────────────────────
 # interface.py 스피커: index 0 (HDA Intel PCH)
-# vision_assistant.py 스피커: index 1 (별도 장치) — 두 TTS 동시 재생 가능
-VISION_SPEAKER_INDEX = 1
+# vision_assistant.py 스피커: index 0 (같은 장치 사용 — index 1 없음)
+VISION_SPEAKER_INDEX = 0
 
 # ── Pull 감지 상수 ────────────────────────────────────────────────────────────
 _GRIP_ARM   = 3000

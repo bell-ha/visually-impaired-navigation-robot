@@ -68,17 +68,9 @@ TRIGGER_KEYWORDS = ["뭐가 보여", "뭐 보여", "지금 뭐", "what do you se
 
 # 분석 프롬프트
 VISION_PROMPT = (
-    "당신은 학교 실내에서 시각장애인을 안내하는 로봇입니다. "
-    "전방 카메라 이미지를 보고 이동 안전에 중요한 정보만 한국어로 간결하게 말하세요.\n\n"
-    "다음 순서로 확인하세요:\n"
-    "1. 통행 가능 여부: 앞이 막혀 있는지, 지나갈 수 있는지 먼저 말하세요.\n"
-    "2. 사람: 앞에 사람이 있으면 몇 명인지, 어느 쪽에 있는지 말하세요.\n"
-    "3. 장애물: 가방, 의자, 카트, 문턱 등 발에 걸릴 수 있는 것이 있으면 말하세요.\n"
-    "4. 문: 보이면 열려 있는지 닫혀 있는지 말하세요.\n"
-    "5. 주요 시설: 계단(오르막/내리막), 엘리베이터, 비상구, 화장실 표지가 보이면 말하세요.\n"
-    "6. 복도 방향: 직진인지, 꺾이는지, 갈림길인지 말하세요.\n\n"
-    "즉시 멈춰야 할 위험이 있으면 '주의'를 먼저 말하세요. "
-    "전체 답변은 2~3문장 이내로 유지하세요."
+    "이 이미지에서 보이는 것을 한국어로 2~3문장으로 간결하게 설명하세요. "
+    "사람, 장애물, 문, 복도 방향, 계단 등 눈에 띄는 것을 자연스럽게 말해주세요. "
+    "안전 판단이나 경로 안내는 하지 않아도 됩니다. 그냥 보이는 장면을 묘사하세요."
 )
 
 
@@ -172,14 +164,14 @@ def speak(text: str, out_device_index: int = 0):
         tmp_pcm = tmp_mp3.replace(".mp3", ".raw")
         subprocess.run(
             ["ffmpeg", "-y", "-i", tmp_mp3,
-             "-f", "s16le", "-ar", "44100", "-ac", "1", tmp_pcm],
+             "-f", "s16le", "-ar", "44100", "-ac", "2", tmp_pcm],
             check=True, capture_output=True,
         )
 
         pa = pyaudio.PyAudio()
         stream = pa.open(
             format=pyaudio.paInt16,
-            channels=1,
+            channels=2,
             rate=44100,
             output=True,
             output_device_index=out_device_index,
