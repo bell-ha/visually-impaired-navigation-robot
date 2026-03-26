@@ -774,10 +774,10 @@ class GuidanceStateMachine:
 # ══════════════════════════════════════════════
 # 하드웨어 브리지 (시리얼 버튼 / Pull 센서)
 # ══════════════════════════════════════════════
-_GRIP_ARM   = 3000
-_PULL_TRIG  = 3700
+_GRIP_ARM   = 989
+_PULL_TRIG  = 1839
 _QUICK_SEC  = 0.25
-_GRIP_RESET = 2900
+_GRIP_RESET = 1058
 _HW_DEBOUNCE_SEC = 0.25
 
 
@@ -880,18 +880,23 @@ class HardwareKeyBridge:
                             if not line:
                                 continue
                             parts = line.split(",")
-                            if len(parts) < 3:
-                                continue
                             tag = parts[0].strip()
-                            try:
-                                press_val = int(parts[2].strip())
-                            except Exception:
-                                continue
+
+                            # TRIG,<btn>,... → 버튼 이벤트 (btn==1만 처리)
                             if tag == "TRIG":
-                                self._debounced("o")
-                            evt = self._pull.update(press_val)
-                            if evt == "PULL":
-                                self._debounced("p")
+                                if len(parts) >= 2 and parts[1].strip() == "1":
+                                    self._debounced("o")
+                                continue
+
+                            # DATA,s1,s2,pressure
+                            if tag == "DATA" and len(parts) >= 4:
+                                try:
+                                    press_val = int(parts[3].strip())
+                                except Exception:
+                                    continue
+                                evt = self._pull.update(press_val)
+                                if evt == "PULL":
+                                    self._debounced("p")
             except Exception as e:
                 if self.debug:
                     print(f"[HW] loop error: {e}", file=sys.stderr)

@@ -39,10 +39,10 @@ BAUD = 115200
 VISION_SPEAKER_INDEX = 0
 
 # ── Pull 감지 상수 ────────────────────────────────────────────────────────────
-_GRIP_ARM   = 3000
-_PULL_TRIG  = 3700
+_GRIP_ARM   = 989
+_PULL_TRIG  = 1839
 _QUICK_SEC  = 0.25
-_GRIP_RESET = 2900
+_GRIP_RESET = 1058
 _DEBOUNCE   = 0.25
 
 # ── ROS2 cmd_vel ──────────────────────────────────────────────────────────────
@@ -257,8 +257,9 @@ def serial_loop():
                 continue
 
             tag = parts[0].strip()
+            now = time.monotonic()
 
-            if tag == "TRIG":
+            if tag == "TRIG" and len(parts) >= 3:
                 btn = parts[1].strip()
                 if btn == "1":
                     _write("iface", "/button")
@@ -266,13 +267,14 @@ def serial_loop():
                 elif btn == "2":
                     _write("vision", "/vision")
                     _log("HW", "버튼2 → 시각 분석")
+                # 버튼 누르는 순간 압력이 PULL_TRIG를 넘으므로 2초 잠금
+                last_pull_t = now + 2.0
 
             elif tag == "DATA" and len(parts) >= 4:
                 try:
                     pressure = int(parts[3].strip())
                 except ValueError:
                     continue
-                now = time.monotonic()
                 if pull_detect(pressure) and (now - last_pull_t) > _DEBOUNCE:
                     last_pull_t = now
                     _write("iface", "/pull")
