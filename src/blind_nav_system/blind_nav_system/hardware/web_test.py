@@ -11,10 +11,10 @@ PORT = '/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0'
 BAUD = 115200
 
 thresholds = {
-    'GRIP_ARM':   989,
-    'PULL_TRIG':  1839,
-    'QUICK_SEC':  0.25,
-    'GRIP_RESET': 1058,
+    'GRIP_ARM':   3731,
+    'PULL_TRIG':  4095,
+    'QUICK_SEC':  0.80,
+    'GRIP_RESET': 3158,
 }
 
 state = {
@@ -190,20 +190,20 @@ HTML = """
     <div class="card">
       <h2>임계값 조절</h2>
       <div class="slider-row">
-        <label>GRIP_ARM <span id="v-grip-arm">989</span></label>
-        <input type="range" id="grip-arm" min="0" max="4095" value="989">
+        <label>GRIP_ARM <span id="v-grip-arm">3731</span></label>
+        <input type="range" id="grip-arm" min="0" max="4095" value="3731">
       </div>
       <div class="slider-row">
-        <label>PULL_TRIG <span id="v-pull-trig">1839</span></label>
-        <input type="range" id="pull-trig" min="0" max="4095" value="1839">
+        <label>PULL_TRIG <span id="v-pull-trig">4095</span></label>
+        <input type="range" id="pull-trig" min="0" max="4095" value="4095">
       </div>
       <div class="slider-row">
-        <label>GRIP_RESET <span id="v-grip-reset">1058</span></label>
-        <input type="range" id="grip-reset" min="0" max="4095" value="1058">
+        <label>GRIP_RESET <span id="v-grip-reset">3158</span></label>
+        <input type="range" id="grip-reset" min="0" max="4095" value="3158">
       </div>
       <div class="slider-row">
-        <label>QUICK_SEC <span id="v-quick-sec">0.25</span>s</label>
-        <input type="range" id="quick-sec" min="0.05" max="2.0" step="0.05" value="0.25">
+        <label>QUICK_SEC <span id="v-quick-sec">0.80</span>s</label>
+        <input type="range" id="quick-sec" min="0.05" max="2.0" step="0.05" value="0.80">
       </div>
     </div>
 

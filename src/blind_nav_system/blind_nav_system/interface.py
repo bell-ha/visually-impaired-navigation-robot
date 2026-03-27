@@ -774,10 +774,10 @@ class GuidanceStateMachine:
 # ══════════════════════════════════════════════
 # 하드웨어 브리지 (시리얼 버튼 / Pull 센서)
 # ══════════════════════════════════════════════
-_GRIP_ARM   = 989
-_PULL_TRIG  = 1839
-_QUICK_SEC  = 0.25
-_GRIP_RESET = 1058
+_GRIP_ARM   = 3731
+_PULL_TRIG  = 4095
+_QUICK_SEC  = 0.80
+_GRIP_RESET = 3158
 _HW_DEBOUNCE_SEC = 0.25
 
 
@@ -998,6 +998,18 @@ class InterfaceApp:
     def destinations(self) -> List[str]:
         return sorted(self.locations.keys())
 
+    def _alias_candidates(self, text: str) -> List[str]:
+        """발화에 포함된 별칭이 2개 이상의 목적지와 일치하면 해당 후보 목록 반환."""
+        alias_map: Dict[str, List[str]] = {}
+        for dest in self.destinations():
+            m = re.search(r'\((.+?)\)', dest)
+            if m:
+                alias_map.setdefault(m.group(1), []).append(dest)
+        for alias, dests in alias_map.items():
+            if alias in text and len(dests) > 1:
+                return dests
+        return []
+
     def _say(self, text: str) -> None:
         """TTS 재생 + AudioGate 차단. TTS는 동기이므로 재생 끝나면 바로 gate 해제."""
         # 말하는 동안 gate 차단 (대략 추산: 글자당 0.09초 + 여유)
@@ -1070,6 +1082,8 @@ class InterfaceApp:
                 self._ev_q.put(Event(kind="pull"))
             elif s == "/cancel":
                 self._ev_q.put(Event(kind="cancel"))
+            elif s == "/backup":
+                self._ev_q.put(Event(kind="backup_warn"))
             else:
                 self._ev_q.put(Event(kind="text", text=s))
 
@@ -1332,6 +1346,18 @@ class InterfaceApp:
 
     # ── READY: 목적지 / 후보 입력 ─────────────
     def _process_ready_text(self, text: str) -> None:
+        # GPT 전 선처리: 별칭이 여러 목적지와 겹치면 바로 disambiguate
+        conflicts = self._alias_candidates(text)
+        if conflicts:
+            self.ready_retry += 1
+            if self.ready_retry > READY_RETRY_MAX:
+                self._say(MSG[18])
+                self._go_locked()
+                return
+            self._say(msg4(conflicts))
+            self._go_ready_disambiguate()
+            return
+
         try:
             plan = self.gpt.plan(
                 state_name="READY",
@@ -1580,6 +1606,13 @@ class InterfaceApp:
                 # NAV 중 회전 안내 – 메인 스레드에서 안전하게 TTS
                 if self.state == State.NAV:
                     self._say(f"{ev.text}으로 회전합니다.")
+            elif ev.kind == "backup_warn":
+                # 후진 안내 – 상태 무관하게 즉시 TTS
+                threading.Thread(
+                    target=self.tts.say,
+                    args=("잠시 뒤로 이동합니다.",),
+                    daemon=True,
+                ).start()
 
     def close(self) -> None:
         self._stop.set()

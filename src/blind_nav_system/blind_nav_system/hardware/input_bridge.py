@@ -9,10 +9,10 @@ BAUD = 115200
 # =========================
 # PULL 규칙(너가 쓰던 값 그대로)
 # =========================
-GRIP_ARM = 3000
-PULL_TRIG = 3700
-QUICK_SEC = 0.25
-GRIP_RESET = 2900
+GRIP_ARM = 3731
+PULL_TRIG = 4095
+QUICK_SEC = 0.80
+GRIP_RESET = 3158
 
 # 디바운스(같은 이벤트 연속 방지)
 DEBOUNCE_SEC = 0.25

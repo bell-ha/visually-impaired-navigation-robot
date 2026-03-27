@@ -38,12 +38,16 @@ class NavigationClient(Node):
 
     def start_navigation(self):
         loc = self.load_location()
-        if not loc: return False
+        if not loc:
+            print(f"[NAV] 목적지 '{self.target_key}' 을 location.yaml에서 찾을 수 없음", flush=True)
+            return False
         for srv in ['/global_costmap/clear_entirely_global_costmap', '/local_costmap/clear_entirely_local_costmap']:
             cli = self.create_client(Trigger, srv)
             if cli.wait_for_service(timeout_sec=0.5):
                 cli.call_async(Trigger.Request())
-        if not self._action_client.wait_for_server(timeout_sec=5.0):
+        print(f"[NAV] navigate_to_pose 서버 대기 중...", flush=True)
+        if not self._action_client.wait_for_server(timeout_sec=10.0):
+            print(f"[NAV] navigate_to_pose 서버 응답 없음 (10초 초과) — Nav2가 실행 중인지 확인하세요", flush=True)
             return False
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = "map"

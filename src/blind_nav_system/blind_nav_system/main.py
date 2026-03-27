@@ -39,10 +39,10 @@ BAUD = 115200
 VISION_SPEAKER_INDEX = 0
 
 # ── Pull 감지 상수 ────────────────────────────────────────────────────────────
-_GRIP_ARM   = 989
-_PULL_TRIG  = 1839
-_QUICK_SEC  = 0.25
-_GRIP_RESET = 1058
+_GRIP_ARM   = 3731
+_PULL_TRIG  = 4095
+_QUICK_SEC  = 0.80
+_GRIP_RESET = 3158
 _DEBOUNCE   = 0.25
 
 # ── ROS2 cmd_vel ──────────────────────────────────────────────────────────────
@@ -50,6 +50,7 @@ try:
     import rclpy
     from rclpy.node import Node
     from geometry_msgs.msg import Twist
+    from sensor_msgs.msg import BatteryState
     _ROS_OK = True
 except ImportError:
     _ROS_OK = False
@@ -126,6 +127,28 @@ _cmd_pub  = None
 _manual_mode = False
 _manual_lock = threading.Lock()
 
+_backup_warn_until = 0.0   # 후진 안내 디바운스
+
+# ── 배터리 상태 ────────────────────────────────────────────────────────────────
+_battery = {"pct": None, "voltage": None, "charging": None}
+
+def _battery_callback(msg):
+    pct = round(msg.percentage * 100) if msg.percentage <= 1.0 else round(msg.percentage)
+    _battery["pct"]      = pct
+    _battery["voltage"]  = round(msg.voltage, 1)
+    _battery["charging"] = msg.power_supply_status == 1  # CHARGING=1
+
+def _cmdvel_callback(msg):
+    global _backup_warn_until
+    if _manual_mode:
+        return   # 수동 모드에서는 안내 생략
+    if msg.linear.x < -0.01:
+        now = time.monotonic()
+        if now > _backup_warn_until:
+            _backup_warn_until = now + 10.0
+            _write("iface", "/backup")
+            _log("MAIN", "후진 감지 → TTS 안내")
+
 def init_ros():
     global _cmd_node, _cmd_pub
     if not _ROS_OK:
@@ -133,8 +156,10 @@ def init_ros():
     rclpy.init()
     _cmd_node = rclpy.create_node("main_web_cmdvel")
     _cmd_pub  = _cmd_node.create_publisher(Twist, "/stretch/cmd_vel", 10)
+    _cmd_node.create_subscription(Twist, "/stretch/cmd_vel", _cmdvel_callback, 10)
+    _cmd_node.create_subscription(BatteryState, "/battery", _battery_callback, 10)
     threading.Thread(target=rclpy.spin, args=(_cmd_node,), daemon=True).start()
-    _log("MAIN", "ROS2 cmd_vel 퍼블리셔 시작")
+    _log("MAIN", "ROS2 cmd_vel 퍼블리셔/구독자 시작")
 
 def publish_cmd(lx: float, az: float):
     if not _cmd_pub:
@@ -232,6 +257,16 @@ def web_vision():
     _log("WEB", "버튼2 시각 분석 (웹)")
     return jsonify(ok=True)
 
+@app.route("/battery_status")
+def battery_status():
+    return jsonify(**_battery)
+
+@app.route("/pull", methods=["POST"])
+def web_pull():
+    _write("iface", "/pull")
+    _log("WEB", "당김 트리거 (웹)")
+    return jsonify(ok=True)
+
 # ── 시리얼 루프 ───────────────────────────────────────────────────────────────
 def serial_loop():
     pull_detect = _make_pull_detector()
@@ -296,7 +331,12 @@ HTML = """<!DOCTYPE html>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; }
   header { background: #1e293b; padding: 12px 20px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #334155; }
-  header h1 { font-size: 1.1rem; color: #94a3b8; }
+  header h1 { font-size: 1.1rem; color: #94a3b8; flex: 1; }
+  .battery { font-size: 0.85rem; font-weight: 600; color: #94a3b8; white-space: nowrap; }
+  .battery.ok   { color: #6ee7b7; }
+  .battery.low  { color: #fbbf24; }
+  .battery.crit { color: #f87171; }
+  .battery.charging { color: #60a5fa; }
   .badge { padding: 4px 12px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; }
   .badge-auto   { background: #065f46; color: #6ee7b7; }
   .badge-manual { background: #7c2d12; color: #fdba74; }
@@ -323,6 +363,7 @@ HTML = """<!DOCTYPE html>
   .btn-stop   { background: #dc2626; color: #fff; width: 100%; padding: 12px; font-size: 1rem; }
   .btn-nav    { background: #1d4ed8; color: #fff; width: 100%; }
   .btn-vision { background: #7c3aed; color: #fff; width: 100%; }
+  .btn-pull   { background: #b45309; color: #fff; width: 100%; }
 
   /* 방향 패드 */
   .dpad { display: grid; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 6px; justify-content: center; }
@@ -339,6 +380,7 @@ HTML = """<!DOCTYPE html>
 <header>
   <h1>시각장애인 안내 로봇 대시보드</h1>
   <span class="badge badge-auto" id="mode-badge">자동 모드</span>
+  <span class="battery" id="battery-display">배터리 --</span>
 </header>
 <div class="layout">
   <div id="log-panel"></div>
@@ -378,6 +420,7 @@ HTML = """<!DOCTYPE html>
       <div style="display:flex;flex-direction:column;gap:8px">
         <button class="btn btn-nav"    onclick="sendButton()">버튼1 (목적지 입력)</button>
         <button class="btn btn-vision" onclick="sendVision()">버튼2 (시각 분석)</button>
+        <button class="btn btn-pull"   onclick="sendPull()">당김 트리거</button>
       </div>
     </div>
   </div>
@@ -446,6 +489,7 @@ function emergencyStop() {
 
 function sendButton() { fetch('/button', {method:'POST'}); }
 function sendVision() { fetch('/vision', {method:'POST'}); }
+function sendPull()   { fetch('/pull',   {method:'POST'}); }
 
 // 로그 SSE
 const logPanel = document.getElementById('log-panel');
@@ -460,6 +504,19 @@ es.onmessage = e => {
   logPanel.appendChild(div);
   logPanel.scrollTop = logPanel.scrollHeight;
 };
+
+// 배터리 폴링 (5초마다)
+function updateBattery() {
+  fetch('/battery_status').then(r => r.json()).then(d => {
+    const el = document.getElementById('battery-display');
+    if (d.pct === null) { el.textContent = '배터리 --'; el.className = 'battery'; return; }
+    const icon = d.charging ? '⚡' : '🔋';
+    el.textContent = `${icon} ${d.pct}% (${d.voltage}V)`;
+    el.className = 'battery ' + (d.charging ? 'charging' : d.pct > 30 ? 'ok' : d.pct > 15 ? 'low' : 'crit');
+  }).catch(() => {});
+}
+updateBattery();
+setInterval(updateBattery, 5000);
 
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');

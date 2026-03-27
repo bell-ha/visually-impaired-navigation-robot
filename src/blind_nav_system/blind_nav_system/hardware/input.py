@@ -12,10 +12,10 @@ pressure_data = collections.deque(maxlen=100)
 # =========================
 # PULL 규칙(네가 말한 조건)
 # =========================
-GRIP_ARM = 3000          # 이 값 이상이면 "잡았다/눌렀다"로 보고 타이머 시작
-PULL_TRIG = 3700         # 이 값 이상이면 "당김 후보"
-QUICK_SEC = 0.25         # GRIP_ARM 넘긴 뒤 이 시간 안에 PULL_TRIG 넘으면 '당김'
-GRIP_RESET = 2900        # 다시 이 값 아래로 내려가야 재무장(히스테리시스)
+GRIP_ARM = 3731          # 이 값 이상이면 "잡았다/눌렀다"로 보고 타이머 시작
+PULL_TRIG = 4095         # 이 값 이상이면 "당김 후보"
+QUICK_SEC = 0.80         # GRIP_ARM 넘긴 뒤 이 시간 안에 PULL_TRIG 넘으면 '당김'
+GRIP_RESET = 3158        # 다시 이 값 아래로 내려가야 재무장(히스테리시스)
 
 # 상태
 armed = False            # GRIP_ARM을 넘겨 "감시(타이머 시작)" 상태
