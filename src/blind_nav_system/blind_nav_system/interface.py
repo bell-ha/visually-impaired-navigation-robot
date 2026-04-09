@@ -201,8 +201,15 @@ class TTS:
                 os.close(fd)
                 wav_path = mp3_path.replace(".mp3", ".wav")
                 self._gTTS(text=t, lang="ko").save(mp3_path)
+                try:
+                    speed = float(Path("/tmp/tts_speed").read_text().strip())
+                    speed = max(0.5, min(2.0, speed))
+                except Exception:
+                    speed = 1.5
                 subprocess.run(
-                    ["ffmpeg", "-y", "-i", mp3_path, "-ar", "44100", "-ac", "1", wav_path],
+                    ["ffmpeg", "-y", "-i", mp3_path,
+                     "-filter:a", f"atempo={speed}",
+                     "-ar", "44100", "-ac", "1", wav_path],
                     capture_output=True, timeout=15,
                 )
                 with wave.open(wav_path, "rb") as wf:

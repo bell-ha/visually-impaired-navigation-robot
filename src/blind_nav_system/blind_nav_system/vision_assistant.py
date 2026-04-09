@@ -161,9 +161,16 @@ def speak(text: str, out_device_index: int = 0):
         tts.save(tmp_mp3)
 
         # mp3 → raw PCM via ffmpeg
+        try:
+            from pathlib import Path as _Path
+            speed = float(_Path("/tmp/tts_speed").read_text().strip())
+            speed = max(0.5, min(2.0, speed))
+        except Exception:
+            speed = 1.5
         tmp_pcm = tmp_mp3.replace(".mp3", ".raw")
         subprocess.run(
             ["ffmpeg", "-y", "-i", tmp_mp3,
+             "-filter:a", f"atempo={speed}",
              "-f", "s16le", "-ar", "44100", "-ac", "2", tmp_pcm],
             check=True, capture_output=True,
         )

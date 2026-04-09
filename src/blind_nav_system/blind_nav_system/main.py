@@ -85,8 +85,12 @@ def _make_pull_detector():
 # ── 서브프로세스 관리 ─────────────────────────────────────────────────────────
 _procs: dict = {}
 
+_NOISE_PREFIXES = ("ALSA lib", "Cannot open device", "Unknown PCM", "Invalid field", "Invalid card", "Found no matching", "Expression '")
+
 def _capture(proc: subprocess.Popen, name: str):
     for line in proc.stdout:
+        if any(line.strip().startswith(p) for p in _NOISE_PREFIXES):
+            continue
         _log(name, line)
 
 def _write(name: str, cmd: str):
@@ -261,6 +265,14 @@ def web_vision():
 def battery_status():
     return jsonify(**_battery)
 
+@app.route("/tts_speed", methods=["POST"])
+def set_tts_speed():
+    speed = float(request.json.get("speed", 1.5))
+    speed = max(0.5, min(2.0, speed))
+    Path("/tmp/tts_speed").write_text(str(speed))
+    _log("MAIN", f"TTS 속도 변경 → {speed}x")
+    return jsonify(ok=True, speed=speed)
+
 @app.route("/pull", methods=["POST"])
 def web_pull():
     _write("iface", "/pull")
@@ -421,6 +433,11 @@ HTML = """<!DOCTYPE html>
         <button class="btn btn-nav"    onclick="sendButton()">버튼1 (목적지 입력)</button>
         <button class="btn btn-vision" onclick="sendVision()">버튼2 (시각 분석)</button>
         <button class="btn btn-pull"   onclick="sendPull()">당김 트리거</button>
+        <div style="margin-top:8px">
+          <label style="color:#94a3b8;font-size:0.8rem">TTS 속도: <span id="tts-speed-val">1.5</span>x</label>
+          <input type="range" min="0.5" max="2.0" step="0.1" value="1.5" style="width:100%"
+                 oninput="setTtsSpeed(this.value)">
+        </div>
       </div>
     </div>
   </div>
@@ -490,6 +507,10 @@ function emergencyStop() {
 function sendButton() { fetch('/button', {method:'POST'}); }
 function sendVision() { fetch('/vision', {method:'POST'}); }
 function sendPull()   { fetch('/pull',   {method:'POST'}); }
+function setTtsSpeed(v) {
+  document.getElementById('tts-speed-val').textContent = parseFloat(v).toFixed(1);
+  fetch('/tts_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
+}
 
 // 로그 SSE
 const logPanel = document.getElementById('log-panel');

@@ -95,4 +95,11 @@
     </include>
   </timer>
 
+  <!-- ====== 6) Global costmap 주기적 초기화 (동적 장애물 stale 마킹 제거) ====== -->
+  <!-- Nav2 완전 기동 후 시작: nav_start_delay(5s) + Nav2 초기화(~15s) = 40s 대기 -->
+  <executable
+    cmd="bash -c 'sleep 40 &amp;&amp; while true; do sleep 5; ros2 service call /global_costmap/clear_entirely_global_costmap nav2_msgs/srv/ClearEntireCostmap &quot;{}&quot;; done'"
+    name="global_costmap_cleaner"
+    output="screen"/>
+
 </launch>
