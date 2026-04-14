@@ -7,7 +7,6 @@
 """
 import collections
 import json
-import math
 import subprocess
 import sys
 import threading
@@ -48,7 +47,6 @@ _DEBOUNCE   = 0.25
 # ── ROS2 cmd_vel ──────────────────────────────────────────────────────────────
 try:
     import rclpy
-    from rclpy.node import Node
     from geometry_msgs.msg import Twist
     from sensor_msgs.msg import BatteryState
     _ROS_OK = True
@@ -265,6 +263,23 @@ def web_vision():
 def battery_status():
     return jsonify(**_battery)
 
+@app.route("/robot_speed", methods=["POST"])
+def set_robot_speed():
+    speed = float(request.json.get("speed", 0.26))
+    speed = max(0.10, min(0.50, speed))
+    subprocess.run(
+        ["ros2", "param", "set", "/controller_server",
+         "FollowPath.max_vel_x", str(speed)],
+        capture_output=True, timeout=5
+    )
+    subprocess.run(
+        ["ros2", "param", "set", "/controller_server",
+         "FollowPath.max_speed_xy", str(speed)],
+        capture_output=True, timeout=5
+    )
+    _log("MAIN", f"로봇 속도 변경 → {speed} m/s")
+    return jsonify(ok=True, speed=speed)
+
 @app.route("/tts_speed", methods=["POST"])
 def set_tts_speed():
     speed = float(request.json.get("speed", 1.5))
@@ -434,6 +449,11 @@ HTML = """<!DOCTYPE html>
         <button class="btn btn-vision" onclick="sendVision()">버튼2 (시각 분석)</button>
         <button class="btn btn-pull"   onclick="sendPull()">당김 트리거</button>
         <div style="margin-top:8px">
+          <label style="color:#94a3b8;font-size:0.8rem">로봇 속도: <span id="robot-speed-val">0.26</span> m/s</label>
+          <input type="range" min="0.10" max="0.50" step="0.02" value="0.26" style="width:100%"
+                 oninput="setRobotSpeed(this.value)">
+        </div>
+        <div style="margin-top:4px">
           <label style="color:#94a3b8;font-size:0.8rem">TTS 속도: <span id="tts-speed-val">1.5</span>x</label>
           <input type="range" min="0.5" max="2.0" step="0.1" value="1.5" style="width:100%"
                  oninput="setTtsSpeed(this.value)">
@@ -507,6 +527,10 @@ function emergencyStop() {
 function sendButton() { fetch('/button', {method:'POST'}); }
 function sendVision() { fetch('/vision', {method:'POST'}); }
 function sendPull()   { fetch('/pull',   {method:'POST'}); }
+function setRobotSpeed(v) {
+  document.getElementById('robot-speed-val').textContent = parseFloat(v).toFixed(2);
+  fetch('/robot_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
+}
 function setTtsSpeed(v) {
   document.getElementById('tts-speed-val').textContent = parseFloat(v).toFixed(1);
   fetch('/tts_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
