@@ -151,3 +151,8 @@ ros2 param set /controller_server FollowPath.max_vel_theta 0.3
 - 24V 이하 → 충전 필요
 - LED 노란색(2초 주기) → 저전압 경고
 - 충전기: NOCO Genius10 (기본 충전: 12V AGM 모드)
+
+## 8, 화면 밝기 키우는 방법
+
+xrandr --output HDMI-1 --brightness 1.5
+
