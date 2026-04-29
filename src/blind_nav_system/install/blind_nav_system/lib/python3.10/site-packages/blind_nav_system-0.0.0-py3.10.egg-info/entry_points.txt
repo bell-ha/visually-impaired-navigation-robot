@@ -1,6 +1,0 @@
-[console_scripts]
-main_state_machine = blind_nav_system.main_state_machine:main
-navigation_client = blind_nav_system.navigation_client:main
-sensor_monitor = blind_nav_system.sensor_monitor:main
-voice_interface = blind_nav_system.voice_interface:main
-

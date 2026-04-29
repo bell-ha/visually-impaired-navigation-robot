@@ -22,3 +22,9 @@ __pycache__/
 build/
 install/
 log/
+
+# Test result images
+results/
+
+# venv
+venv_ocr/
