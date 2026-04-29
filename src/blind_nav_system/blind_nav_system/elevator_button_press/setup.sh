@@ -26,10 +26,10 @@ fi
 echo "=== [4/4] 모델 다운로드 ==="
 MODEL_DIR="$OCR_DIR/src/button_recognition/scripts/ocr_rcnn_lib"
 mkdir -p "$MODEL_DIR"
-if [ ! -f "$MODEL_DIR/frozen_inference_graph.pb" ]; then
-    cd "$SCRIPT_DIR"
-    "$VENV_DIR/bin/python" -m gdown "https://drive.google.com/file/d/1FVXI-G-EsCrkKbknhHL-9Y1pBshY7JCv/view?usp=sharing"
-    unzip frozen_model.zip -d "$MODEL_DIR/"
+if [ ! -f "$MODEL_DIR/frozen_model/ocr_graph.pb" ]; then
+    cd "$MODEL_DIR"
+    "$VENV_DIR/bin/gdown" --fuzzy "https://drive.google.com/file/d/1FVXI-G-EsCrkKbknhHL-9Y1pBshY7JCv/view?usp=sharing"
+    unzip frozen_model.zip
     rm frozen_model.zip
 else
     echo "Model already downloaded"

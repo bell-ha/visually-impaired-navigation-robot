@@ -28,6 +28,8 @@ setup(
             'main_state_machine = blind_nav_system.main_state_machine:main',
             'navigation_client = blind_nav_system.navigation_client:main',
             'sensor_monitor = blind_nav_system.sensor_monitor:main',
+            'elevator_node = blind_nav_system.elevator_button_press.elevator_node:main',
+            'visual_servo_node = blind_nav_system.elevator_button_press.visual_servo_node:main',
         ],
     },
 )

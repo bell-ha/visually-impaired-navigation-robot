@@ -19,11 +19,12 @@ class ElevatorButtonNode(Node):
         super().__init__("elevator_button_node")
         self.bridge = CvBridge()
         self.result_pub = self.create_publisher(String, "/elevator/button_detections", 10)
+        # Stretch3 wrist camera (D405)
         self.sub = self.create_subscription(
-            Image, "/camera/color/image_raw", self.image_callback, 10
+            Image, "/gripper_camera/color/image_raw", self.image_callback, 10
         )
         self._processing = False
-        self.get_logger().info("ElevatorButtonNode started")
+        self.get_logger().info("ElevatorButtonNode started — subscribing to /gripper_camera/color/image_raw")
 
     def image_callback(self, msg):
         if self._processing:
@@ -48,9 +49,10 @@ class ElevatorButtonNode(Node):
                 out_msg.data = result.stdout.strip()
                 self.result_pub.publish(out_msg)
                 detections = json.loads(result.stdout).get("detections", [])
-                self.get_logger().info(f"Detected {len(detections)} button(s)")
+                for d in detections:
+                    self.get_logger().info(f"Button: '{d['text']}' score={d['score']}")
             else:
-                self.get_logger().error(f"Inference error: {result.stderr}")
+                self.get_logger().error(f"Inference error: {result.stderr[:200]}")
         except Exception as e:
             self.get_logger().error(f"Exception: {e}")
         finally:
