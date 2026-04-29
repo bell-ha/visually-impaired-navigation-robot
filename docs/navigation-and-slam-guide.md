@@ -14,8 +14,7 @@
 ```bash
 stretch_robot_battery_check.py     # 배터리 확인 (24V 이하 시 충전)
 stretch_free_robot_process.py      # 기존 프로세스 정리
-stretch_robot_home.py              # 로봇 원점 설정
-stretch_robot_stow.py              # 팔 수납
+              # 로봇 원점 설정
 ```
 
 ---
@@ -93,35 +92,6 @@ RViz 설정:
 
 ---
 
-## 4. 인터페이스 실행
-
-```bash
-cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system
-python3 interface.py
-```
-
-버튼을 누르면 음성으로 목적지를 입력받고 자율 이동 시작.
-
-### 목적지 추가
-
-`config/location.yaml`에 이름과 좌표 추가:
-
-```bash
-# RViz의 Publish Point로 좌표 확인
-ros2 topic echo /clicked_point
-```
-
----
-
-## 5. 시각 보조 모듈
-
-```bash
-python3 vision_assistant.py
-```
-
-Enter 키를 누르면 RealSense 카메라로 전방을 촬영 후 GPT-4o Vision이 분석 결과를 음성으로 안내.
-강의실 번호판, 문 개폐 상태, 장애물 등을 인식한다.
-
 ---
 
 ## 6. Nav2 파라미터 주요 설정
@@ -156,3 +126,15 @@ ros2 param set /controller_server FollowPath.max_vel_theta 0.3
 
 xrandr --output HDMI-1 --brightness 1.5
 
+# 드라이버, rviz2실행하고 할 것은
+ stretch_free_robot_process.py 
+stretch_robot_home.py 
+
+ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/launch/stretch_robot_process.launch.xml 
+
+C
+디렉토리 이동해서 
+armleft.py
+main.py
+
+이 두개실행하면 됨

@@ -51,10 +51,10 @@ DEFAULT_ENV_FILE = Path("/home/hello-robot/GitHub/visually-impaired-navigation-r
 BUTTON_GUARD_SEC            = 1.5
 PULL_GUARD_SEC              = 1.0
 
-LISTEN_OPEN_DELAY_SEC       = 0.35
+LISTEN_OPEN_DELAY_SEC       = 0.6
 LISTEN_TIMEOUT_SEC          = 10.0
-LISTEN_PHRASE_TIME_LIMIT_SEC= 10.0
-LISTEN_PAUSE_THRESHOLD_SEC  = 0.8
+LISTEN_PHRASE_TIME_LIMIT_SEC= 5.0
+LISTEN_PAUSE_THRESHOLD_SEC  = 0.5
 DEDUP_WINDOW_SEC            = 2.2
 
 NO_RESPONSE_SESSION_SEC     = 10.0
@@ -73,7 +73,22 @@ END_LISTEN_BEEP_MS          = 90
 NAV_STOP_PUBLISH_SEC        = 1.0   # 시뮬레이션에서는 참고용
 NAV_SIM_DURATION_SEC        = 20.0  # 로봇 없을 때 자동 도착 타이머
 
-TTS_MAX_CHARS               = 120
+TTS_MAX_CHARS               = 250
+
+_TTS_CACHE_DIR   = Path("/tmp/blind_nav_tts_cache")
+_VOSK_MODEL_PATH = Path.home() / ".cache/vosk/vosk-model-small-ko-0.22"
+
+# 강제 오프라인 모드 (/offline · /online stdin 명령으로 전환)
+_force_offline: bool = False
+
+# 동적 문구 중 항상 같은 내용 — MSG와 함께 시작 시 캐싱
+_EXTRA_CACHE_TEXTS = [
+    "앞에 장애물이 있습니다. 잠시 비켜주세요.",
+    "왼쪽으로 회전합니다.",
+    "오른쪽으로 회전합니다.",
+    "잠시 뒤로 이동합니다.",
+    "안내를 종료합니다.",
+]
 
 # ──────────────────────────────────────────────
 # 고정 TTS 문구 (명세서 §13)
@@ -104,14 +119,31 @@ MSG = {
     23: "확인했습니다. 진행하려면 버튼을 눌러주세요.",
 }
 
+def _normalize_tts(text: str) -> str:
+    """TTS 발음 보정: 영어 약어 → 한국어 발음"""
+    text = text.replace("KAIST", "카이스트")
+    text = text.replace("POSTECH", "포스텍")
+    text = text.replace("UNIST", "유니스트")
+    text = text.replace("ITRC", "아이티알씨")
+    return text
+
 def msg4(candidates: List[str]) -> str:
-    return "후보가 여러 개 있습니다. " + ", ".join(candidates[:3]) + " 중 어디로 가실까요?"
+    c = [f"{_normalize_tts(n)} 부스" for n in candidates[:3]]
+    if len(c) == 1:
+        joined = c[0]
+    elif len(c) == 2:
+        joined = f"{c[0]}, 그리고 {c[1]}"
+    else:
+        joined = f"{c[0]}, {c[1]}, 그리고 {c[2]}"
+    return f"후보가 여러 개 있습니다. {joined} 중 어디로 가실까요?"
 
 def msg5(dest: str) -> str:
-    return f"{dest}로 이동할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
+    d = f"{_normalize_tts(dest)} 부스"
+    return f"{d}로 이동할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
 
 def msg12(dest: str) -> str:
-    return f"{dest}로 목적지를 변경할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
+    d = f"{_normalize_tts(dest)} 부스"
+    return f"{d}로 목적지를 변경할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
 
 
 # ══════════════════════════════════════════════
@@ -151,6 +183,90 @@ def load_locations(path: Path) -> Dict[str, Dict[str, float]]:
 
 
 # ══════════════════════════════════════════════
+# vosk 오프라인 STT 모델 (lazy-init)
+# ══════════════════════════════════════════════
+_vosk_model_instance = None
+_vosk_rec_instance   = None
+_vosk_rec_lock       = threading.Lock()
+_vosk_model_lock     = threading.Lock()
+
+def _get_vosk_model():
+    global _vosk_model_instance, _vosk_rec_instance
+    if _vosk_model_instance is not None:
+        return _vosk_model_instance
+    with _vosk_model_lock:
+        if _vosk_model_instance is not None:
+            return _vosk_model_instance
+        if not _VOSK_MODEL_PATH.exists():
+            return None
+        try:
+            from vosk import Model, KaldiRecognizer
+            import logging
+            logging.getLogger("vosk").setLevel(logging.ERROR)
+            _vosk_model_instance = Model(str(_VOSK_MODEL_PATH))
+            _vosk_rec_instance   = KaldiRecognizer(_vosk_model_instance, 16000)
+            print("[STT] vosk 한국어 모델 로드 완료")
+            return _vosk_model_instance
+        except Exception as e:
+            print(f"[STT] vosk 모델 로드 실패: {e}", file=sys.stderr)
+            return None
+
+
+# ══════════════════════════════════════════════
+# 오프라인 의도 파악 (difflib 퍼지 매칭)
+# ══════════════════════════════════════════════
+def _offline_plan(text: str, locations: List[str], state_name: str) -> Dict[str, Any]:
+    """인터넷 없을 때 키워드 + 유사도 기반 의도 파악."""
+    import difflib
+
+    _base: Dict[str, Any] = {
+        "destination": None, "candidates": [],
+        "need_button": False, "button_action": "none",
+        "confidence": "low", "reason": "none",
+    }
+
+    t = _normalize_tts(text).lower().strip()
+
+    # ── PAUSED 상태: 재개/종료/변경 키워드 우선 처리 ──────
+    if state_name == "PAUSED":
+        resume_kw = ["계속", "다시", "재개", "그냥 가", "출발", "가자"]
+        abort_kw  = ["종료", "그만", "끝", "멈춰", "취소"]
+        change_kw = ["바꿔", "변경", "다른"]
+        if any(k in t for k in resume_kw):
+            return {**_base, "action": "resume_propose",   "button_action": "resume"}
+        if any(k in t for k in abort_kw):
+            return {**_base, "action": "abort_propose",    "button_action": "abort"}
+        if any(k in t for k in change_kw):
+            return {**_base, "action": "change_dest_request", "button_action": "change_ready"}
+
+    # ── 목적지 매칭 ────────────────────────────────────────
+    norm_map = {_normalize_tts(l).lower(): l for l in locations}
+
+    # 1단계: 단어 단위 포함 검색 (예: "카이스트" → KAIST 포함 목적지)
+    hits = [
+        orig for norm, orig in norm_map.items()
+        if any(w in norm for w in t.split() if len(w) >= 2)
+    ]
+
+    # 2단계: difflib 유사도 (1단계 결과 없을 때)
+    if not hits:
+        close = difflib.get_close_matches(t, list(norm_map.keys()), n=3, cutoff=0.3)
+        hits = [norm_map[c] for c in close]
+
+    if not hits:
+        return {**_base, "action": "ask_again", "reason": "out_of_list"}
+
+    if len(hits) == 1:
+        action = "change_dest_propose" if state_name == "PAUSED" else "propose"
+        btn    = "change_start"        if state_name == "PAUSED" else "none"
+        return {**_base, "action": action, "destination": hits[0],
+                "button_action": btn, "confidence": "medium"}
+
+    return {**_base, "action": "disambiguate", "candidates": hits[:3],
+            "confidence": "medium", "reason": "ambiguous"}
+
+
+# ══════════════════════════════════════════════
 # .env
 # ══════════════════════════════════════════════
 def load_openai_key(env_path: Path) -> str:
@@ -175,6 +291,7 @@ class TTS:
         self.audio_device = audio_device
         self._lock = threading.Lock()
         self._ok = False
+        self._cache: Dict[str, str] = {}   # normalized_text → wav 절대경로
         if enabled:
             try:
                 from gtts import gTTS as _gTTS
@@ -186,14 +303,80 @@ class TTS:
                 if debug:
                     print(f"[TTS] init failed: {e}", file=sys.stderr)
 
+    def _play_wav(self, wav_path: str) -> None:
+        """WAV 파일을 pyaudio로 재생."""
+        with wave.open(wav_path, "rb") as wf:
+            stream = self._pa.open(
+                format=self._pa.get_format_from_width(wf.getsampwidth()),
+                channels=wf.getnchannels(),
+                rate=wf.getframerate(),
+                output=True,
+                output_device_index=self.audio_device,
+            )
+            data = wf.readframes(1024)
+            while data:
+                stream.write(data)
+                data = wf.readframes(1024)
+            stream.stop_stream()
+            stream.close()
+
+    def prime_cache(self, texts: List[str]) -> None:
+        """앱 시작 시 고정 메시지를 백그라운드로 미리 캐싱 (온라인 중에 생성)."""
+        if not self._ok:
+            return
+        def _worker():
+            import hashlib, subprocess as _sp
+            _TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            for raw in texts:
+                t = _normalize_tts(raw.strip())[:TTS_MAX_CHARS]
+                if not t or t in self._cache:
+                    continue
+                h = hashlib.md5(t.encode()).hexdigest()[:12]
+                wav_path = str(_TTS_CACHE_DIR / f"{h}.wav")
+                if Path(wav_path).exists():
+                    self._cache[t] = wav_path
+                    continue
+                mp3_path = str(_TTS_CACHE_DIR / f"{h}.mp3")
+                try:
+                    self._gTTS(text=t, lang="ko").save(mp3_path)
+                    _sp.run(
+                        ["ffmpeg", "-y", "-i", mp3_path,
+                         "-filter:a", "atempo=1.5",
+                         "-ar", "44100", "-ac", "1", wav_path],
+                        capture_output=True, timeout=15,
+                    )
+                    Path(mp3_path).unlink(missing_ok=True)
+                    self._cache[t] = wav_path
+                    print(f"[TTS-CACHE] 캐싱: {t[:40]}")
+                except Exception as e:
+                    if self.debug:
+                        print(f"[TTS-CACHE] 실패: {t[:40]} – {e}", file=sys.stderr)
+                    for p in [mp3_path, wav_path]:
+                        try:
+                            Path(p).unlink(missing_ok=True)
+                        except Exception:
+                            pass
+        threading.Thread(target=_worker, daemon=True, name="tts-cache").start()
+
     def say(self, text: str) -> None:
-        t = (text or "").strip()[:TTS_MAX_CHARS]
+        t = _normalize_tts((text or "").strip())[:TTS_MAX_CHARS]
         if not t:
             return
         print(f"[ROBOT] {t}")
         if not self._ok:
             return
         with self._lock:
+            # 오프라인 강제 모드: gTTS 타임아웃 없이 캐시 직행
+            if _force_offline:
+                cached = self._cache.get(t)
+                if cached and Path(cached).exists():
+                    try:
+                        self._play_wav(cached)
+                    except Exception as e:
+                        if self.debug:
+                            print(f"[TTS] 캐시 재생 실패: {e}", file=sys.stderr)
+                return
+
             mp3_path = wav_path = None
             try:
                 import subprocess
@@ -212,23 +395,19 @@ class TTS:
                      "-ar", "44100", "-ac", "1", wav_path],
                     capture_output=True, timeout=15,
                 )
-                with wave.open(wav_path, "rb") as wf:
-                    stream = self._pa.open(
-                        format=self._pa.get_format_from_width(wf.getsampwidth()),
-                        channels=wf.getnchannels(),
-                        rate=wf.getframerate(),
-                        output=True,
-                        output_device_index=self.audio_device,
-                    )
-                    data = wf.readframes(1024)
-                    while data:
-                        stream.write(data)
-                        data = wf.readframes(1024)
-                    stream.stop_stream()
-                    stream.close()
+                self._play_wav(wav_path)
             except Exception as e:
                 if self.debug:
-                    print(f"[TTS] say error: {e}", file=sys.stderr)
+                    print(f"[TTS] gTTS 실패: {e}", file=sys.stderr)
+                # ── 오프라인 캐시 폴백 ──────────────────────
+                cached = self._cache.get(t)
+                if cached and Path(cached).exists():
+                    print("[TTS] 오프라인 캐시 재생")
+                    try:
+                        self._play_wav(cached)
+                    except Exception as e2:
+                        if self.debug:
+                            print(f"[TTS] 캐시 재생 실패: {e2}", file=sys.stderr)
             finally:
                 for p in [mp3_path, wav_path]:
                     if p:
@@ -414,17 +593,17 @@ class GPTPlanner:
             "- '다시 가/계속/재개/그냥 가' → resume_propose, button_action=resume\n"
             "- '종료/그만/끝/멈춰' → abort_propose, button_action=abort\n"
             "- '바꾸고 싶어/다른 곳/변경' (새 목적지 없음) → change_dest_request, button_action=change_ready\n"
-            "- 목적지 이름이 발화에 포함된 경우 (예: '503호', '503호로 바꿔', '그냥 503호', '편의점으로') → change_dest_propose, button_action=change_start, destination=해당목적지\n"
+            "- 목적지 이름이 발화에 포함된 경우 (예: '삼백 오호', '301호로 바꿔', '그냥 숭실대로', '세종대 부스로') → change_dest_propose, button_action=change_start, destination=해당목적지\n"
             "- 위 어디에도 해당 안 되면 → ask_again\n\n"
             "[중요] PAUSED에서 목적지 이름이 들리면 반드시 change_dest_propose로 처리할 것. ask_again 금지.\n\n"
             "[유사 목적지 매칭 규칙]\n"
             "- 발화가 목록의 목적지와 완전히 일치하지 않아도, 숫자/발음이 유사하면 가장 가까운 목적지로 매칭할 것.\n"
-            "- 예: '1501호' → '501호', '오백삼호' → '503호', '5영3' → '503호'\n"
-            "- 목적지 이름 괄호 안 내용은 별칭이다. 예: '504호(연구실)'은 '504호' 또는 '연구실'로 불릴 수 있다.\n"
+            "- 예: '아이티알씨 이백일' → 'ITRC 201 AI융합연구원 (숭실대)', '삼백십삼' → 'ITRC 313 인공지능반도체시스템 연구센터 (KAIST)'\n"
+            "- 목적지 이름 괄호 안 내용은 별칭이다. 예: 'ITRC 217 지능통감융합 연구센터 (KAIST)'는 '카이스트' 또는 '지능통감'으로 불릴 수 있다.\n"
             "- [중요] 발화가 별칭과 일치할 때 해당 별칭을 가진 목적지가 2개 이상이면 반드시 action=disambiguate로 처리하고 candidates에 전부 넣어라. propose 금지.\n"
-            "  예: '연구실'이라 하면 목록에 '504호(연구실)'과 '520호(연구실)'이 모두 있으므로 → action=disambiguate, candidates=['504호(연구실)', '520호(연구실)']\n"
+            "  예: '카이스트'라 하면 목록에 KAIST가 포함된 목적지가 여러 개이므로 → action=disambiguate, candidates=['ITRC 217 지능통감융합 연구센터 (KAIST)', 'ITRC 301 XR 워크스테이션 HCI 기술 연구센터 (KAIST)', 'ITRC 313 인공지능반도체시스템 연구센터 (KAIST)']\n"
             "- [중요] destination 필드에는 반드시 목록에 있는 정확한 전체 이름을 그대로 써야 한다. "
-            "예: 사용자가 '504호'라고 해도 목록에 '504호(연구실)'이 있으면 destination='504호(연구실)'로 반환.\n"
+            "예: 사용자가 '숭실대'라고 해도 목록에 'ITRC 201 AI융합연구원 (숭실대)'이 있으면 destination='ITRC 201 AI융합연구원 (숭실대)'로 반환.\n"
             "- 단, 후보가 2개 이상으로 애매하면 disambiguate 또는 ask_again 사용.\n\n"
             "[reason 규칙]\n"
             "- out_of_list: 목록 밖 목적지\n"
@@ -464,7 +643,7 @@ class GPTPlanner:
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='ignore')}")
         except Exception as e:
-            raise RuntimeError(str(e))
+            raise RuntimeError(str(e))  # plan() 호출부에서 _offline_plan으로 폴백
 
         # output 추출
         for item in resp.get("output", []):
@@ -560,15 +739,42 @@ class MicSession:
         # 종료 beep
         self.beeper.end()
 
-        # STT (§9.3)
-        try:
-            text = self._r.recognize_google(audio, language="ko-KR").strip()
-        except sr.UnknownValueError:
-            return "", "empty"
-        except Exception as e:
-            if self.debug:
-                print(f"[MIC] STT error: {e}", file=sys.stderr)
-            return "", "empty"
+        # STT (§9.3) — 온라인: Google / 오프라인 강제: vosk 직행
+        def _vosk_stt(audio_data) -> Optional[str]:
+            if _get_vosk_model() is None or _vosk_rec_instance is None:
+                return None
+            try:
+                import json
+                with _vosk_rec_lock:
+                    _vosk_rec_instance.Reset()
+                    raw = audio_data.get_raw_data(convert_rate=16000, convert_width=2)
+                    _vosk_rec_instance.AcceptWaveform(raw)
+                    result = json.loads(_vosk_rec_instance.FinalResult()).get("text", "").strip()
+                if result:
+                    print(f"[MIC-vosk] {result}")
+                return result or None
+            except Exception as e2:
+                if self.debug:
+                    print(f"[MIC] vosk 실패: {e2}", file=sys.stderr)
+                return None
+
+        if _force_offline:
+            text_result = _vosk_stt(audio)
+            if not text_result:
+                return "", "empty"
+            text = text_result
+        else:
+            try:
+                text = self._r.recognize_google(audio, language="ko-KR").strip()
+            except sr.UnknownValueError:
+                return "", "empty"
+            except Exception as e:
+                if self.debug:
+                    print(f"[MIC] Google STT 실패: {e}", file=sys.stderr)
+                text_result = _vosk_stt(audio)
+                if not text_result:
+                    return "", "empty"
+                text = text_result
 
         if not text:
             return "", "empty"
@@ -937,6 +1143,8 @@ class InterfaceApp:
         self.tts    = TTS(debug=debug, enabled=not no_tts, audio_device=audio_device)
         self.beeper = Beeper(debug=debug, enabled=not no_tts, audio_device=audio_device)
         self.gate   = AudioGate()
+        # 고정 메시지 오프라인 캐시 예열 (백그라운드)
+        self.tts.prime_cache(list(MSG.values()) + _EXTRA_CACHE_TEXTS)
         self.no_mic = no_mic
 
         # GPT
@@ -1023,9 +1231,8 @@ class InterfaceApp:
         est = max(1.5, len(text) * 0.09 + 1.0)
         self.gate.block(est)
         self.tts.say(text)
-        # 실제로는 say()가 동기이므로 여기서 gate는 이미 만료됨
-        # 하지만 beep/다음 액션 전 짧은 쿨다운 보장
-        self.gate.block(0.8)
+        # TTS 잔향이 마이크에 잡히지 않도록 충분한 쿨다운
+        self.gate.block(1.5)
 
     def _state_log(self) -> None:
         p = self.phase.name if self.phase != Phase.NONE else ""
@@ -1091,6 +1298,12 @@ class InterfaceApp:
                 self._ev_q.put(Event(kind="cancel"))
             elif s == "/backup":
                 self._ev_q.put(Event(kind="backup_warn"))
+            elif s in ("/offline", "/online"):
+                global _force_offline
+                _force_offline = (s == "/offline")
+                print("[MODE] 오프라인 강제 모드 ON (vosk + difflib)"
+                      if _force_offline else
+                      "[MODE] 온라인 모드 복원 (Google STT + GPT)")
             else:
                 self._ev_q.put(Event(kind="text", text=s))
 
@@ -1365,17 +1578,30 @@ class InterfaceApp:
             self._go_ready_disambiguate()
             return
 
-        try:
-            plan = self.gpt.plan(
-                state_name="READY",
-                locations=self.destinations(),
-                user_text=text,
-            )
-        except Exception as e:
-            print(f"[GPT-ERR] {e}", file=sys.stderr)
-            self._say(MSG[2])
-            self._run_mic_sessions("ready")
-            return
+        # 별칭이 정확히 1개 목적지에만 매칭 → GPT 없이 바로 확인
+        alias_map: Dict[str, List[str]] = {}
+        for dest in self.destinations():
+            m = re.search(r'\((.+?)\)', dest)
+            if m:
+                alias_map.setdefault(m.group(1), []).append(dest)
+        for alias, dests in alias_map.items():
+            if alias in text and len(dests) == 1:
+                self._say(msg5(dests[0]))
+                self._go_ready_confirm(dests[0])
+                return
+
+        if _force_offline:
+            plan = _offline_plan(text, self.destinations(), "READY")
+        else:
+            try:
+                plan = self.gpt.plan(
+                    state_name="READY",
+                    locations=self.destinations(),
+                    user_text=text,
+                )
+            except Exception as e:
+                print(f"[GPT-ERR] {e} → 오프라인 매칭 사용", file=sys.stderr)
+                plan = _offline_plan(text, self.destinations(), "READY")
 
         action     = plan.get("action", "noop")
         dest       = plan.get("destination")
@@ -1397,6 +1623,11 @@ class InterfaceApp:
             self._run_mic_sessions("ready")
 
         elif action == "disambiguate":
+            # GPT가 단일 후보를 disambiguate로 반환한 경우 → propose로 처리
+            if len(candidates) == 1 and candidates[0] in self.destinations():
+                self._say(msg5(candidates[0]))
+                self._go_ready_confirm(candidates[0])
+                return
             self.ready_retry += 1
             if self.ready_retry > READY_RETRY_MAX:
                 self._say(MSG[18])
@@ -1449,17 +1680,18 @@ class InterfaceApp:
 
     # ── PAUSED: 의도 입력 ─────────────────────
     def _process_paused_text(self, text: str) -> None:
-        try:
-            plan = self.gpt.plan(
-                state_name="PAUSED",
-                locations=self.destinations(),
-                user_text=text,
-            )
-        except Exception as e:
-            print(f"[GPT-ERR] {e}", file=sys.stderr)
-            self._say(MSG[21])
-            self._run_mic_sessions("paused")
-            return
+        if _force_offline:
+            plan = _offline_plan(text, self.destinations(), "PAUSED")
+        else:
+            try:
+                plan = self.gpt.plan(
+                    state_name="PAUSED",
+                    locations=self.destinations(),
+                    user_text=text,
+                )
+            except Exception as e:
+                print(f"[GPT-ERR] {e} → 오프라인 매칭 사용", file=sys.stderr)
+                plan = _offline_plan(text, self.destinations(), "PAUSED")
 
         action = plan.get("action", "noop")
         dest   = plan.get("destination")
