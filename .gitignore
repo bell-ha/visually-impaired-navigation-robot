@@ -1,0 +1,24 @@
+# Virtual environments
+venv_tf115/
+venv/
+.venv/
+
+# OCR-RCNN external repo & model files
+ocr-rcnn-v2/
+*.zip
+frozen_model/
+frozen_model.pb
+*.pb
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# ROS2 build artifacts
+build/
+install/
+log/
