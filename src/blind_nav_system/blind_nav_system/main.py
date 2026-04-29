@@ -294,6 +294,36 @@ def web_pull():
     _log("WEB", "당김 트리거 (웹)")
     return jsonify(ok=True)
 
+_CONFIRMED_LOCATIONS = {
+    "인공지능 플랫폼",
+    "특별전시관",
+    "ITRC 120 상담장",
+    "ITRC 219 문화행사",
+    "ITRC 217 지능통감융합 연구센터 (KAIST)",
+    "ITRC 215 배리어프리 ICT기술 연구센터 (단국대)",
+    "ITRC 114 UAM-eVTOL 융합 연구센터 (세종대)",
+}
+
+@app.route("/locations")
+def get_locations():
+    import yaml
+    yaml_path = THIS_DIR / "../config/location.yaml"
+    try:
+        data = yaml.safe_load(yaml_path.read_text("utf-8")) or {}
+        names = list((data.get("locations") or {}).keys())
+    except Exception:
+        names = []
+    return jsonify(locations=[
+        {"name": n, "confirmed": n in _CONFIRMED_LOCATIONS} for n in names
+    ])
+
+@app.route("/net_mode", methods=["POST"])
+def set_net_mode():
+    offline = bool((request.json or {}).get("offline", False))
+    _write("iface", "/offline" if offline else "/online")
+    _log("WEB", f"네트워크 모드: {'🔴 오프라인' if offline else '🟢 온라인'}")
+    return jsonify(ok=True, offline=offline)
+
 # ── 시리얼 루프 ───────────────────────────────────────────────────────────────
 def serial_loop():
     pull_detect = _make_pull_detector()
@@ -407,7 +437,6 @@ HTML = """<!DOCTYPE html>
 <header>
   <h1>시각장애인 안내 로봇 대시보드</h1>
   <span class="badge badge-auto" id="mode-badge">자동 모드</span>
-  <span class="battery" id="battery-display">배터리 --</span>
 </header>
 <div class="layout">
   <div id="log-panel"></div>
@@ -418,6 +447,11 @@ HTML = """<!DOCTYPE html>
         <button class="btn btn-auto"   onclick="setMode(false)">자동</button>
         <button class="btn btn-manual" onclick="setMode(true)">수동</button>
       </div>
+    </div>
+
+    <div id="location-section">
+      <h2>장소 목록</h2>
+      <div id="location-list" style="display:flex;flex-direction:column;gap:4px;margin-top:6px;max-height:320px;overflow-y:auto"></div>
     </div>
 
     <div id="manual-section" style="display:none">
@@ -448,6 +482,8 @@ HTML = """<!DOCTYPE html>
         <button class="btn btn-nav"    onclick="sendButton()">버튼1 (목적지 입력)</button>
         <button class="btn btn-vision" onclick="sendVision()">버튼2 (시각 분석)</button>
         <button class="btn btn-pull"   onclick="sendPull()">당김 트리거</button>
+        <button class="btn" id="net-mode-btn" onclick="toggleNetMode()"
+                style="background:#059669;color:#fff">🟢 온라인 모드</button>
         <div style="margin-top:8px">
           <label style="color:#94a3b8;font-size:0.8rem">로봇 속도: <span id="robot-speed-val">0.26</span> m/s</label>
           <input type="range" min="0.10" max="0.50" step="0.02" value="0.26" style="width:100%"
@@ -476,8 +512,21 @@ function setMode(manual) {
   document.getElementById('mode-badge').textContent = manual ? '수동 모드' : '자동 모드';
   document.getElementById('mode-badge').className = 'badge ' + (manual ? 'badge-manual' : 'badge-auto');
   document.getElementById('manual-section').style.display = manual ? 'block' : 'none';
-  if (!manual) _stopMove();  // 자동 전환 시 이동 정지
+  document.getElementById('location-section').style.display = manual ? 'none' : 'block';
+  if (!manual) { _stopMove(); loadLocations(); }
 }
+
+function loadLocations() {
+  fetch('/locations').then(r => r.json()).then(d => {
+    const el = document.getElementById('location-list');
+    el.innerHTML = d.locations.map(loc =>
+      loc.confirmed
+        ? `<div style="background:#14532d;border-radius:6px;padding:5px 10px;font-size:0.78rem;color:#86efac">✅ ${escHtml(loc.name)}</div>`
+        : `<div style="background:#1e293b;border-radius:6px;padding:5px 10px;font-size:0.78rem;color:#475569">⬜ ${escHtml(loc.name)}</div>`
+    ).join('');
+  }).catch(() => {});
+}
+loadLocations();
 
 function getSpeed() { return parseInt(document.getElementById('speed').value) / 100; }
 
@@ -527,6 +576,16 @@ function emergencyStop() {
 function sendButton() { fetch('/button', {method:'POST'}); }
 function sendVision() { fetch('/vision', {method:'POST'}); }
 function sendPull()   { fetch('/pull',   {method:'POST'}); }
+
+let offlineMode = false;
+function toggleNetMode() {
+  offlineMode = !offlineMode;
+  fetch('/net_mode', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({offline: offlineMode})});
+  const btn = document.getElementById('net-mode-btn');
+  btn.textContent = offlineMode ? '🔴 오프라인 모드' : '🟢 온라인 모드';
+  btn.style.background = offlineMode ? '#dc2626' : '#059669';
+}
 function setRobotSpeed(v) {
   document.getElementById('robot-speed-val').textContent = parseFloat(v).toFixed(2);
   fetch('/robot_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
@@ -550,18 +609,6 @@ es.onmessage = e => {
   logPanel.scrollTop = logPanel.scrollHeight;
 };
 
-// 배터리 폴링 (5초마다)
-function updateBattery() {
-  fetch('/battery_status').then(r => r.json()).then(d => {
-    const el = document.getElementById('battery-display');
-    if (d.pct === null) { el.textContent = '배터리 --'; el.className = 'battery'; return; }
-    const icon = d.charging ? '⚡' : '🔋';
-    el.textContent = `${icon} ${d.pct}% (${d.voltage}V)`;
-    el.className = 'battery ' + (d.charging ? 'charging' : d.pct > 30 ? 'ok' : d.pct > 15 ? 'low' : 'crit');
-  }).catch(() => {});
-}
-updateBattery();
-setInterval(updateBattery, 5000);
 
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
