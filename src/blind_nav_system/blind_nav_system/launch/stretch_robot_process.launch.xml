@@ -13,7 +13,7 @@
   <!-- 사람 있음 -->
   <arg name="params_file" default="/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params_human.yaml"/>
 
-  <arg name="map" default="/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/coex.yaml"/>
+  <arg name="map" default="/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/all.yaml"/>
 
   <!-- Nav2(네비게이션 파트) 시작을 localization보다 살짝 늦춰서 TF/맵 준비 레이스를 줄임 -->
   <arg name="nav_start_delay" default="5.0"/>
@@ -46,7 +46,7 @@
     <!-- 424x240x15: 장애물 감지 용도로 충분, CPU 부하 대폭 감소 -->
     <param name="depth_module.profile" value="424x240x15"/>
     <!-- color: 낮은 해상도로 활성화 (vision_assistant.py 에서 이미지 분석용) -->
-    <param name="align_depth.enable" value="false"/>
+    <param name="align_depth.enable" value="true"/>
     <param name="enable_color" value="true"/>
     <param name="rgb_camera.profile" value="424x240x15"/>
     <!-- QoS를 SENSOR_DATA로: 데이터 손실보다 속도 우선 -->

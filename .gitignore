@@ -2,6 +2,7 @@
 venv_tf115/
 venv/
 .venv/
+people_tracker/people_tracker/
 
 # OCR-RCNN external repo & model files
 ocr-rcnn-v2/

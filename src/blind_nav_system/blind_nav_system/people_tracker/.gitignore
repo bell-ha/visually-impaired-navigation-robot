@@ -1,0 +1,7 @@
+# 가상환경
+people_tracker/
+
+# 모델 캐시
+*.pt
+__pycache__/
+*.pyc
