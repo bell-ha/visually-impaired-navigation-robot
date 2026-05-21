@@ -14,7 +14,12 @@ import time
 import webbrowser
 from pathlib import Path
 
-import serial
+try:
+    import serial
+    _SERIAL_OK = True
+except ImportError:
+    _SERIAL_OK = False
+    print("[경고] pyserial 없음 – 시리얼(버튼/압력) 비활성화")
 from flask import Flask, Response, jsonify, request
 
 # ── 경로 설정 ─────────────────────────────────────────────────────────────────
@@ -326,6 +331,10 @@ def set_net_mode():
 
 # ── 시리얼 루프 ───────────────────────────────────────────────────────────────
 def serial_loop():
+    if not _SERIAL_OK:
+        _log("MAIN", "시리얼 비활성화 (pyserial 없음)")
+        return
+
     pull_detect = _make_pull_detector()
     last_pull_t = 0.0
     ser = None
