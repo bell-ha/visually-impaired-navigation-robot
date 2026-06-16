@@ -12,8 +12,9 @@ import tensorflow.compat.v1 as tf
 tf.disable_eager_execution()
 sys.modules['tensorflow'] = tf
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OCR_LIB_PATH = os.path.join(SCRIPT_DIR, "ocr-rcnn-v2/src/button_recognition/scripts")
+SCRIPT_DIR       = os.path.dirname(os.path.abspath(__file__))
+ELEVATOR_DIR     = os.path.join(SCRIPT_DIR, "../elevator_button_press")
+OCR_LIB_PATH     = os.path.join(ELEVATOR_DIR, "ocr-rcnn-v2/src/button_recognition/scripts")
 OCR_RCNN_LIB_PATH = os.path.join(OCR_LIB_PATH, "ocr_rcnn_lib")
 sys.path.insert(0, OCR_LIB_PATH)
 sys.path.insert(0, OCR_RCNN_LIB_PATH)
@@ -22,7 +23,7 @@ from ocr_rcnn_lib.button_recognition import ButtonRecognizer
 
 FROZEN_MODEL_DIR = os.path.join(OCR_RCNN_LIB_PATH, "frozen_model")
 TEST_PANELS_DIR  = os.path.join(OCR_RCNN_LIB_PATH, "test_panels")
-RESULTS_DIR      = os.path.join(SCRIPT_DIR, "results")
+RESULTS_DIR      = os.path.join(ELEVATOR_DIR, "results")
 
 os.makedirs(RESULTS_DIR, exist_ok=True)
 

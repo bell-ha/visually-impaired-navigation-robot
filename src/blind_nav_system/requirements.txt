@@ -1,0 +1,47 @@
+# ================================================================
+# blind_nav_system 통합 패키지 목록
+#
+# 설치:
+#   cd src/blind_nav_system
+#   python3 -m venv --system-site-packages venv
+#   source venv/bin/activate
+#   pip install -r requirements.txt
+#
+# ROS2 패키지 (rclpy, sensor_msgs 등)는 시스템에서 상속되므로 제외
+# ================================================================
+
+# ── 공통 ────────────────────────────────────────────────────────
+# numpy<2.0: tensorflow 2.13과 ultralytics 동시 호환
+numpy>=1.24.0,<2.0.0
+pyyaml>=6.0
+
+# ── 음성 인터페이스 (interface.py) ─────────────────────────────
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.13
+gTTS>=2.5.0
+vosk>=0.3.45
+pyserial>=3.5
+
+# ── OpenAI API (interface.py, vision_assistant.py) ──────────────
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# ── 웹 대시보드 (main.py) ───────────────────────────────────────
+flask>=3.0.0
+
+# ── 컴퓨터 비전 공통 ────────────────────────────────────────────
+# headless 대신 opencv-python으로 통일 (people_tracker GUI 사용)
+opencv-python>=4.9.0
+
+# ── 사람 추적 (people_tracker) ──────────────────────────────────
+ultralytics>=8.2.0
+
+# ── 엘리베이터 버튼 인식 (elevator_button_press) ────────────────
+tensorflow==2.13.0
+imageio>=2.31.1
+pillow>=9.5.0
+matplotlib>=3.5.3
+gdown>=4.7.3
+
+# ── 입력 장치 (tools/mouse_teleop.py) ───────────────────────────
+pynput>=1.7.6

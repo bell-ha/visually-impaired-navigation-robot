@@ -14,7 +14,7 @@
 ```bash
 stretch_robot_battery_check.py     # 배터리 확인 (24V 이하 시 충전)
 stretch_free_robot_process.py      # 기존 프로세스 정리
-              # 로봇 원점 설정
+stretch_robot_home.py              # 로봇 원점 설정
 ```
 
 ---
@@ -66,7 +66,7 @@ ros2 run nav2_map_server map_saver_cli \
 ### 3.1 전체 스택 한 번에 실행 (권장)
 
 ```bash
-ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/launch/stretch_robot_process.launch.xml
+ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/launch/stretch_robot_process.launch.xml
 ```
 
 포함 내용: stretch_driver, RPLidar, RealSense D435i, map_server, AMCL, Nav2
@@ -92,9 +92,7 @@ RViz 설정:
 
 ---
 
----
-
-## 6. Nav2 파라미터 주요 설정
+## 4. Nav2 파라미터 주요 설정
 
 파일 위치: `/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params_human.yaml`
 
@@ -116,25 +114,17 @@ ros2 param set /controller_server FollowPath.max_vel_theta 0.3
 
 ---
 
-## 7. 배터리 관리
+## 5. 배터리 관리
 
 - 24V 이하 → 충전 필요
 - LED 노란색(2초 주기) → 저전압 경고
 - 충전기: NOCO Genius10 (기본 충전: 12V AGM 모드)
 
-## 8, 화면 밝기 키우는 방법
+---
 
+## 6. 기타
+
+```bash
+# 화면 밝기 조절
 xrandr --output HDMI-1 --brightness 1.5
-
-# 드라이버, rviz2실행하고 할 것은
- stretch_free_robot_process.py 
-stretch_robot_home.py 
-
-ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/launch/stretch_robot_process.launch.xml 
-
-C
-디렉토리 이동해서 
-armleft.py
-main.py
-
-이 두개실행하면 됨
+```

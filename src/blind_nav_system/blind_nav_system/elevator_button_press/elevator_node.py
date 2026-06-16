@@ -10,7 +10,7 @@ from std_msgs.msg import String
 from cv_bridge import CvBridge
 import cv2
 
-VENV_PYTHON = os.path.expanduser("~/venv_ocr/bin/python3")
+VENV_PYTHON = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../venv/bin/python3"))
 INFER_SCRIPT = os.path.join(os.path.dirname(__file__), "ocr_rcnn_infer.py")
 
 

@@ -60,22 +60,22 @@ ROS2 머리 카메라 (RGB)
 
 ### 가상환경 세팅 (최초 1회)
 
+통합 venv를 `blind_nav_system/` 아래 한 번만 생성합니다.
+
 ```bash
-cd .../people_tracker
+cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system
 
-# --system-site-packages 필수 (rclpy가 시스템에 있으므로)
-python3 -m venv people_tracker --system-site-packages
-
+python3 -m venv --system-site-packages venv
 source /opt/ros/humble/setup.bash
-source people_tracker/bin/activate
-pip install ultralytics opencv-python numpy
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ### 실행 순서
 
 **터미널 1 — ROS2 스택 (로봇 전체)**
 ```bash
-ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/launch/stretch_robot_process.launch.xml
+ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/launch/stretch_robot_process.launch.xml
 ```
 
 **터미널 2 — RViz2에서 초기 위치 설정**
@@ -83,9 +83,9 @@ ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blin
 
 **터미널 3 — People Tracker**
 ```bash
-cd .../people_tracker
 source /opt/ros/humble/setup.bash
-source people_tracker/bin/activate
+source ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/venv/bin/activate
+cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/people_tracker
 python3 main.py
 ```
 

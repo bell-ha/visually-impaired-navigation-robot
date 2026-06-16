@@ -10,14 +10,15 @@ Stretch SE3 로봇의 그리퍼 카메라(D405)로 엘리베이터 버튼을 인
 ```
 elevator_button_press/
 ├── main.py               # ★ 메인 실행 파일 (Flask 웹 UI + ROS2 노드 통합)
+├── elevator_node.py      # ROS2 노드 (카메라 이미지 → 버튼 인식 결과 퍼블리시)
+├── visual_servo_node.py  # Visual servoing 노드
 ├── ocr_rcnn_server.py    # 영구 추론 서버 (모델 1회 로딩 후 stdin/stdout 통신)
 ├── ocr_rcnn_infer.py     # 단일 이미지 추론 스크립트 (테스트용)
-├── run_test_panels.py    # 테스트 이미지 배치 추론 및 결과 저장
-├── setup.sh              # 최초 설치 스크립트 (venv 생성 + 모델 다운로드)
-├── requirements.txt      # ~/venv_ocr 에 설치할 패키지 목록
 ├── ocr-rcnn-v2/          # OCR-RCNN v2 외부 repo (gitignore 처리)
-└── results/              # run_test_panels.py 결과 이미지 저장 폴더
+└── results/              # 테스트 결과 이미지 저장 폴더 (gitignore)
 ```
+
+> **참고:** 테스트 패널 배치 추론 스크립트(`run_test_panels.py`)는 `tools/` 폴더로 이동됨.
 
 ---
 
@@ -29,7 +30,7 @@ elevator_button_press/
 - **frozen model 파일** (Google Drive에서 다운로드):
   - `detection_graph_640x480.pb` — 버튼 위치 감지 (Faster R-CNN 계열)
   - `ocr_graph.pb` — 버튼 숫자/문자 인식
-- **실행 환경**: `~/venv_ocr` (TF 2.13 + `compat.v1` 패치) — ROS2/PyTorch 환경과 완전 격리
+- **실행 환경**: `blind_nav_system/venv/` 통합 가상환경 (TF 2.13 + `compat.v1` 패치, `--system-site-packages`로 ROS2 상속)
 
 ### 추론 속도 최적화
 
@@ -43,15 +44,25 @@ elevator_button_press/
 
 ## 최초 설치 (1회만)
 
+### 통합 venv 생성 및 패키지 설치
+
 ```bash
-cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/elevator_button_press
-bash setup.sh
+cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system
+
+python3 -m venv --system-site-packages venv
+source /opt/ros/humble/setup.bash
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-설치 내용:
-- `~/venv_ocr` 가상환경 생성 (Python 3.10, TF 2.13)
-- `ocr-rcnn-v2` 레포 클론
-- Google Drive에서 frozen model 2개 다운로드
+### frozen model 다운로드 (gdown 사용)
+
+```bash
+# venv 활성화 상태에서 실행
+cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/elevator_button_press/ocr-rcnn-v2/src/button_recognition/scripts/ocr_rcnn_lib/frozen_model
+gdown <detection_graph_640x480.pb Google Drive ID>
+gdown <ocr_graph.pb Google Drive ID>
+```
 
 ---
 
@@ -66,8 +77,8 @@ ros2 launch stretch_ros2_bridge stretch_robot_process.launch.xml
 ### 터미널 2 — 메인 스크립트
 
 ```bash
-# venv가 활성화되어 있으면 먼저 해제 (시스템 Python 사용해야 함)
-deactivate 2>/dev/null; true
+source /opt/ros/humble/setup.bash
+source ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/venv/bin/activate
 
 python3 ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/elevator_button_press/main.py
 ```
@@ -165,7 +176,7 @@ http://localhost:5000
   │    ├─ 구독: /joint_states  (현재 lift 위치 파악)
   │    └─ 액션: /stretch_controller/follow_joint_trajectory
   └─ 영구 subprocess (시작 시 1회 기동)
-       └─ ~/venv_ocr/bin/python3 ocr_rcnn_server.py
+       └─ blind_nav_system/venv/bin/python3 ocr_rcnn_server.py
             └─ OCR-RCNN v2 (TF 2.13 compat.v1)
                  ├─ detection_graph_640x480.pb
                  └─ ocr_graph.pb
@@ -178,14 +189,17 @@ http://localhost:5000
 실제 로봇 없이 모델 동작만 확인하려면:
 
 ```bash
-~/venv_ocr/bin/python3 run_test_panels.py
-# 결과 이미지: results/ 폴더에 저장
+source ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/venv/bin/activate
+
+# 배치 테스트 (tools/ 폴더에 위치)
+python3 ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/tools/run_test_panels.py
+# 결과 이미지: elevator_button_press/results/ 폴더에 저장
 ```
 
 단일 이미지 추론:
 
 ```bash
-~/venv_ocr/bin/python3 ocr_rcnn_infer.py --image /path/to/image.jpg
+python3 ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/elevator_button_press/ocr_rcnn_infer.py --image /path/to/image.jpg
 # JSON 출력 예:
 # {"detections": [{"score": 0.98, "text": "3", "belief": 0.95, "box": {...}}]}
 ```

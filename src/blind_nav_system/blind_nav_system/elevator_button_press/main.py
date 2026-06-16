@@ -18,7 +18,7 @@ from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
 from flask import Flask, Response, jsonify, request, render_template_string
 
-VENV_PYTHON   = os.path.expanduser("~/venv_ocr/bin/python3")
+VENV_PYTHON   = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../venv/bin/python3"))
 INFER_SCRIPT  = os.path.join(os.path.dirname(__file__), "ocr_rcnn_infer.py")
 INFER_SERVER  = os.path.join(os.path.dirname(__file__), "ocr_rcnn_server.py")
 

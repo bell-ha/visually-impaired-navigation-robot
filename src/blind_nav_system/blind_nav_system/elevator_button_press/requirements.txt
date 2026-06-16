@@ -1,6 +1,0 @@
-tensorflow==2.13.0
-opencv-python-headless==4.8.0.76
-imageio==2.31.1
-pillow==9.5.0
-matplotlib==3.5.3
-gdown==4.7.3
