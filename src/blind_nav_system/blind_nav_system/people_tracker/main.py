@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("source", nargs="?", default="ros",
                    help="'ros'=머리 카메라(기본), 영상 파일, 또는 웹캠 인덱스(예: 6=그리퍼)")
     p.add_argument("--model", default="yolov8n.pt")
-    p.add_argument("--conf", type=float, default=0.35)
+    p.add_argument("--conf", type=float, default=0.5)
     p.add_argument("--iou", type=float, default=0.5)
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=720)

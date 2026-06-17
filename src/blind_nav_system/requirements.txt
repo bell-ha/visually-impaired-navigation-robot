@@ -35,6 +35,7 @@ opencv-python>=4.9.0
 
 # ── 사람 추적 (people_tracker) ──────────────────────────────────
 ultralytics>=8.2.0
+lap>=0.5.12
 
 # ── 엘리베이터 버튼 인식 (elevator_button_press) ────────────────
 tensorflow==2.13.0

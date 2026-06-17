@@ -9,7 +9,7 @@ DEFAULT_MODEL = "yolov8n.pt"
 PERSON_CLASS_ID = 0
 DEFAULT_CONF = 0.5
 DEFAULT_IOU = 0.5
-MIN_BOX_HEIGHT = 80   # 픽셀 — 이보다 작은 박스는 사람으로 안 봄
+MIN_LONG_SIDE = 60    # 픽셀 — bbox 긴 변 기준 (카메라 회전 무관)
 
 
 class PersonTracker:
@@ -45,7 +45,7 @@ class PersonTracker:
                 xyxy = boxes.xyxy.cpu().numpy()
                 ids = boxes.id.cpu().numpy().astype(int)
                 for (x1, y1, x2, y2), tid in zip(xyxy, ids):
-                    if (y2 - y1) >= MIN_BOX_HEIGHT:
+                    if max(y2 - y1, x2 - x1) >= MIN_LONG_SIDE:
                         tracks.append((float(x1), float(y1), float(x2), float(y2), int(tid)))
 
         return tracks

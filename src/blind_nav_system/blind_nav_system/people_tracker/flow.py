@@ -9,7 +9,7 @@ from utils import angle_degrees, speed
 
 
 N_BINS = 8
-TEMPORAL_LEN = 30
+TEMPORAL_LEN = 15  # 5fps 기준 ~3초 평균 — 빠르게 접근하는 군중에 빠르게 반응
 
 
 class CrowdFlowEstimator:

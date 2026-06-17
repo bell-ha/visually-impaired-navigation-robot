@@ -299,6 +299,24 @@ def web_pull():
     _log("WEB", "당김 트리거 (웹)")
     return jsonify(ok=True)
 
+@app.route("/armleft", methods=["POST"])
+def armleft():
+    p = _procs.get("armleft")
+    if p and p.poll() is None:
+        p.terminate()
+        _log("MAIN", "armleft.py 종료")
+        return jsonify(ok=True, running=False)
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(THIS_DIR / "tools/armleft.py")],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    _procs["armleft"] = proc
+    threading.Thread(target=_capture, args=(proc, "ARM"), daemon=True).start()
+    _log("MAIN", f"armleft.py 시작 PID={proc.pid}")
+    return jsonify(ok=True, running=True)
+
 _CONFIRMED_LOCATIONS = {
     "인공지능 플랫폼",
     "특별전시관",
@@ -491,6 +509,8 @@ HTML = """<!DOCTYPE html>
         <button class="btn btn-nav"    onclick="sendButton()">버튼1 (목적지 입력)</button>
         <button class="btn btn-vision" onclick="sendVision()">버튼2 (시각 분석)</button>
         <button class="btn btn-pull"   onclick="sendPull()">당김 트리거</button>
+        <button class="btn" id="armleft-btn" onclick="toggleArmleft()"
+                style="background:#0f766e;color:#fff">팔 위치 고정</button>
         <button class="btn" id="net-mode-btn" onclick="toggleNetMode()"
                 style="background:#059669;color:#fff">🟢 온라인 모드</button>
         <div style="margin-top:8px">
@@ -585,6 +605,16 @@ function emergencyStop() {
 function sendButton() { fetch('/button', {method:'POST'}); }
 function sendVision() { fetch('/vision', {method:'POST'}); }
 function sendPull()   { fetch('/pull',   {method:'POST'}); }
+
+let armleftRunning = false;
+function toggleArmleft() {
+  fetch('/armleft', {method:'POST'}).then(r => r.json()).then(d => {
+    armleftRunning = d.running;
+    const btn = document.getElementById('armleft-btn');
+    btn.textContent = armleftRunning ? '팔 고정 해제' : '팔 위치 고정';
+    btn.style.background = armleftRunning ? '#dc2626' : '#0f766e';
+  });
+}
 
 let offlineMode = false;
 function toggleNetMode() {

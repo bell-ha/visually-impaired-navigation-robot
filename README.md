@@ -172,3 +172,13 @@ OPENAI_API_KEY=sk-...
 
 ## 문서
 - [Navigation & SLAM 가이드](navigation-and-slam-guide.md)
+
+
+
+
+가상환경 활성화
+source /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/venv/bin/activate
+
+
+활성화 후 requirments.txt 설치
+pip install -r /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/requirements.txt
