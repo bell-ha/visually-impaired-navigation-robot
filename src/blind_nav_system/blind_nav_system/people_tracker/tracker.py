@@ -1,6 +1,6 @@
 from __future__ import annotations
-from pathlib import Path
 
+import cv2
 import numpy as np
 from ultralytics import YOLO
 
@@ -26,9 +26,21 @@ class PersonTracker:
         self.device = device
         self._tracker_cfg = "bytetrack.yaml"
 
-    def update(self, frame: np.ndarray) -> list[tuple[float, float, float, float, int]]:
+    def update(self, frame: np.ndarray, rotate_deg: int = 0) -> list[tuple[float, float, float, float, int]]:
+        orig_h, orig_w = frame.shape[:2]
+
+        # YOLO 입력을 올바른 방향으로 회전 (사람이 서있는 자세로 보이도록)
+        if rotate_deg == 90:
+            yolo_frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        elif rotate_deg == 180:
+            yolo_frame = cv2.rotate(frame, cv2.ROTATE_180)
+        elif rotate_deg == 270:
+            yolo_frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        else:
+            yolo_frame = frame
+
         results = self.model.track(
-            frame,
+            yolo_frame,
             persist=True,
             tracker=self._tracker_cfg,
             conf=self.conf,
@@ -45,7 +57,17 @@ class PersonTracker:
                 xyxy = boxes.xyxy.cpu().numpy()
                 ids = boxes.id.cpu().numpy().astype(int)
                 for (x1, y1, x2, y2), tid in zip(xyxy, ids):
-                    if max(y2 - y1, x2 - x1) >= MIN_LONG_SIDE:
-                        tracks.append((float(x1), float(y1), float(x2), float(y2), int(tid)))
+                    # 회전된 bbox를 원본 좌표계로 역변환 (depth 샘플링과 좌표 일치)
+                    if rotate_deg == 90:
+                        ox1, oy1, ox2, oy2 = y1, orig_h - 1 - x2, y2, orig_h - 1 - x1
+                    elif rotate_deg == 180:
+                        ox1, oy1, ox2, oy2 = orig_w - 1 - x2, orig_h - 1 - y2, orig_w - 1 - x1, orig_h - 1 - y1
+                    elif rotate_deg == 270:
+                        ox1, oy1, ox2, oy2 = orig_w - 1 - y2, x1, orig_w - 1 - y1, x2
+                    else:
+                        ox1, oy1, ox2, oy2 = x1, y1, x2, y2
+
+                    if max(oy2 - oy1, ox2 - ox1) >= MIN_LONG_SIDE:
+                        tracks.append((float(ox1), float(oy1), float(ox2), float(oy2), int(tid)))
 
         return tracks

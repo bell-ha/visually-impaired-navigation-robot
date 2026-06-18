@@ -8,20 +8,15 @@ import rclpy
 import rclpy.duration
 from rclpy.node import Node
 from sensor_msgs.msg import Image as ROSImage, CameraInfo
-from std_msgs.msg import Float32MultiArray
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point, PointStamped
 from builtin_interfaces.msg import Duration
 import tf2_ros
 import tf2_geometry_msgs
 
-from direction import DirectionResult
-from flow import CrowdFlowEstimator
-
 DEPTH_TOPIC        = "/camera/camera/aligned_depth_to_color/image_raw"
 INFO_TOPIC         = "/camera/camera/color/camera_info"
 MARKER_TOPIC       = "/people_tracker/markers"
-CROWD_FLOW_TOPIC   = "/people_tracker/crowd_flow"
 TARGET_FRAME       = "map"
 
 HISTORY_LEN  = 8   # 빠른 방향 반응
@@ -51,15 +46,13 @@ class PeopleMarkerPublisher(Node):
         self.create_subscription(ROSImage,    DEPTH_TOPIC, self._depth_cb, 10)
         self.create_subscription(CameraInfo,  INFO_TOPIC,  self._info_cb,  10)
 
-        self._pub        = self.create_publisher(MarkerArray,      MARKER_TOPIC,     10)
-        self._crowd_pub  = self.create_publisher(Float32MultiArray, CROWD_FLOW_TOPIC, 10)
-        self._crowd_flow_est = CrowdFlowEstimator()
+        self._pub = self.create_publisher(MarkerArray, MARKER_TOPIC, 10)
 
         self._tf_buffer   = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
         self.get_logger().info(f"구독: {DEPTH_TOPIC}")
-        self.get_logger().info(f"퍼블리시: {MARKER_TOPIC}, {CROWD_FLOW_TOPIC}")
+        self.get_logger().info(f"퍼블리시: {MARKER_TOPIC}")
 
     # ── 콜백 ──────────────────────────────────────────────────────────────────
 
@@ -117,9 +110,28 @@ class PeopleMarkerPublisher(Node):
         except Exception:
             return None
 
+    def _robot_yaw_deg(self) -> float | None:
+        """TF2에서 map → base_link yaw 추출 (degree)."""
+        try:
+            trans = self._tf_buffer.lookup_transform(
+                'map', 'base_link',
+                rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.1))
+            q = trans.transform.rotation
+            siny = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            return math.degrees(math.atan2(siny, cosy))
+        except Exception:
+            return None
+
     def _velocity_2d(self, tid: int, mx: float, my: float) -> tuple[float, float] | None:
         """맵 좌표 이력으로 2D 속도(m/frame) 계산. 이력 부족 시 None."""
         hist = self._pos_history[tid]
+        if hist:
+            px, py = hist[-1]
+            if ((mx - px) ** 2 + (my - py) ** 2) ** 0.5 > 1.0:
+                # 튀는 값 감지 → 이력 리셋 후 새 기준점으로 시작
+                hist.clear()
         hist.append((mx, my))
         if len(hist) < MIN_HISTORY:
             return None
@@ -152,8 +164,8 @@ class PeopleMarkerPublisher(Node):
         clr.header.frame_id = TARGET_FRAME
         markers.append(clr)
 
+        robot_yaw = self._robot_yaw_deg()
         uid = 0
-        map_dir_results = []
         for x1, y1, x2, y2, tid in tracks:
             # 가슴 위치 (bbox 상단 1/3) — 바닥보다 depth 안정적
             bx = int((x1 + x2) / 2)
@@ -170,6 +182,26 @@ class PeopleMarkerPublisher(Node):
 
             mx, my, _ = map_xyz
 
+            # 속도 먼저 계산 → 실린더 색상 결정
+            vel = self._velocity_2d(tid, mx, my)
+            vx = vy = spd = 0.0
+            if vel is not None:
+                vx, vy = vel
+                spd = (vx**2 + vy**2) ** 0.5
+
+            # 접근자(빨강) / 동행자(초록) / 미분류(파랑) 분류
+            if vel is not None and robot_yaw is not None and spd > MAP_MIN_SPEED:
+                person_angle = math.degrees(math.atan2(vy, vx))
+                diff = abs(person_angle - robot_yaw)
+                if diff > 180:
+                    diff = 360.0 - diff
+                if diff > 90:
+                    cr, cg, cb, ca = 1.0, 0.2, 0.2, 0.8   # 빨강 — 접근자
+                else:
+                    cr, cg, cb, ca = 0.2, 0.9, 0.2, 0.7   # 초록 — 동행자
+            else:
+                cr, cg, cb, ca = 0.2, 0.6, 1.0, 0.7       # 파랑 — 미분류/정지
+
             # 사람 실린더
             cyl           = Marker()
             cyl.header.frame_id = TARGET_FRAME
@@ -183,7 +215,7 @@ class PeopleMarkerPublisher(Node):
             cyl.pose.orientation.w = 1.0
             cyl.scale.x = cyl.scale.y = 0.5   # 직경
             cyl.scale.z = 1.8                  # 키
-            cyl.color.r, cyl.color.g, cyl.color.b, cyl.color.a = 0.2, 0.6, 1.0, 0.7
+            cyl.color.r, cyl.color.g, cyl.color.b, cyl.color.a = cr, cg, cb, ca
             cyl.lifetime = Duration(sec=1)
             markers.append(cyl)
 
@@ -204,24 +236,11 @@ class PeopleMarkerPublisher(Node):
             txt.lifetime        = Duration(sec=1)
             markers.append(txt)
 
-            # 방향 화살표 (맵 좌표 기반) + crowd_flow 집계용 DirectionResult 수집
-            vel = self._velocity_2d(tid, mx, my)
-            if vel is not None:
-                vx, vy = vel
-                spd = (vx**2 + vy**2) ** 0.5
-                is_moving = spd > MAP_MIN_SPEED
-                map_dir_results.append(DirectionResult(
-                    track_id=tid,
-                    vx=vx, vy=vy,
-                    angle=math.degrees(math.atan2(vy, vx)),
-                    spd=spd,
-                    is_moving=is_moving,
-                ))
-                if spd > 0.02:                 # 정지 판정 임계값 (m/frame)
+            # 방향 화살표
+            if vel is not None and spd > MAP_MIN_SPEED:
                     arrow_len = min(0.5 + spd * 10, 2.0)
-                    norm = spd
-                    ex = mx + (vx / norm) * arrow_len
-                    ey = my + (vy / norm) * arrow_len
+                    ex = mx + (vx / spd) * arrow_len
+                    ey = my + (vy / spd) * arrow_len
 
                     arr           = Marker()
                     arr.header.frame_id = TARGET_FRAME
@@ -242,14 +261,3 @@ class PeopleMarkerPublisher(Node):
         msg = MarkerArray()
         msg.markers = markers
         self._pub.publish(msg)
-
-        # crowd_flow 계산 후 퍼블리시
-        crowd_flow = self._crowd_flow_est.update(map_dir_results)
-        if crowd_flow is not None:
-            cf = Float32MultiArray()
-            cf.data = [
-                float(crowd_flow['dominant_angle']),
-                float(crowd_flow['n_moving']),
-                float(crowd_flow['mean_speed']),
-            ]
-            self._crowd_pub.publish(cf)

@@ -10,7 +10,6 @@ import numpy as np
 
 from tracker import PersonTracker
 from direction import DirectionEstimator
-from flow import CrowdFlowEstimator
 from visualization import Visualizer
 from utils import bottom_center_of_box, draw_text_with_bg
 
@@ -36,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("source", nargs="?", default="ros",
                    help="'ros'=머리 카메라(기본), 영상 파일, 또는 웹캠 인덱스(예: 6=그리퍼)")
     p.add_argument("--model", default="yolov8n.pt")
-    p.add_argument("--conf", type=float, default=0.5)
+    p.add_argument("--conf", type=float, default=0.35)
     p.add_argument("--iou", type=float, default=0.5)
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=720)
@@ -188,7 +187,6 @@ def main() -> None:
     tracker = PersonTracker(model_path=args.model, conf=args.conf,
                             iou=args.iou, device=args.device)
     estimator = DirectionEstimator()
-    flow_est = CrowdFlowEstimator()
     visualizer = Visualizer()
 
     writer = None
@@ -247,8 +245,8 @@ def main() -> None:
             cv2.setTrackbarPos(SEEKBAR, WINDOW, min(cur_frame, total_frames - 1))
             last_bar_pos = min(cur_frame, total_frames - 1)
 
-        # YOLO + depth는 원본 프레임 좌표계로 (depth 이미지와 일치)
-        tracks = tracker.update(frame)
+        # YOLO는 회전된 프레임으로 (서있는 자세), bbox는 원본 좌표로 역변환
+        tracks = tracker.update(frame, rotate_step)
 
         active_ids: set[int] = set()
         direction_results: dict = {}
@@ -258,14 +256,13 @@ def main() -> None:
             active_ids.add(tid)
 
         estimator.cleanup(active_ids)
-        crowd_flow = flow_est.update(list(direction_results.values()))
 
         # RViz2 마커 퍼블리시 — 원본 좌표 기준 (depth와 동일 좌표계)
         if hasattr(cap, "publisher"):
             cap.publisher.publish(tracks, active_ids)
 
         # 원본 좌표로 그린 뒤 마지막에 회전 → bbox/화살표 위치도 정확
-        rendered = visualizer.draw(frame, tracks, direction_results, crowd_flow)
+        rendered = visualizer.draw(frame, tracks, direction_results, None)
         if rotate_step == 90:
             rendered = cv2.rotate(rendered, cv2.ROTATE_90_CLOCKWISE)
         elif rotate_step == 270:
