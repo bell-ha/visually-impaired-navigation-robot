@@ -1,227 +1,235 @@
-# People Tracker — Human Direction Estimation
+# People Tracker — 사회적 규범 기반 실내 경로 계획
 
-YOLOv8 + ByteTrack으로 사람을 검출·추적하고, 이동 방향을 추정해 RViz2 맵에 시각화하는 모듈.
+YOLOv8 + ByteTrack으로 사람을 검출·추적하고, 접근자 / 동행자로 분류해
+Nav2 경로를 실시간으로 조정하는 모듈.
+
+> **논문 타겟:** ACM CHI  
+> **핵심 주장:** 기존 Nav2는 사람을 단순 장애물로 취급하지만, 이 시스템은 이동 방향을 분류해 사회적 규범(오른쪽 양보, 동행자 경로 힌트)을 적용한다.
 
 ---
 
-## 전체 흐름
+## 전체 파이프라인
 
 ```
-ROS2 머리 카메라 (RGB)
+ROS2 머리 카메라 (RGB + aligned_depth)
         │
         ▼
   [tracker.py]  YOLOv8n + ByteTrack
-  사람 검출 + ID 부여 + 소형 bbox 필터
-        │
-        ├──────────────────────────────────────┐
-        ▼                                      ▼
-  [direction.py]                        [ros_publisher.py]
-  픽셀 좌표 이력 → EMA 속도 추정        aligned_depth + TF2로
-  이미지 기준 방향/각도 계산            픽셀 → 3D → map 좌표 변환
-        │                                      │
-        ▼                                      ▼
-  [flow.py]                             /people_tracker/markers
-  군중 전체 흐름(도미넌트 방향) 집계     RViz2 MarkerArray 퍼블리시
+  카메라 90° 회전 보정 후 YOLO 추론 → bbox 역변환
         │
         ▼
-  [visualization.py]
-  OpenCV 창: bbox, 화살표, FPS, 시크바
+  [ros_publisher.py]
+  ├─ depth patch 탐색 (0~6m 정밀) → 실패 시 bbox 높이로 거리 추정 (6~9m)
+  ├─ TF2: camera_color_optical_frame → map 좌표 (mx, my)
+  │    └─ depth 메시지 타임스탬프 기준 (로봇 이동 중 위치 오차 방지)
+  ├─ 속도 벡터 (vx, vy) — 선형회귀 8프레임
+  │    └─ bbox 추정 시 4프레임 이상 이력 필요 (노이즈 보정)
+  ├─ 로봇 yaw와 비교 → 접근자 / 동행자 / 정지 분류
+  ├─ /people_tracker/markers  (RViz: 빨강/초록/파랑 실린더)
+  │    └─ bbox 추정 시 반투명, 텍스트에 ~ 접두사
+  └─ /people_tracker/people   (JSON: 위치+속도+분류+거리+depth_estimated)
+        │
+        ▼
+  [navigation_modifier.py]
+  ├─ 접근자 감지 (7m 이내) → 근거리 costmap으로 좌우 결정
+  │    └─ 경유지 = 앞 2m + 선택된 방향 0.6m (복도 한쪽 유지 효과)
+  └─ 동행자 감지 (4m 이내) → 속도 방향 블렌딩 → 경유지
+        │
+        ▼
+  [navigation_client.py]
+  ├─ 목표 설정 시 + 1초마다 재평가
+  ├─ 접근자 있으면 매 주기 경유지 갱신 (다가올수록 회피 방향 재계산)
+  ├─ 경유지 있음 → NavigateThroughPoses
+  ├─ 경유지 없음 → NavigateToPose (기존)
+  └─ /nav/waypoints (RViz: 노란 구체)
 ```
 
 ---
 
-## 카메라 구성
+## ✅ 구현 완료
 
-| 카메라 | 위치 | /dev 경로 | 접근 방법 |
-|--------|------|-----------|-----------|
-| Intel RealSense D435 | 머리 | /dev/video0~5 | ROS2 토픽 (직접 열기 불가) |
-| Intel RealSense D435 | (두 번째) | /dev/video8~13 | ROS2 토픽 |
-| Arducam OV9782 | 그리퍼 | /dev/video6~7 | cv2.VideoCapture(6) 직접 사용 가능 |
+### 1. 카메라 회전 보정 (`tracker.py`)
+- 카메라가 물리적으로 90° 회전 장착 → YOLO가 옆으로 누운 사람을 못 잡는 문제
+- `update(frame, rotate_deg=90)` — YOLO 입력은 회전, bbox는 원본 좌표로 역변환
+- 정면·후면·측면 모두 감지 가능
 
-**주의:** 머리 RealSense는 `realsense2_camera_node`가 장치를 점유하므로 cv2로 직접 열 수 없음. ROS2 토픽으로만 접근.
+### 2. 맵 좌표 기반 속도 추정 (`ros_publisher.py`)
+- depth patch 7×7 → 15×15 → 25×25 확장 탐색 (0.1~6m 유효)
+- TF2: `camera_color_optical_frame → map`, **depth 메시지 타임스탬프** 사용
+- 선형회귀 8프레임, 1m 이상 점프 시 이력 리셋
+- TF 타임아웃 0.05s (이전 0.3s에서 단축)
 
-### 주요 토픽
+### 3. bbox 거리 추정 fallback (`ros_publisher.py`)
+- depth 실패(6m 초과·노이즈) 시 bbox 높이로 거리 역산
+  ```
+  D = (사람 평균 키 1.7m × fy) / bbox_픽셀_높이
+  ```
+- 유효 범위: 0.5~9m, 15px 이하 bbox는 제외
+- 커버리지: 기존 0~6m → **0~9m** 으로 확장
 
-| 토픽 | 용도 |
+| 구간 | 방식 | 정확도 |
+|------|------|--------|
+| 0~6m | depth 정밀 측정 | 높음 |
+| 6~9m | bbox 높이 추정 | 낮음 (방향 파악 용도) |
+
+- RViz 마커: bbox 추정 시 반투명, 텍스트 `~7.1m` 형태로 표시
+
+### 4. 접근자 / 동행자 분류 (`ros_publisher.py`)
+- `|person_angle - robot_yaw| > 90°` → 접근자
+- 나머지 → 동행자
+- RViz 실린더 색상: 🔴 빨강(접근자) / 🟢 초록(동행자) / 🔵 파랑(정지·미분류)
+- 로봇 위치(TF) 없으면 `distance: -1`, 분류는 유지
+
+### 5. `/people_tracker/people` 토픽 퍼블리시 (`ros_publisher.py`)
+```json
+{
+  "people": [
+    {
+      "id": 1, "x": 1.5, "y": 2.3, "vx": 0.05, "vy": -0.1,
+      "classification": "approaching", "distance": 2.1,
+      "depth_estimated": false
+    }
+  ],
+  "robot_x": 0.0, "robot_y": 0.0, "robot_yaw": 45.0
+}
+```
+- `depth_estimated: true` — bbox 거리 추정 사용 여부 (신뢰도 낮음 표시)
+- `robot_x/y/yaw` — TF 없으면 `null`
+
+### 6. 경유지 계산 (`navigation_modifier.py`)
+- **접근자 (7m 이내):**
+  - 좌우 결정: 로봇 바로 옆 0.6m 지점의 costmap 비용 비교 (벽 감지 안정)
+  - 경유지 위치: 로봇 진행 방향 **2m 앞 + 선택 방향 0.6m**
+  - → 복도 한쪽을 유지하며 자연스럽게 통과하는 효과
+  - 오른쪽 선호 (사회적 규범), 오른쪽 비용이 20 이상 높으면 왼쪽
+- **동행자 (4m 이내):** `목표방향 60% + 동행자속도방향 40%` 블렌딩 → 1.5m 앞 경유지
+- 경유지가 점령 영역(costmap > 65)이면 폐기
+
+### 7. 실시간 경로 재계획 (`navigation_client.py`)
+- 목표 설정 시 초기 계획 + **1초마다** 재평가 (이전 2초)
+- **접근자가 있는 동안 매 주기 경유지 갱신** — 사람이 다가올수록 회피 방향 재계산
+- 접근자 없을 때는 상황 변화 시에만 재계획 (잦은 재계획 방지)
+- 목표까지 0.8m 이하이면 재계획 생략
+- 경유지 있음 → `NavigateThroughPoses`, 없음 → `NavigateToPose`
+
+### 8. RViz 시각화
+| 토픽 | 내용 |
 |------|------|
-| `/camera/camera/color/image_raw` | RGB 프레임 (YOLO 입력) |
-| `/camera/camera/aligned_depth_to_color/image_raw` | depth (color 픽셀과 1:1 정렬) |
-| `/camera/camera/color/camera_info` | 카메라 내부 파라미터 (fx, fy, cx, cy) |
-| `/people_tracker/markers` | 사람 위치·방향 마커 (출력) |
+| `/people_tracker/markers` | 실린더(빨강/초록/파랑) + 화살표 + ID·거리 텍스트 |
+| `/nav/waypoints` | 노란 구체 + "경유지 N" 텍스트 (재계획 시 갱신) |
+
+### 9. 웹 대시보드 On/Off (`main.py`)
+- `🧠 사회적 회피 ON/OFF` 버튼
+- `/tmp/social_nav_enabled` 파일로 상태 공유
+- OFF 시 기존 `NavigateToPose` 직행만 사용 → Baseline 비교 실험 가능
+
+---
+
+## 거리별 커버리지
+
+```
+0 ─────────── 2m ──────── 3m ──────── 6m ──────── 9m
+ depth+LiDAR   LiDAR만     people_tracker          bbox fallback
+ (Nav2 처리)   (Nav2)      depth 정밀              bbox 추정 (반투명)
+                           ←── 사회적 회피 전체 범위 ──────────→
+```
 
 ---
 
 ## 실행 방법
 
 ### 사전 조건
-
-1. ROS2 Humble 설치
-2. `people_tracker` 가상환경 준비 (아래 참고)
-
-### 가상환경 세팅 (최초 1회)
-
-통합 venv를 `blind_nav_system/` 아래 한 번만 생성합니다.
-
-```bash
-cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system
-
-python3 -m venv --system-site-packages venv
-source /opt/ros/humble/setup.bash
-source venv/bin/activate
-pip install -r requirements.txt
-```
+1. ROS2 Humble + Nav2 실행 중
+2. `2D Pose Estimate`로 AMCL 초기화 완료
 
 ### 실행 순서
 
-**터미널 1 — ROS2 스택 (로봇 전체)**
+**터미널 1 — ROS2 스택**
 ```bash
 ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/launch/stretch_robot_process.launch.xml
 ```
 
-**터미널 2 — RViz2에서 초기 위치 설정**
-- `2D Pose Estimate` 버튼으로 로봇 위치 지정 → AMCL 초기화 → `map` 프레임 활성화
+**터미널 2 — People Tracker**
+```bash
+cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/people_tracker
+bash run.sh
+# 기본값: source=ros, rotate=90
+```
 
-**터미널 3 — People Tracker**
+**터미널 3 — 메인 대시보드 (내비게이션 포함)**
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/venv/bin/activate
-cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/people_tracker
+cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system
 python3 main.py
+# → http://localhost:8080
 ```
 
-### 실행 옵션
-
+### 토픽 확인
 ```bash
-python3 main.py                  # 기본: 머리 RealSense (ROS2 토픽)
-python3 main.py 6                # 그리퍼 Arducam 카메라 (ROS2 불필요)
-python3 main.py video.mp4        # 영상 파일
-python3 main.py --conf 0.6       # 신뢰도 임계값 조정 (기본 0.5)
-python3 main.py --rotate 0       # 화면 회전 변경 (기본 90도)
-python3 main.py --save out.mp4   # 결과 영상 저장
+# 사람 분류 데이터 (depth_estimated 포함)
+ros2 topic echo /people_tracker/people
+
+# 경유지 갱신 여부
+ros2 topic echo /nav/waypoints
+
+# 토픽 수신 주파수
+ros2 topic hz /people_tracker/markers
+ros2 topic hz /camera/camera/aligned_depth_to_color/image_raw
+ros2 topic hz /camera/camera/color/camera_info
 ```
 
-### 실행 중 키 조작
-
-| 키 | 동작 |
-|----|------|
-| `r` | 시계 방향 90도 회전 (토글) |
-| `Space` | 일시정지 / 재생 |
-| `q` / `ESC` | 종료 |
-
----
-
-## RViz2 설정
-
-| 항목 | 값 |
-|------|----|
+### RViz 설정
 | Fixed Frame | `map` |
-| Add → MarkerArray | Topic: `/people_tracker/markers` |
-
-마커 종류:
-- **파란 실린더** — 사람 위치 (맵 좌표, 실제 미터 단위)
-- **주황 화살표** — 이동 방향 (맵 좌표 기반 실제 속도)
-- **흰 텍스트** — ID + 카메라까지 거리(m)
+|-------------|-------|
+| Add → MarkerArray | `/people_tracker/markers` — 사람 실린더 |
+| Add → MarkerArray | `/nav/waypoints` — 경유지 (노란 구체) |
+| Add → TF | map → base_link → camera_color_optical_frame 체인 확인 |
 
 ---
 
-## 파일별 설명
+## 파일 구조
 
-### `main.py`
-진입점. 인자 파싱, 카메라 소스 선택, 메인 루프 실행.
-
-- `source = "ros"` (기본): `RosCapture`로 ROS2 토픽 구독
-- `source = "6"` 등: `cv2.VideoCapture`로 직접 열기
-- YOLO는 **원본(비회전) 프레임**으로 실행 → depth 좌표계와 일치
-- 회전은 **시각화 렌더링 후 마지막**에 적용
-
-```
-raw frame → YOLO → direction → flow → visualizer.draw() → rotate → imshow
-                            └→ ros_publisher.publish()
-```
-
-### `tracker.py`
-`PersonTracker` 클래스. YOLOv8n + ByteTrack으로 사람 검출·추적.
-
-- `conf = 0.5` — 신뢰도 임계값 (낮으면 오검출 증가)
-- `MIN_BOX_HEIGHT = 80px` — 너무 작은 박스(주먹, 손 등) 필터링
-- 반환값: `[(x1, y1, x2, y2, track_id), ...]`
-
-### `direction.py`
-`DirectionEstimator` 클래스. 픽셀 좌표 이력으로 이미지 기준 방향 추정.
-
-- 최근 12프레임 발 위치를 선형회귀 → raw velocity
-- EMA(α=0.35)로 속도 스무딩
-- 각도 급변(60도 초과) 시 이전 각도 유지
-- **이미지 픽셀 기준** (맵 좌표 아님) → OpenCV 창 시각화에 사용
-
-### `flow.py`
-`CrowdFlowEstimator` 클래스. 군중 전체 흐름 집계.
-
-- 이동 중인 사람들의 평균 velocity 계산
-- 최근 30프레임 시간적 스무딩
-- 8방향 빈(bin)으로 도미넌트 방향 추출
-
-### `ros_publisher.py`
-`PeopleMarkerPublisher` ROS2 노드. depth + TF2로 맵 좌표 계산 후 마커 퍼블리시.
-
-**3D 위치 계산 흐름:**
-```
-bbox 가슴 픽셀 (u, v)
-      ↓ aligned_depth에서 D 샘플링 (7×7 → 15×15 → 25×25 확장 탐색)
-카메라 프레임 3D 좌표
-  X = (u - cx) * D / fx
-  Y = (v - cy) * D / fy
-  Z = D
-      ↓ TF2: camera_color_optical_frame → map
-맵 좌표 (mx, my)
-      ↓ 최근 10프레임 이력 선형회귀
-실제 이동 속도 벡터 (m/frame)
-```
-
-- depth는 **가슴 위치**(bbox 상단 1/3)에서 샘플링 — 바닥(발)은 RealSense에서 depth 누락 많음
-- 맵 좌표 기반 velocity이므로 Nav2와 같은 좌표계
-
-### `visualization.py`
-`Visualizer` 클래스. OpenCV 창에 결과 렌더링.
-
-- 사람별 색상 구분 (track_id 기반)
-- 이동 중이면 방향 화살표, 정지 시 회색 점
-- 군중 흐름 화살표 (화면 하단 중앙)
-- FPS 표시
-
-### `utils.py`
-공통 유틸리티 함수.
-
-- `get_color(track_id)` — 20색 팔레트에서 색상 선택
-- `center_of_box`, `bottom_center_of_box` — bbox 좌표 계산
-- `angle_degrees(vx, vy)` — 속도 벡터 → 각도 변환
-- `draw_text_with_bg` — 배경 있는 텍스트 그리기
-
----
-
-## 주요 파라미터 튜닝
-
-| 파라미터 | 파일 | 기본값 | 설명 |
-|----------|------|--------|------|
-| `conf` | tracker.py | 0.5 | 낮추면 더 많이 잡지만 오검출 증가 |
-| `MIN_BOX_HEIGHT` | tracker.py | 80px | 높이면 소형 오검출 감소 |
-| `HISTORY_LEN` | direction.py | 12 | 길수록 속도 추정 안정, 반응 느려짐 |
-| `EMA_ALPHA` | direction.py | 0.35 | 높을수록 최신 속도 반영 빠름 |
-| `MIN_SPEED_PX` | direction.py | 0.8 | 정지 판정 임계값 (픽셀/프레임) |
-| `TEMPORAL_LEN` | flow.py | 30 | 군중 흐름 시간적 평균 프레임 수 |
-
----
-
-## 알려진 한계 및 다음 단계
-
-| 한계 | 설명 |
+| 파일 | 역할 |
 |------|------|
-| CPU 전용 추론 | GPU 없음 → YOLOv8n 기준 3~8 FPS |
-| `direction.py`는 픽셀 기준 | 맵 좌표 velocity는 `ros_publisher.py`에서만 계산 |
-| Nav2 연동 없음 | 현재는 시각화만, 회피 경로 반영 미구현 |
-| AMCL 초기화 필요 | 재시작 시 RViz2에서 `2D Pose Estimate` 필요 |
+| `main.py` | 진입점, ROS2/웹캠/영상 소스 선택, 웹 대시보드 연동 |
+| `tracker.py` | YOLOv8n + ByteTrack, 카메라 회전 보정 |
+| `ros_publisher.py` | depth+bbox→거리, TF2→맵좌표, 분류, 마커·people 퍼블리시 |
+| `direction.py` | 픽셀 기반 방향 추정 (OpenCV 창 화살표 시각화용) |
+| `visualization.py` | OpenCV 창 렌더링 |
+| `flow.py` | 군중 흐름 추정 (현재 미사용) |
+| `utils.py` | 공통 유틸리티 |
+| `../navigation_modifier.py` | 경유지 계산 (접근자 회피 / 동행자 힌트) |
+| `../navigation_client.py` | Nav2 액션 클라이언트 + 실시간 재계획 |
 
-**다음 단계 후보:**
-- `/people_tracker/markers` → Nav2 costmap 레이어로 연동
-- MediaPipe 추가로 keypoint 기반 depth 샘플링 정밀화
-- YOLOv8s 모델로 교체해 검출 정확도 향상
+---
+
+## 주요 파라미터
+
+| 파라미터 | 파일 | 현재값 | 설명 |
+|----------|------|--------|------|
+| `MIN_LONG_SIDE` | tracker.py | 60px | bbox 긴 변 최소 크기 |
+| `HISTORY_LEN` | ros_publisher.py | 8 | 속도 계산 이력 프레임 수 |
+| `MIN_HISTORY` | ros_publisher.py | 2 | depth 정밀 시 최소 이력 |
+| `MIN_HISTORY_BBOX` | ros_publisher.py | 4 | bbox 추정 시 최소 이력 |
+| `MAP_MIN_SPEED` | ros_publisher.py | 0.02 m/f | 정지 판정 임계값 |
+| `PERSON_HEIGHT_M` | ros_publisher.py | 1.7 m | bbox 거리 추정용 평균 키 |
+| `BBOX_DEPTH_MAX` | ros_publisher.py | 9.0 m | bbox 추정 최대 거리 |
+| `APPROACH_DIST_MAX` | navigation_modifier.py | 7.0 m | 접근자 반응 거리 |
+| `AVOIDANCE_OFFSET` | navigation_modifier.py | 0.6 m | 좌우 경유지 오프셋 |
+| `AVOIDANCE_LOOKAHEAD` | navigation_modifier.py | 2.0 m | 경유지 앞 방향 투영 거리 |
+| `COMPANION_DIST_MAX` | navigation_modifier.py | 4.0 m | 동행자 반응 거리 |
+| `COMPANION_BLEND` | navigation_modifier.py | 0.4 | 동행자 방향 가중치 |
+| `REPLAN_INTERVAL` | navigation_client.py | 1.0 s | 재평가 주기 |
+| `REPLAN_MIN_DIST` | navigation_client.py | 0.8 m | 재계획 최소 잔여 거리 |
+
+---
+
+## 논문 실험 설계 (추후)
+
+| 항목 | 설명 |
+|------|------|
+| **실험 시나리오** | 복도 A→B, 중간에 접근자 1명 / 2명 / 동행자 혼재 |
+| **Baseline 비교** | 사회적 회피 OFF vs ON 이동시간 비교 |
+| **지표 수집** | 이동시간, 경로 이탈량, 재계획 횟수 로깅 |
+| **유저 스터디** | 참가자 설문 — 편안함 / 자연스러움 (CHI 필수) |

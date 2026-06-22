@@ -59,7 +59,7 @@ except ImportError:
     _ROS_OK = False
 
 # ── 로그 버퍼 ─────────────────────────────────────────────────────────────────
-_LOG_BUF: collections.deque = collections.deque(maxlen=300)
+_LOG_BUF: collections.deque = collections.deque(maxlen=800)
 _log_lock = threading.Lock()
 
 def _log(src: str, msg: str):
@@ -299,10 +299,46 @@ def web_pull():
     _log("WEB", "당김 트리거 (웹)")
     return jsonify(ok=True)
 
+_social_nav_enabled = True
+
+@app.route("/toggle_social_nav", methods=["POST"])
+def toggle_social_nav():
+    global _social_nav_enabled
+    _social_nav_enabled = not _social_nav_enabled
+    Path("/tmp/social_nav_enabled").write_text("1" if _social_nav_enabled else "0")
+    _log("WEB", f"사회적 내비게이션: {'ON' if _social_nav_enabled else 'OFF'}")
+    return jsonify(ok=True, enabled=_social_nav_enabled)
+
+_obstacle_push_enabled = True
+
+@app.route("/toggle_obstacle_push", methods=["POST"])
+def toggle_obstacle_push():
+    global _obstacle_push_enabled
+    _obstacle_push_enabled = not _obstacle_push_enabled
+    Path("/tmp/obstacle_push_enabled").write_text("1" if _obstacle_push_enabled else "0")
+    _log("WEB", f"장애물 밀기: {'ON' if _obstacle_push_enabled else 'OFF'}")
+    return jsonify(ok=True, enabled=_obstacle_push_enabled)
+
+@app.route("/armleft_status")
+def armleft_status():
+    p = _procs.get("armleft")
+    running = bool(p and p.poll() is None)
+    return jsonify(running=running)
+
 @app.route("/armleft", methods=["POST"])
 def armleft():
+    data = request.json or {}
+    desired = data.get("running")  # True=켜기, False=끄기, None=토글
     p = _procs.get("armleft")
-    if p and p.poll() is None:
+    currently_running = bool(p and p.poll() is None)
+
+    # 원하는 상태가 명시된 경우 현재 상태와 같으면 바로 반환
+    if desired is True and currently_running:
+        return jsonify(ok=True, running=True)
+    if desired is False and not currently_running:
+        return jsonify(ok=True, running=False)
+
+    if currently_running:
         p.terminate()
         _log("MAIN", "armleft.py 종료")
         return jsonify(ok=True, running=False)
@@ -458,6 +494,25 @@ HTML = """<!DOCTYPE html>
   .speed-wrap label { font-size: 0.75rem; color: #94a3b8; white-space: nowrap; }
   input[type=range] { flex: 1; accent-color: #3b82f6; }
   .speed-val { font-size: 0.75rem; color: #94a3b8; width: 32px; text-align: right; }
+
+  /* 토글 스위치 */
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #1e293b; }
+  .toggle-row:last-child { border-bottom: none; }
+  .toggle-label { font-size: 0.82rem; color: #e2e8f0; }
+  .toggle-switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; inset: 0; background: #475569; border-radius: 24px; cursor: pointer; transition: background .2s; }
+  .toggle-slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .2s; }
+  .toggle-switch input:checked + .toggle-slider { background: #2563eb; }
+  .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
+
+  /* 로그 탭 */
+  .log-container { display: flex; flex-direction: column; overflow: hidden; }
+  .tab-bar { display: flex; gap: 4px; padding: 8px 12px; background: #1e293b; border-bottom: 1px solid #334155; flex-wrap: wrap; }
+  .tab-btn { background: #334155; border: none; border-radius: 6px; color: #94a3b8; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; cursor: pointer; transition: background .15s; }
+  .tab-btn.active { background: #2563eb; color: #fff; }
+  .tab-btn:hover:not(.active) { background: #475569; }
+  .tab-badge { background: #ef4444; color: #fff; border-radius: 10px; font-size: 0.65rem; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -466,7 +521,18 @@ HTML = """<!DOCTYPE html>
   <span class="badge badge-auto" id="mode-badge">자동 모드</span>
 </header>
 <div class="layout">
-  <div id="log-panel"></div>
+  <div class="log-container">
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tab-ALL"    onclick="setTab('ALL')">전체</button>
+      <button class="tab-btn"        id="tab-IFACE"  onclick="setTab('IFACE')">인터페이스<span class="tab-badge" id="badge-IFACE"  style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-VISION" onclick="setTab('VISION')">비전<span class="tab-badge" id="badge-VISION" style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-HW"     onclick="setTab('HW')">하드웨어<span class="tab-badge" id="badge-HW"     style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-MAIN"   onclick="setTab('MAIN')">메인<span class="tab-badge" id="badge-MAIN"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-WEB"    onclick="setTab('WEB')">웹<span class="tab-badge" id="badge-WEB"    style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-ARM"    onclick="setTab('ARM')">팔고정<span class="tab-badge" id="badge-ARM"    style="display:none"></span></button>
+    </div>
+    <div id="log-panel"></div>
+  </div>
   <div class="ctrl-panel">
     <div>
       <h2>모드 전환</h2>
@@ -509,16 +575,52 @@ HTML = """<!DOCTYPE html>
         <button class="btn btn-nav"    onclick="sendButton()">버튼1 (목적지 입력)</button>
         <button class="btn btn-vision" onclick="sendVision()">버튼2 (시각 분석)</button>
         <button class="btn btn-pull"   onclick="sendPull()">당김 트리거</button>
-        <button class="btn" id="armleft-btn" onclick="toggleArmleft()"
-                style="background:#0f766e;color:#fff">팔 위치 고정</button>
-        <button class="btn" id="net-mode-btn" onclick="toggleNetMode()"
-                style="background:#059669;color:#fff">🟢 온라인 모드</button>
-        <div style="margin-top:8px">
+      </div>
+    </div>
+
+    <div>
+      <h2>기능 설정</h2>
+      <div style="margin-top:4px">
+        <div class="toggle-row">
+          <span class="toggle-label">팔 위치 고정</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="armleft-toggle" onchange="toggleArmleft()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">사회적 회피</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="social-nav-toggle" checked onchange="toggleSocialNav()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">장애물 밀기</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="obstacle-push-toggle" checked onchange="toggleObstaclePush()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">온라인 모드</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="net-mode-toggle" checked onchange="toggleNetMode()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <h2>속도 설정</h2>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
+        <div>
           <label style="color:#94a3b8;font-size:0.8rem">로봇 속도: <span id="robot-speed-val">0.26</span> m/s</label>
           <input type="range" min="0.10" max="0.50" step="0.02" value="0.26" style="width:100%"
                  oninput="setRobotSpeed(this.value)">
         </div>
-        <div style="margin-top:4px">
+        <div>
           <label style="color:#94a3b8;font-size:0.8rem">TTS 속도: <span id="tts-speed-val">1.5</span>x</label>
           <input type="range" min="0.5" max="2.0" step="0.1" value="1.5" style="width:100%"
                  oninput="setTtsSpeed(this.value)">
@@ -608,22 +710,43 @@ function sendPull()   { fetch('/pull',   {method:'POST'}); }
 
 let armleftRunning = false;
 function toggleArmleft() {
-  fetch('/armleft', {method:'POST'}).then(r => r.json()).then(d => {
+  const desired = document.getElementById('armleft-toggle').checked;
+  fetch('/armleft', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({running: desired})
+  }).then(r => r.json()).then(d => {
     armleftRunning = d.running;
-    const btn = document.getElementById('armleft-btn');
-    btn.textContent = armleftRunning ? '팔 고정 해제' : '팔 위치 고정';
-    btn.style.background = armleftRunning ? '#dc2626' : '#0f766e';
+    document.getElementById('armleft-toggle').checked = armleftRunning;
+  }).catch(() => {
+    document.getElementById('armleft-toggle').checked = armleftRunning;
+  });
+}
+// 페이지 로드 시 실제 서버 상태로 초기화
+fetch('/armleft_status').then(r => r.json()).then(d => {
+  armleftRunning = d.running;
+  document.getElementById('armleft-toggle').checked = armleftRunning;
+});
+
+let socialNavOn = true;
+function toggleSocialNav() {
+  fetch('/toggle_social_nav', {method:'POST'}).then(r => r.json()).then(d => {
+    socialNavOn = d.enabled;
+    document.getElementById('social-nav-toggle').checked = socialNavOn;
+  });
+}
+
+let obstaclePushOn = true;
+function toggleObstaclePush() {
+  fetch('/toggle_obstacle_push', {method:'POST'}).then(r => r.json()).then(d => {
+    obstaclePushOn = d.enabled;
+    document.getElementById('obstacle-push-toggle').checked = obstaclePushOn;
   });
 }
 
 let offlineMode = false;
 function toggleNetMode() {
-  offlineMode = !offlineMode;
+  offlineMode = !document.getElementById('net-mode-toggle').checked;
   fetch('/net_mode', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({offline: offlineMode})});
-  const btn = document.getElementById('net-mode-btn');
-  btn.textContent = offlineMode ? '🔴 오프라인 모드' : '🟢 온라인 모드';
-  btn.style.background = offlineMode ? '#dc2626' : '#059669';
 }
 function setRobotSpeed(v) {
   document.getElementById('robot-speed-val').textContent = parseFloat(v).toFixed(2);
@@ -634,18 +757,57 @@ function setTtsSpeed(v) {
   fetch('/tts_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
 }
 
-// 로그 SSE
+// 로그 SSE + 탭 필터
 const logPanel = document.getElementById('log-panel');
+let allLogs = [];
+let currentTab = 'ALL';
+const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM'];
+const unread = Object.fromEntries(SOURCES.map(s => [s, 0]));
+
+function setTab(tab) {
+  currentTab = tab;
+  if (tab === 'ALL') SOURCES.forEach(s => { unread[s] = 0; });
+  else unread[tab] = 0;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  renderLogs();
+  updateBadges();
+}
+
+function renderLogs() {
+  const filtered = currentTab === 'ALL' ? allLogs : allLogs.filter(d => d.src === currentTab);
+  logPanel.innerHTML = '';
+  filtered.forEach(appendLogEntry);
+  logPanel.scrollTop = logPanel.scrollHeight;
+}
+
+function appendLogEntry(d) {
+  const div = document.createElement('div');
+  div.className = 'log-entry';
+  div.innerHTML = `<span class="ts">${d.t}</span><span class="src-${d.src}">[${d.src}]</span> ${escHtml(d.msg)}`;
+  logPanel.appendChild(div);
+}
+
+function updateBadges() {
+  SOURCES.forEach(s => {
+    const b = document.getElementById('badge-' + s);
+    if (!b) return;
+    if (unread[s] > 0) { b.textContent = unread[s]; b.style.display = 'inline'; }
+    else b.style.display = 'none';
+  });
+}
+
 const es = new EventSource('/logs');
 es.onmessage = e => {
   const d = JSON.parse(e.data);
-  const div = document.createElement('div');
-  div.className = 'log-entry';
-  div.innerHTML =
-    `<span class="ts">${d.t}</span>` +
-    `<span class="src-${d.src}">[${d.src}]</span> ${escHtml(d.msg)}`;
-  logPanel.appendChild(div);
-  logPanel.scrollTop = logPanel.scrollHeight;
+  allLogs.push(d);
+  if (currentTab === 'ALL' || d.src === currentTab) {
+    appendLogEntry(d);
+    logPanel.scrollTop = logPanel.scrollHeight;
+  } else {
+    unread[d.src] = (unread[d.src] || 0) + 1;
+    updateBadges();
+  }
 };
 
 
@@ -668,6 +830,8 @@ document.addEventListener('keydown', e => {
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
 def main():
+    Path("/tmp/social_nav_enabled").write_text("1")    # 시작 시 ON
+    Path("/tmp/obstacle_push_enabled").write_text("1") # 시작 시 ON
     init_ros()
     start_subprocesses()
 
