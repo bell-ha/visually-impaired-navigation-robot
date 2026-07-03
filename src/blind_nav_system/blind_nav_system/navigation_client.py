@@ -87,6 +87,7 @@ class NavigationClient(Node):
         self._goal_w    = float(loc.get('w', 1.0))
         self._navigating = True
         self.is_arrived  = False
+        Path("/tmp/navigation_active").write_text("1")
 
         # 초기 전송
         waypoints = self._compute_waypoints_if_enabled()
@@ -121,7 +122,11 @@ class NavigationClient(Node):
 
         self._probing = False
 
-        if action == "push":
+        if action == "push_through":
+            # 이미 치고 통과 → side-waypoint 없이 현재 위치에서 목적지 직행
+            self._obstacle_push_wp = None
+            print("[NAV] 치고 통과 완료 → 현재 위치에서 목적지 직행", flush=True)
+        elif action == "push":
             box_x = data.get("map_x", 0.0)
             box_y = data.get("map_y", 0.0)
             self._obstacle_push_wp = self._box_side_waypoint(box_x, box_y)
@@ -311,6 +316,7 @@ class NavigationClient(Node):
             self.is_arrived  = True
             self._navigating = False
             self._stop_replan_timer()
+            Path("/tmp/navigation_active").write_text("0")
 
     def vel_callback(self, msg):
         current_time = time.time()
@@ -332,6 +338,7 @@ class NavigationClient(Node):
     def cleanup(self):
         self._navigating = False
         self._stop_replan_timer()
+        Path("/tmp/navigation_active").write_text("0")
         try:
             empty_path = Path()
             empty_path.header.frame_id = "map"

@@ -12,8 +12,10 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import threading
+import time
+import threading 
 import cv2
+import numpy as np
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 
@@ -46,13 +48,33 @@ def main():
 
     # 메인 스레드에서 처리 + imshow — OpenCV GUI는 반드시 메인 스레드
     rotate = 90   # 기본값: 카메라 90° 장착
+    PROCESS_HZ = 3          # RANSAC+DBSCAN+YOLO를 초당 3회만 실행
+    interval   = 1.0 / PROCESS_HZ
+    last_proc  = 0.0
+    last_frame = None
+
+    # 카메라 대기 화면
+    placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+    cv2.putText(placeholder, "Waiting for camera...",
+                (80, 230), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (120, 120, 120), 2)
+    cv2.putText(placeholder, "Check: ros2 topic hz /camera/camera/color/image_raw",
+                (20, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 80, 80), 1)
+
     try:
         while rclpy.ok():
-            frame = detector.process_frame()   # RANSAC + DBSCAN + YOLO + 렌더링
-            if frame is not None:
-                cv2.imshow(WINDOW, frame)
+            now = time.monotonic()
+            if now - last_proc >= interval:
+                last_proc = now
+                try:
+                    frame = detector.process_frame()
+                    if frame is not None:
+                        last_frame = frame
+                except Exception as e:
+                    print(f"[ERROR] process_frame: {e}")
 
-            key = cv2.waitKey(1) & 0xFF
+            cv2.imshow(WINDOW, last_frame if last_frame is not None else placeholder)
+
+            key = cv2.waitKey(30) & 0xFF
             if key in (ord("q"), 27):
                 break
             if key == ord("r"):

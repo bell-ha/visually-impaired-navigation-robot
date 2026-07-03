@@ -7,6 +7,8 @@
 """
 import collections
 import json
+import os
+import signal
 import subprocess
 import sys
 import threading
@@ -54,6 +56,7 @@ try:
     import rclpy
     from geometry_msgs.msg import Twist
     from sensor_msgs.msg import BatteryState
+    from std_msgs.msg import String as ROSString
     _ROS_OK = True
 except ImportError:
     _ROS_OK = False
@@ -139,6 +142,45 @@ _backup_warn_until = 0.0   # 후진 안내 디바운스
 # ── 배터리 상태 ────────────────────────────────────────────────────────────────
 _battery = {"pct": None, "voltage": None, "charging": None}
 
+# ── 장애물 상태 ────────────────────────────────────────────────────────────────
+_obstacle_state = {"detected": False, "dist": None, "decision": None}
+_obstacle_last_log_t = 0.0
+
+def _obstacle_objects_cb(msg):
+    global _obstacle_last_log_t
+    try:
+        objects = json.loads(msg.data).get("objects", [])
+        now = time.monotonic()
+        if objects:
+            dist = objects[0].get("distance", 0)
+            _obstacle_state.update(detected=True, dist=round(dist, 1))
+            if now - _obstacle_last_log_t > 4.0:
+                _log("OBSTACLE", f"의자 감지: {dist:.1f}m 앞")
+                _obstacle_last_log_t = now
+        else:
+            if _obstacle_state["detected"]:
+                _log("OBSTACLE", "의자 사라짐")
+            _obstacle_state.update(detected=False, dist=None)
+    except Exception:
+        pass
+
+def _obstacle_decision_cb(msg):
+    try:
+        data   = json.loads(msg.data)
+        action = data.get("action", "")
+        reason = data.get("reason", "")
+        if action == "push":
+            _obstacle_state["decision"] = "push"
+            _log("OBSTACLE", f"밀고 통과 — {reason}")
+        elif action == "detour":
+            _obstacle_state["decision"] = "detour"
+            _log("OBSTACLE", f"우회 — {reason}")
+        elif action == "probe_start":
+            _obstacle_state["decision"] = "probing"
+            _log("OBSTACLE", "probe 시작 (의자 접촉 테스트)")
+    except Exception:
+        pass
+
 def _battery_callback(msg):
     pct = round(msg.percentage * 100) if msg.percentage <= 1.0 else round(msg.percentage)
     _battery["pct"]      = pct
@@ -163,8 +205,10 @@ def init_ros():
     rclpy.init()
     _cmd_node = rclpy.create_node("main_web_cmdvel")
     _cmd_pub  = _cmd_node.create_publisher(Twist, "/stretch/cmd_vel", 10)
-    _cmd_node.create_subscription(Twist, "/stretch/cmd_vel", _cmdvel_callback, 10)
-    _cmd_node.create_subscription(BatteryState, "/battery", _battery_callback, 10)
+    _cmd_node.create_subscription(Twist,        "/stretch/cmd_vel",           _cmdvel_callback,       10)
+    _cmd_node.create_subscription(BatteryState, "/battery",                   _battery_callback,      10)
+    _cmd_node.create_subscription(ROSString,    "/obstacle_pusher/objects",   _obstacle_objects_cb,   10)
+    _cmd_node.create_subscription(ROSString,    "/obstacle_pusher/decision",  _obstacle_decision_cb,  10)
     threading.Thread(target=rclpy.spin, args=(_cmd_node,), daemon=True).start()
     _log("MAIN", "ROS2 cmd_vel 퍼블리셔/구독자 시작")
 
@@ -309,6 +353,10 @@ def toggle_social_nav():
     _log("WEB", f"사회적 내비게이션: {'ON' if _social_nav_enabled else 'OFF'}")
     return jsonify(ok=True, enabled=_social_nav_enabled)
 
+@app.route("/obstacle_status")
+def obstacle_status():
+    return jsonify(_obstacle_state)
+
 _obstacle_push_enabled = True
 
 @app.route("/toggle_obstacle_push", methods=["POST"])
@@ -376,6 +424,281 @@ def get_locations():
         {"name": n, "confirmed": n in _CONFIRMED_LOCATIONS} for n in names
     ])
 
+# ── 시스템 프로세스 관리 ──────────────────────────────────────────────────────────
+_sys_procs: dict = {}
+
+_ROS_SOURCE = (
+    "source /opt/ros/humble/setup.bash && "
+    "source /home/hello-robot/ament_ws/install/setup.bash 2>/dev/null; "
+)
+
+_SYS_PROC_DEFS = {
+    "launch": {
+        "label": "ROS2 Launch",
+        # exec: bash가 ros2 launch 프로세스로 자체 교체됨
+        # → proc.pid = ros2 launch 자신 → proc.wait()가 모든 노드 종료 후까지 대기
+        # exec 없이는 bash만 대기하고 ros2 launch + rplidar 등이 orphan으로 남아 모터가 계속 돔
+        "cmd": ["bash", "-c",
+                _ROS_SOURCE +
+                "exec ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/"
+                "src/blind_nav_system/launch/stretch_robot_process.launch.xml"],
+        "log_tag": "ROS2",
+        "kill_timeout": 20,    # ros2 launch의 모든 노드 graceful shutdown 완료 대기
+        "auto_free_lock": True, # 만약 SIGKILL로 강제 종료됐을 때 Stretch filelock 안전망
+    },
+    "rviz": {
+        "label": "RViz2",
+        "cmd": ["bash", "-c", _ROS_SOURCE + "exec ros2 run rviz2 rviz2"],
+        "log_tag": "RVIZ",
+    },
+    "battery": {
+        "label": "배터리 확인",
+        "cmd": ["bash", "-c", "stretch_robot_battery_check.py"],
+        "log_tag": "BATT",
+    },
+    "free": {
+        "label": "프로세스 정리",
+        "cmd": ["bash", "-c", "stretch_free_robot_process.py"],
+        "log_tag": "FREE",
+    },
+    "home": {
+        "label": "홈 위치",
+        "cmd": ["bash", "-c", "stretch_robot_home.py"],
+        "log_tag": "HOME",
+    },
+}
+
+
+def _proc_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, OSError):
+        return False
+
+
+def _stop_lidar_motor():
+    """rplidar_composition 종료 후 시리얼로 직접 모터 정지."""
+    import time as _t
+    try:
+        import serial
+        with serial.Serial('/dev/hello-lrf', 115200, timeout=1) as ser:
+            ser.write(b'\xa5\x25')   # RPLIDAR_CMD_STOP (스캔 정지)
+            _t.sleep(0.05)
+            ser.rts = False          # RTS 내림 → RPLiDAR 모터 PWM 정지
+        _log("SYS", "LiDAR 모터 정지 완료 (시리얼 RTS)")
+    except ImportError:
+        _log("SYS", "LiDAR 시리얼 정지 실패: pyserial 없음 (pip install pyserial)")
+    except Exception as e:
+        _log("SYS", f"LiDAR 시리얼 정지 실패: {e}")
+
+
+def _kill_proc_group(proc: subprocess.Popen, label: str, kill_timeout: int = 6) -> bool:
+    """
+    프로세스 그룹 전체 종료. 정상 종료 성공 여부 반환.
+    exec ros2 launch 패턴에서 proc.pid = ros2 launch 자신이므로
+    proc.wait()가 모든 자식 노드 종료 후까지 대기함.
+    """
+    if proc is None or proc.poll() is not None:
+        return True
+    try:
+        pgid = os.getpgid(proc.pid)
+        # exec 여부 확인: proc.pid 프로세스 이름 로그
+        try:
+            with open(f"/proc/{proc.pid}/comm") as f:
+                pname = f.read().strip()
+        except Exception:
+            pname = "?"
+        _log("SYS", f"{label} SIGTERM → PID={proc.pid}({pname}) PGID={pgid} (최대 {kill_timeout}s 대기)")
+        os.killpg(pgid, signal.SIGTERM)
+        try:
+            import time as _time
+            t0 = _time.monotonic()
+            proc.wait(timeout=kill_timeout)
+            elapsed = _time.monotonic() - t0
+            _log("SYS", f"{label} 정상 종료 ({elapsed:.1f}s)")
+            return True
+        except subprocess.TimeoutExpired:
+            _log("SYS", f"{label} {kill_timeout}s 초과 → SIGKILL 강제 종료")
+            os.killpg(pgid, signal.SIGKILL)
+            proc.wait(timeout=3)
+            return False
+    except (ProcessLookupError, OSError):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return True
+
+
+@app.route("/sys_proc/<name>", methods=["POST"])
+def sys_proc_ctrl(name):
+    if name not in _SYS_PROC_DEFS:
+        return jsonify(ok=False, error="unknown"), 400
+    defn    = _SYS_PROC_DEFS[name]
+    action  = (request.json or {}).get("action", "toggle")
+    p       = _sys_procs.get(name)
+    running = bool(p and p.poll() is None)
+
+    if action == "stop" or (action == "toggle" and running):
+        _sys_procs.pop(name, None)
+        kill_timeout = defn.get("kill_timeout", 6)
+        auto_free    = defn.get("auto_free_lock", False)
+
+        def _do_kill():
+            import time as _t
+            graceful = _kill_proc_group(p, defn["label"], kill_timeout=kill_timeout)
+            _log("SYS", f"{defn['label']} 종료 완료 ({'graceful' if graceful else 'SIGKILL'})")
+
+            # rplidar_composition 처리: ros2 launch가 0s 만에 종료해도 rplidar는 고아로 남을 수 있음
+            # → 소멸자(destructor)가 모터를 멈출 시간을 주고, 안 되면 강제 종료 + 시리얼 정지
+            r = subprocess.run(["pgrep", "-a", "rplidar"], capture_output=True, text=True)
+            rplidar_pids = []
+            for line in r.stdout.strip().splitlines():
+                try:
+                    rplidar_pids.append(int(line.split()[0]))
+                except (ValueError, IndexError):
+                    pass
+
+            if rplidar_pids:
+                _log("SYS", f"rplidar 고아 프로세스 감지 {rplidar_pids} → 소멸자 대기 중 (최대 5s)")
+                deadline = _t.monotonic() + 5.0
+                while _t.monotonic() < deadline:
+                    _t.sleep(0.3)
+                    rplidar_pids = [pid for pid in rplidar_pids
+                                    if _proc_alive(pid)]
+                    if not rplidar_pids:
+                        break
+
+                if rplidar_pids:
+                    # 5초 지나도 살아있음 → SIGKILL 강제 종료 후 시리얼로 모터 정지
+                    _log("SYS", f"rplidar graceful 실패 → SIGKILL 후 시리얼 모터 정지")
+                    for pid in rplidar_pids:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except Exception:
+                            pass
+                    _t.sleep(0.4)  # 포트 해제 대기
+                    _stop_lidar_motor()
+                else:
+                    _log("SYS", "rplidar graceful 종료 확인 (소멸자 실행됨 → 모터 정지)")
+            else:
+                _log("SYS", "rplidar 프로세스 완전 종료 확인")
+
+            if auto_free:
+                try:
+                    subprocess.run(["stretch_free_robot_process.py"], timeout=5,
+                                   capture_output=True)
+                    _log("SYS", "Stretch filelock 해제 완료")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_do_kill, daemon=True).start()
+        return jsonify(ok=True, running=False)
+
+    try:
+        proc = subprocess.Popen(
+            defn["cmd"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+            start_new_session=True,   # 자체 프로세스 그룹 → killpg로 자식까지 종료 가능
+        )
+        _sys_procs[name] = proc
+        threading.Thread(target=_capture, args=(proc, defn["log_tag"]), daemon=True).start()
+        _log("SYS", f"{defn['label']} 시작 PID={proc.pid}")
+        return jsonify(ok=True, running=True)
+    except Exception as e:
+        _log("SYS", f"{defn['label']} 시작 실패: {e}")
+        return jsonify(ok=False, error=str(e)), 500
+
+@app.route("/sys_proc_status")
+def sys_proc_status_route():
+    return jsonify({
+        name: bool(_sys_procs.get(name) and _sys_procs[name].poll() is None)
+        for name in _SYS_PROC_DEFS
+    })
+
+# 시각장애인 안내 로봇 관련 알려진 프로세스 이름 (정확히 일치)
+_ROBOT_PROC_NAMES = [
+    "rplidar_composition",
+    "realsense2_camera_node", "realsense2_camera",
+    "robot_state_publisher",
+    "amcl", "map_server",
+    "lifecycle_manager", "nav2_lifecycle_manager",
+    "controller_server", "planner_server",
+    "behavior_server", "bt_navigator",
+    "waypoint_follower", "velocity_smoother",
+    "collision_monitor", "costmap_2d",
+    "rviz2",
+    "component_container",
+    "static_transform_publisher",
+]
+
+_killall_running = False
+
+@app.route("/killall_robot", methods=["POST"])
+def killall_robot():
+    global _killall_running
+    if _killall_running:
+        return jsonify(ok=False, error="이미 실행 중")
+    _killall_running = True
+
+    def _do():
+        global _killall_running
+        import time as _t
+        try:
+            _log("SYS", "=== 로봇 프로세스 전체 정리 시작 ===")
+
+            # 1. 대시보드가 추적 중인 프로세스 먼저 종료
+            for n, proc in list(_sys_procs.items()):
+                if proc and proc.poll() is None:
+                    defn = _SYS_PROC_DEFS.get(n, {})
+                    _kill_proc_group(proc, defn.get("label", n))
+            _sys_procs.clear()
+
+            # 2. 이름으로 시스템 전체 검색 → SIGTERM
+            killed = []
+            for pname in _ROBOT_PROC_NAMES:
+                r = subprocess.run(["pkill", "-TERM", "-x", pname], capture_output=True)
+                if r.returncode == 0:
+                    killed.append(pname)
+            if killed:
+                _log("SYS", f"SIGTERM: {', '.join(killed)}")
+            else:
+                _log("SYS", "실행 중인 로봇 프로세스 없음")
+
+            # 3. 3초 대기 (graceful shutdown)
+            _t.sleep(3)
+
+            # 4. 살아남은 것 SIGKILL
+            force_killed = []
+            for pname in _ROBOT_PROC_NAMES:
+                r = subprocess.run(["pkill", "-KILL", "-x", pname], capture_output=True)
+                if r.returncode == 0:
+                    force_killed.append(pname)
+            if force_killed:
+                _log("SYS", f"SIGKILL: {', '.join(force_killed)}")
+
+            # 5. rplidar 확인 후 시리얼 모터 정지
+            _t.sleep(0.4)
+            r = subprocess.run(["pgrep", "-x", "rplidar_composition"], capture_output=True)
+            if r.returncode != 0:  # 종료됨 → 포트 사용 가능
+                _stop_lidar_motor()
+
+            # 6. Stretch filelock 해제
+            try:
+                subprocess.run(["stretch_free_robot_process.py"], timeout=5, capture_output=True)
+                _log("SYS", "Stretch filelock 해제 완료")
+            except Exception:
+                pass
+
+            _log("SYS", "=== 전체 정리 완료 ===")
+        finally:
+            _killall_running = False
+
+    threading.Thread(target=_do, daemon=True).start()
+    return jsonify(ok=True)
+
 @app.route("/net_mode", methods=["POST"])
 def set_net_mode():
     offline = bool((request.json or {}).get("offline", False))
@@ -386,7 +709,7 @@ def set_net_mode():
 # ── 시리얼 루프 ───────────────────────────────────────────────────────────────
 def serial_loop():
     if not _SERIAL_OK:
-        _log("MAIN", "시리얼 비활성화 (pyserial 없음)")
+        _log("ARD", "시리얼 비활성화 (pyserial 없음)")
         return
 
     pull_detect = _make_pull_detector()
@@ -396,9 +719,9 @@ def serial_loop():
     while ser is None:
         try:
             ser = serial.Serial(SERIAL_PORT, BAUD, timeout=1)
-            _log("MAIN", f"시리얼 연결됨: {SERIAL_PORT}")
+            _log("ARD", f"시리얼 연결됨: {SERIAL_PORT}")
         except Exception as e:
-            _log("MAIN", f"시리얼 연결 실패({e}), 3초 후 재시도...")
+            _log("ARD", f"시리얼 연결 실패({e}), 3초 후 재시도...")
             time.sleep(3)
 
     try:
@@ -435,7 +758,7 @@ def serial_loop():
                     _write("iface", "/pull")
                     _log("HW", "당김 감지")
     except Exception as e:
-        _log("MAIN", f"시리얼 오류: {e}")
+        _log("ARD", f"시리얼 오류: {e}")
     finally:
         if ser:
             ser.close()
@@ -465,25 +788,38 @@ HTML = """<!DOCTYPE html>
   /* 로그 패널 */
   #log-panel { padding: 12px; overflow-y: auto; font-family: monospace; font-size: 0.8rem; background: #0f172a; }
   .log-entry { padding: 2px 0; border-bottom: 1px solid #1e293b; white-space: pre-wrap; word-break: break-all; }
-  .src-IFACE  { color: #7dd3fc; }
-  .src-VISION { color: #86efac; }
-  .src-HW     { color: #fbbf24; }
-  .src-MAIN   { color: #c084fc; }
-  .src-WEB    { color: #fb7185; }
+  .src-IFACE    { color: #7dd3fc; }
+  .src-VISION   { color: #86efac; }
+  .src-HW       { color: #fbbf24; }
+  .src-MAIN     { color: #c084fc; }
+  .src-WEB      { color: #fb7185; }
+  .src-OBSTACLE { color: #fb923c; }
+
+  /* 의자 감지 상태 카드 */
+  .chair-card { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 10px 14px; }
+  .chair-card.detected { border-color: #fb923c; }
+  .chair-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #475569; margin-right: 6px; vertical-align: middle; }
+  .chair-dot.on { background: #fb923c; box-shadow: 0 0 6px #fb923c; }
+  .chair-status { font-size: 0.82rem; color: #e2e8f0; font-weight: 600; }
+  .chair-detail { font-size: 0.75rem; color: #94a3b8; margin-top: 4px; }
   .ts { color: #475569; margin-right: 6px; }
 
   /* 컨트롤 패널 */
-  .ctrl-panel { background: #1e293b; border-left: 1px solid #334155; padding: 16px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }
-  .ctrl-panel h2 { font-size: 0.9rem; color: #94a3b8; margin-bottom: 4px; }
+  .ctrl-panel { background: #1e293b; border-left: 1px solid #334155; padding: 16px; display: flex; flex-direction: column; gap: 0; overflow-y: auto; }
+  .ctrl-panel > div { padding: 14px 0; border-bottom: 1px solid #1e293b; }
+  .ctrl-panel > div:first-child { padding-top: 0; }
+  .ctrl-panel > div:last-child  { border-bottom: none; padding-bottom: 0; }
+  .ctrl-panel h2 { font-size: 0.68rem; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+
+  /* 버튼 통일 시스템 */
+  .btn { display: block; width: 100%; border: none; border-radius: 6px; padding: 9px 14px; font-size: 0.82rem; font-weight: 600; cursor: pointer; text-align: center; color: #fff; transition: opacity .15s; }
+  .btn:hover  { opacity: 0.85; }
+  .btn:active { opacity: 0.70; }
+  .btn-sm  { padding: 5px 12px; font-size: 0.78rem; width: auto; display: inline-block; }
+  .btn-primary { background: #2563eb; }
+  .btn-danger  { background: #dc2626; }
+  .btn-neutral { background: #334155; }
   .mode-btns { display: flex; gap: 8px; }
-  .btn { border: none; border-radius: 8px; padding: 8px 14px; font-size: 0.82rem; cursor: pointer; font-weight: 600; transition: opacity .15s; }
-  .btn:hover { opacity: 0.8; }
-  .btn-auto   { background: #059669; color: #fff; }
-  .btn-manual { background: #ea580c; color: #fff; }
-  .btn-stop   { background: #dc2626; color: #fff; width: 100%; padding: 12px; font-size: 1rem; }
-  .btn-nav    { background: #1d4ed8; color: #fff; width: 100%; }
-  .btn-vision { background: #7c3aed; color: #fff; width: 100%; }
-  .btn-pull   { background: #b45309; color: #fff; width: 100%; }
 
   /* 방향 패드 */
   .dpad { display: grid; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 6px; justify-content: center; }
@@ -513,6 +849,20 @@ HTML = """<!DOCTYPE html>
   .tab-btn.active { background: #2563eb; color: #fff; }
   .tab-btn:hover:not(.active) { background: #475569; }
   .tab-badge { background: #ef4444; color: #fff; border-radius: 10px; font-size: 0.65rem; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
+  .src-ARD  { color: #4ade80; }
+  .src-SYS  { color: #a78bfa; }
+  .src-ROS2 { color: #38bdf8; }
+  .src-RVIZ { color: #34d399; }
+  .src-BATT { color: #fbbf24; }
+  .src-FREE { color: #f87171; }
+  .src-HOME { color: #fb923c; }
+  .sys-proc-row { display:flex; align-items:center; gap:8px; padding:5px 0; border-bottom:1px solid #1e293b; }
+  .sys-proc-row:last-child { border-bottom:none; }
+  .sys-proc-label { flex:1; font-size:0.82rem; color:#cbd5e1; }
+  .sys-dot { width:8px; height:8px; border-radius:50%; background:#374151; flex-shrink:0; }
+  .sys-dot.on { background:#22c55e; box-shadow:0 0 4px #22c55e; }
+  /* tab 배지 — 숫자 없이 점(dot)만 */
+  .tab-badge { display:inline-block; width:6px; height:6px; border-radius:50%; background:#ef4444; margin-left:4px; vertical-align:middle; }
 </style>
 </head>
 <body>
@@ -530,6 +880,10 @@ HTML = """<!DOCTYPE html>
       <button class="tab-btn"        id="tab-MAIN"   onclick="setTab('MAIN')">메인<span class="tab-badge" id="badge-MAIN"   style="display:none"></span></button>
       <button class="tab-btn"        id="tab-WEB"    onclick="setTab('WEB')">웹<span class="tab-badge" id="badge-WEB"    style="display:none"></span></button>
       <button class="tab-btn"        id="tab-ARM"    onclick="setTab('ARM')">팔고정<span class="tab-badge" id="badge-ARM"    style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-SYS"    onclick="setTab('SYS')">시스템<span class="tab-badge" id="badge-SYS"    style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-ROS2"   onclick="setTab('ROS2')">ROS2<span class="tab-badge" id="badge-ROS2"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-RVIZ"   onclick="setTab('RVIZ')">RViz<span class="tab-badge" id="badge-RVIZ"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-ARD"    onclick="setTab('ARD')">아두이노<span class="tab-badge" id="badge-ARD"    style="display:none"></span></button>
     </div>
     <div id="log-panel"></div>
   </div>
@@ -537,8 +891,8 @@ HTML = """<!DOCTYPE html>
     <div>
       <h2>모드 전환</h2>
       <div class="mode-btns">
-        <button class="btn btn-auto"   onclick="setMode(false)">자동</button>
-        <button class="btn btn-manual" onclick="setMode(true)">수동</button>
+        <button class="btn btn-primary btn-sm" id="btn-mode-auto"   onclick="setMode(false)">자동</button>
+        <button class="btn btn-neutral btn-sm" id="btn-mode-manual" onclick="setMode(true)">수동</button>
       </div>
     </div>
 
@@ -566,15 +920,15 @@ HTML = """<!DOCTYPE html>
         <button class="dpad-btn" id="btn-bwd"   onclick="toggleCmd('bwd',  -0.5,  0)">↓</button>
         <div></div>
       </div>
-      <button class="btn btn-stop" style="margin-top:10px" onclick="emergencyStop()">■ 비상 정지</button>
+      <button class="btn btn-danger" style="margin-top:10px;font-size:0.9rem" onclick="emergencyStop()">■ 비상 정지</button>
     </div>
 
     <div>
       <h2>빠른 액션</h2>
       <div style="display:flex;flex-direction:column;gap:8px">
-        <button class="btn btn-nav"    onclick="sendButton()">버튼1 (목적지 입력)</button>
-        <button class="btn btn-vision" onclick="sendVision()">버튼2 (시각 분석)</button>
-        <button class="btn btn-pull"   onclick="sendPull()">당김 트리거</button>
+        <button class="btn btn-primary" onclick="sendButton()">목적지 입력 (버튼1)</button>
+        <button class="btn btn-primary" onclick="sendVision()">시각 분석 (버튼2)</button>
+        <button class="btn btn-neutral" onclick="sendPull()">당김 트리거</button>
       </div>
     </div>
 
@@ -613,6 +967,53 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div>
+      <h2>의자 감지</h2>
+      <div class="chair-card" id="chair-card">
+        <div>
+          <span class="chair-dot" id="chair-dot"></span>
+          <span class="chair-status" id="chair-status">감지 없음</span>
+        </div>
+        <div class="chair-detail" id="chair-detail"></div>
+      </div>
+    </div>
+
+    <div>
+      <h2>시스템 프로세스</h2>
+      <div id="sys-proc-list" style="margin-top:6px">
+        <div class="sys-proc-row" id="sysrow-launch">
+          <span class="sys-dot" id="sysdot-launch"></span>
+          <span class="sys-proc-label">ROS2 Launch</span>
+          <button class="btn btn-primary btn-sm" id="sysbtn-launch" onclick="toggleSysProc('launch')">시작</button>
+        </div>
+        <div class="sys-proc-row" id="sysrow-rviz">
+          <span class="sys-dot" id="sysdot-rviz"></span>
+          <span class="sys-proc-label">RViz2</span>
+          <button class="btn btn-primary btn-sm" id="sysbtn-rviz" onclick="toggleSysProc('rviz')">시작</button>
+        </div>
+        <div class="sys-proc-row" id="sysrow-battery">
+          <span class="sys-dot" id="sysdot-battery"></span>
+          <span class="sys-proc-label">배터리 확인</span>
+          <button class="btn btn-neutral btn-sm" id="sysbtn-battery" onclick="toggleSysProc('battery')">실행</button>
+        </div>
+        <div class="sys-proc-row" id="sysrow-free">
+          <span class="sys-dot" id="sysdot-free"></span>
+          <span class="sys-proc-label">프로세스 정리</span>
+          <button class="btn btn-neutral btn-sm" id="sysbtn-free" onclick="toggleSysProc('free')">실행</button>
+        </div>
+        <div class="sys-proc-row" id="sysrow-home">
+          <span class="sys-dot" id="sysdot-home"></span>
+          <span class="sys-proc-label">홈 위치</span>
+          <button class="btn btn-neutral btn-sm" id="sysbtn-home" onclick="toggleSysProc('home')">실행</button>
+        </div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid #1e293b">
+          <button id="killall-btn" class="btn btn-danger" onclick="killAllRobot()">
+            전체 로봇 프로세스 강제 종료
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div>
       <h2>속도 설정</h2>
       <div style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
         <div>
@@ -644,6 +1045,9 @@ function setMode(manual) {
   document.getElementById('mode-badge').className = 'badge ' + (manual ? 'badge-manual' : 'badge-auto');
   document.getElementById('manual-section').style.display = manual ? 'block' : 'none';
   document.getElementById('location-section').style.display = manual ? 'none' : 'block';
+  // 활성 모드 버튼 강조
+  document.getElementById('btn-mode-auto').className   = manual ? 'btn btn-neutral btn-sm' : 'btn btn-primary btn-sm';
+  document.getElementById('btn-mode-manual').className = manual ? 'btn btn-primary btn-sm' : 'btn btn-neutral btn-sm';
   if (!manual) { _stopMove(); loadLocations(); }
 }
 
@@ -761,7 +1165,7 @@ function setTtsSpeed(v) {
 const logPanel = document.getElementById('log-panel');
 let allLogs = [];
 let currentTab = 'ALL';
-const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM'];
+const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD'];
 const unread = Object.fromEntries(SOURCES.map(s => [s, 0]));
 
 function setTab(tab) {
@@ -792,8 +1196,8 @@ function updateBadges() {
   SOURCES.forEach(s => {
     const b = document.getElementById('badge-' + s);
     if (!b) return;
-    if (unread[s] > 0) { b.textContent = unread[s]; b.style.display = 'inline'; }
-    else b.style.display = 'none';
+    // 숫자 없이 점(dot)만 표시 — 읽지 않은 메시지 있을 때만
+    b.style.display = unread[s] > 0 ? 'inline-block' : 'none';
   });
 }
 
@@ -813,6 +1217,83 @@ es.onmessage = e => {
 
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// 의자 감지 상태 폴링
+const DECISION_LABEL = {push:'밀기', detour:'우회', probing:'탐침 중'};
+setInterval(() => {
+  fetch('/obstacle_status').then(r => r.json()).then(d => {
+    const card   = document.getElementById('chair-card');
+    const dot    = document.getElementById('chair-dot');
+    const status = document.getElementById('chair-status');
+    const detail = document.getElementById('chair-detail');
+    if (d.detected) {
+      card.classList.add('detected');
+      dot.classList.add('on');
+      status.textContent = `의자 감지 (${d.dist ?? '?'} m)`;
+      const dec = d.decision ? DECISION_LABEL[d.decision] || d.decision : '판단 대기';
+      detail.textContent = `결정: ${dec}`;
+    } else {
+      card.classList.remove('detected');
+      dot.classList.remove('on');
+      status.textContent = '감지 없음';
+      detail.textContent = '';
+    }
+  }).catch(() => {});
+}, 1000);
+
+// ── 시스템 프로세스 ──────────────────────────────────────────────────────────
+const SYS_NAMES = ['launch','rviz','battery','free','home'];
+const sysState = Object.fromEntries(SYS_NAMES.map(n => [n, false]));
+
+function toggleSysProc(name) {
+  const running = sysState[name];
+  fetch(`/sys_proc/${name}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'toggle'})
+  }).then(r => r.json()).then(d => updateSysProcUI(name, d.running));
+}
+
+function updateSysProcUI(name, running) {
+  sysState[name] = running;
+  const dot = document.getElementById('sysdot-' + name);
+  const btn = document.getElementById('sysbtn-' + name);
+  if (!dot || !btn) return;
+  const oneShot = ['battery','free','home'].includes(name);
+  if (running) {
+    dot.classList.add('on');
+    btn.textContent = '종료';
+    btn.className = 'btn btn-danger btn-sm';
+  } else {
+    dot.classList.remove('on');
+    btn.className = oneShot ? 'btn btn-neutral btn-sm' : 'btn btn-primary btn-sm';
+    btn.textContent = oneShot ? '실행' : '시작';
+  }
+}
+
+function pollSysProcStatus() {
+  fetch('/sys_proc_status').then(r => r.json()).then(d => {
+    SYS_NAMES.forEach(name => updateSysProcUI(name, d[name] || false));
+  }).catch(() => {});
+}
+pollSysProcStatus();
+setInterval(pollSysProcStatus, 2000);
+
+function killAllRobot() {
+  const btn = document.getElementById('killall-btn');
+  if (!confirm('터미널 포함 모든 로봇 프로세스를 종료합니다. 계속할까요?')) return;
+  btn.disabled = true;
+  btn.textContent = '정리 중...';
+  fetch('/killall_robot', {method:'POST'})
+    .then(r => r.json())
+    .then(() => {
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = '전체 로봇 프로세스 강제 종료';
+        pollSysProcStatus();
+      }, 5000);
+    });
 }
 
 // 키보드 지원 (방향키 = 토글)
