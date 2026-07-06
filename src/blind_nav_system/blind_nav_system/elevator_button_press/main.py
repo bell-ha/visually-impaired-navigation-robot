@@ -6,12 +6,13 @@
 브라우저: http://localhost:5000
 """
 
-import os, json, subprocess, tempfile, threading
+import os, json, subprocess, tempfile, threading, webbrowser
 import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, JointState
 from cv_bridge import CvBridge
 from control_msgs.action import FollowJointTrajectory
@@ -59,16 +60,26 @@ def infer_image(image_path: str) -> list:
         line = _infer_proc.stdout.readline()
     return json.loads(line).get("detections", [])
 
-CAMERA_OPTIONS = {
-    "gripper (D405)": "/gripper_camera/color/image_raw",
-    "body (D435i)":   "/camera/camera/color/image_rect_raw",
-}
+# 두 카메라 동시 표시:
+#   gripper(D405) — 버튼 인식/추적/거리 (OCR 대상)
+#   body(D435i)   — 전방 모니터링 (멀리서 패널 찾기용, 표시만)
+# D405 color는 보정된 image_rect_raw 토픽으로 발행됨 (확인: ros2 topic hz)
+GRIPPER_TOPIC = "/gripper_camera/color/image_rect_raw"
+BODY_TOPIC    = "/camera/camera/color/image_raw"
 
 IMAGE_W, IMAGE_H = 640, 480
 CX, CY    = IMAGE_W // 2, IMAGE_H // 2
 DEAD_ZONE = 40
 KP_YAW    = 0.0008
 KP_LIFT   = 0.0003
+
+# D405 그리퍼 카메라가 90° 돌아간 상태로 장착됨 → 정방향으로 보정.
+# 화면이 반대 방향으로 돌아가 있으면 아래 값을 cv2.ROTATE_90_COUNTERCLOCKWISE 로 바꾸세요.
+# (선택지: None / cv2.ROTATE_90_CLOCKWISE / cv2.ROTATE_90_COUNTERCLOCKWISE / cv2.ROTATE_180)
+# image_rect_raw(보정 스트림)는 이미 정방향 → 회전 불필요 (CW 넣었더니 오히려 90° 돌아갔음)
+CAMERA_ROTATE = None
+# body(D435i) 머리 카메라는 90° 회전 장착 (people_tracker와 동일). 방향 틀리면 바꾸세요.
+BODY_ROTATE   = cv2.ROTATE_90_CLOCKWISE
 
 # ── 공유 상태 ─────────────────────────────────────────────────────────
 state = {
@@ -78,8 +89,9 @@ state = {
     "centered":     False,
     "lift":         None,
     "yaw":          None,
-    "jpeg_frame":   None,
-    "camera_key":   "gripper (D405)",
+    "jpeg_frame":      None,   # gripper 주석 프레임 (버튼 박스/거리)
+    "jpeg_frame_body": None,   # body 원본 프레임 (모니터링)
+    "target_dist":  None,   # 목표 버튼까지 거리 (m, D405 depth)
 }
 state_lock = threading.Lock()
 
@@ -130,17 +142,20 @@ HTML = """
 <body>
   <h2>🛗 Elevator Button Tracker</h2>
 
-  <div id="cam-row">
-    카메라:
-    <select id="cam-sel" onchange="switchCamera(this.value)">
-      {% for key in cameras %}
-      <option value="{{ key }}">{{ key }}</option>
-      {% endfor %}
-    </select>
-  </div>
-
   <div id="banner">Waiting for camera...</div>
-  <img id="stream" src="/video" alt="camera stream">
+  <div style="display:flex; gap:14px; align-items:flex-start; justify-content:center;">
+    <figure style="margin:0; text-align:center;">
+      <img id="stream" src="/video?cam=gripper" alt="gripper stream">
+      <figcaption style="color:#8ad; font-size:0.85rem; margin-top:4px;">
+        🤏 gripper (D405) — 버튼 인식·추적·거리</figcaption>
+    </figure>
+    <figure style="margin:0; text-align:center;">
+      <img id="stream-body" src="/video?cam=body" alt="body stream"
+           style="height:480px; background:#000;">
+      <figcaption style="color:#8ad; font-size:0.85rem; margin-top:4px;">
+        👁 body (D435i) — 전방 모니터링</figcaption>
+    </figure>
+  </div>
 
   <div id="buttons"></div>
   <div style="display:flex;gap:10px;align-items:center;">
@@ -196,23 +211,14 @@ HTML = """
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({yaw: v})});
     }
-    function switchCamera(key) {
-      fetch('/camera', {method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({key})});
-      // 스트림 재연결
-      const img = document.getElementById('stream');
-      img.src = '/video?' + Date.now();
-    }
-
     function poll() {
       fetch('/status').then(r => r.json()).then(s => {
         const banner = document.getElementById('banner');
         if (s.centered) {
-          banner.textContent = `✅ CENTERED — '${s.target}' 도달`;
+          banner.textContent = `✅ CENTERED — '${s.target}' 도달  |  거리 ${s.dist!=null ? s.dist+'m' : '?'}`;
           banner.className = 'centered';
         } else if (s.target) {
-          banner.textContent = `🎯 TRACKING '${s.target}'  |  x:${s.ex??'?'}  y:${s.ey??'?'}`;
+          banner.textContent = `🎯 TRACKING '${s.target}'  |  x:${s.ex??'?'}  y:${s.ey??'?'}  |  거리 ${s.dist!=null ? s.dist+'m' : '?'}`;
           banner.className = 'tracking';
         } else {
           banner.textContent = '아래에서 목표 버튼을 클릭하세요';
@@ -230,8 +236,6 @@ HTML = """
           box.appendChild(b);
         });
 
-        // 카메라 선택 동기화
-        document.getElementById('cam-sel').value = s.camera_key;
       }).catch(()=>{});
     }
     setInterval(poll, 600);
@@ -247,18 +251,22 @@ app = Flask(__name__)
 @app.route("/")
 def index():
     from flask import render_template_string
-    return render_template_string(HTML, cameras=list(CAMERA_OPTIONS.keys()))
+    return render_template_string(HTML)
 
 @app.route("/video")
 def video():
+    # ?cam=gripper (기본) 또는 ?cam=body — 두 스트림을 동시에 제공
+    cam = request.args.get("cam", "gripper")
+    key = "jpeg_frame_body" if cam == "body" else "jpeg_frame"
+    label = "body (D435i)" if cam == "body" else "gripper (D405)"
     def gen():
         while True:
             with state_lock:
-                frame = state["jpeg_frame"]
+                frame = state[key]
             if frame is None:
                 blank = np.zeros((IMAGE_H, IMAGE_W, 3), dtype=np.uint8)
-                cv2.putText(blank, "Waiting for camera...", (130, 230),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (180, 180, 180), 2)
+                cv2.putText(blank, f"Waiting for {label}...", (110, 230),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (180, 180, 180), 2)
                 cv2.putText(blank, "Check ROS2 camera topic", (150, 270),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 1)
                 _, enc = cv2.imencode(".jpg", blank)
@@ -280,7 +288,8 @@ def status():
             ex = round((b["x1"]+b["x2"])/2 - CX)
             ey = round((b["y1"]+b["y2"])/2 - CY)
     return jsonify(phase=s["phase"], target=target, detections=s["detections"],
-                   centered=s["centered"], ex=ex, ey=ey, camera_key=s["camera_key"])
+                   centered=s["centered"], ex=ex, ey=ey,
+                   dist=s.get("target_dist"))
 
 @app.route("/select", methods=["POST"])
 def select():
@@ -325,17 +334,6 @@ def wrist_yaw():
         node.set_wrist_yaw(yaw)
     return jsonify(ok=True, yaw=yaw)
 
-@app.route("/camera", methods=["POST"])
-def camera():
-    key = request.json.get("key", "")
-    if key in CAMERA_OPTIONS:
-        with state_lock:
-            state["camera_key"]  = key
-            state["jpeg_frame"]  = None   # 스트림 리셋
-        # 노드에 카메라 변경 신호
-        _node_ref[0].switch_camera(CAMERA_OPTIONS[key])
-    return jsonify(ok=True)
-
 _node_ref = [None]
 
 # ── ROS2 노드 ─────────────────────────────────────────────────────────
@@ -345,21 +343,32 @@ class ElevatorTracker(Node):
         self.bridge         = CvBridge()
         self._processing    = False
         self._goal_done     = True
-        self._img_sub       = None
-        self._pending_topic = None   # Flask 스레드 → ROS2 스레드 카메라 전환 요청
 
         self.create_subscription(JointState, "/joint_states", self._on_joints, 10)
+
+        # ── D405 depth (color 정렬) — 버튼까지 거리 측정용 (press 준비 0단계) ──
+        # 로봇을 움직이지 않음. 화면에 거리 숫자만 표시.
+        self._depth_frame = None   # 회전 보정된 uint16 배열 (mm)
+        self._depth_lock  = threading.Lock()
+        self.create_subscription(
+            Image, "/gripper_camera/aligned_depth_to_color/image_raw",
+            self._on_depth, qos_profile_sensor_data,
+        )
+
         self.action_client = ActionClient(
             self, FollowJointTrajectory,
             "/stretch_controller/follow_joint_trajectory"
         )
-        # 타이머로 카메라 전환 처리 (ROS2 스핀 스레드에서 안전하게 실행)
-        self.create_timer(0.2, self._apply_pending_camera)
         # 시작 3초 후 wrist 초기 자세 자동 설정 (액션 서버 준비 대기)
         self.create_timer(3.0, self._init_wrist_once)
         self._wrist_initialized = False
-        # 기본 카메라로 구독 시작
-        self._do_switch_camera(CAMERA_OPTIONS["gripper (D405)"])
+
+        # 두 카메라 동시 구독 (전환 없음)
+        self.create_subscription(Image, GRIPPER_TOPIC, self._on_image, 10)
+        self.create_subscription(Image, BODY_TOPIC, self._on_image_body,
+                                 qos_profile_sensor_data)
+        self.get_logger().info(f"gripper: {GRIPPER_TOPIC}")
+        self.get_logger().info(f"body   : {BODY_TOPIC}")
         self.get_logger().info("Ready — open http://localhost:5000")
 
     def _init_wrist_once(self):
@@ -372,24 +381,20 @@ class ElevatorTracker(Node):
             f"Wrist initialized: pitch={WRIST_PITCH_DEFAULT}, yaw={WRIST_YAW_DEFAULT}"
         )
 
-    def switch_camera(self, topic):
-        # Flask 스레드에서 호출 — pending만 설정, 실제 전환은 타이머에서 처리
-        self._pending_topic = topic
-
-    def _apply_pending_camera(self):
-        # ROS2 스핀 스레드에서 실행되는 타이머 콜백 — 구독 생성/삭제 안전
-        if self._pending_topic is None:
-            return
-        topic = self._pending_topic
-        self._pending_topic = None
-        self._do_switch_camera(topic)
-
-    def _do_switch_camera(self, topic):
-        if self._img_sub:
-            self.destroy_subscription(self._img_sub)
-            self._img_sub = None
-        self._img_sub = self.create_subscription(Image, topic, self._on_image, 10)
-        self.get_logger().info(f"Camera switched to: {topic}")
+    def _on_image_body(self, msg):
+        """body(D435i) 프레임 — 모니터링용 표시만 (OCR/제어 없음)."""
+        try:
+            raw = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            if BODY_ROTATE is not None:
+                raw = cv2.rotate(raw, BODY_ROTATE)
+            # 회전 후 세로형 비율 유지, 높이 480에 맞춤
+            h, w = raw.shape[:2]
+            frame = cv2.resize(raw, (max(1, int(w * IMAGE_H / h)), IMAGE_H))
+            _, jpeg = cv2.imencode(".jpg", frame)
+            with state_lock:
+                state["jpeg_frame_body"] = jpeg.tobytes()
+        except Exception as e:
+            self.get_logger().warn(f"body 프레임 오류: {e}")
 
     def _on_joints(self, msg):
         for name, pos in zip(msg.name, msg.position):
@@ -398,9 +403,46 @@ class ElevatorTracker(Node):
             elif name == "joint_wrist_yaw":
                 with state_lock: state["yaw"] = pos
 
+    def _on_depth(self, msg):
+        """aligned depth 프레임 저장. color와 동일하게 회전 보정해 좌표계를 맞춤."""
+        try:
+            arr = np.frombuffer(msg.data, dtype=np.uint16).reshape(
+                (msg.height, msg.width))
+            if CAMERA_ROTATE is not None:
+                arr = cv2.rotate(arr, CAMERA_ROTATE)
+            with self._depth_lock:
+                self._depth_frame = arr
+        except Exception as e:
+            self.get_logger().warn(f"depth 오류: {e}")
+
+    def _depth_at(self, x_disp: int, y_disp: int) -> float | None:
+        """
+        표시 프레임(640x480) 좌표 → depth 배열 좌표로 변환 후
+        11x11 패치 중앙값 거리(m) 반환. 측정 불가 시 None.
+        """
+        with self._depth_lock:
+            d = self._depth_frame
+        if d is None:
+            return None
+        h, w = d.shape
+        u = int(x_disp * w / IMAGE_W)
+        v = int(y_disp * h / IMAGE_H)
+        u = max(0, min(u, w - 1))
+        v = max(0, min(v, h - 1))
+        patch = d[max(0, v - 5):v + 6, max(0, u - 5):u + 6]
+        valid = patch[patch > 0]
+        if len(valid) < 5:
+            return None
+        D = float(np.median(valid)) / 1000.0
+        # D405 근거리 특화: 5cm~1.5m 범위만 신뢰
+        return D if 0.05 < D < 1.5 else None
+
     def _on_image(self, msg):
         try:
             raw   = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            # 회전 보정을 리사이즈 전에 적용 → 화면/OCR/서보가 모두 같은 정방향 프레임 사용
+            if CAMERA_ROTATE is not None:
+                raw = cv2.rotate(raw, CAMERA_ROTATE)
             frame = cv2.resize(raw, (IMAGE_W, IMAGE_H))
         except Exception as e:
             self.get_logger().error(str(e))
@@ -466,7 +508,14 @@ class ElevatorTracker(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1)
             if is_target:
                 cv2.arrowedLine(vis, (CX,CY), (bcx,bcy), (0,80,255), 2, tipLength=0.2)
-                cv2.putText(vis, f"x:{bcx-CX:+d} y:{bcy-CY:+d}", (10,IMAGE_H-12),
+                # 버튼까지 거리 (D405 depth) — press 준비용 표시
+                dist = self._depth_at(bcx, bcy)
+                with state_lock:
+                    state["target_dist"] = round(dist, 3) if dist else None
+                dist_txt = f"{dist:.2f}m" if dist else "?m"
+                cv2.putText(vis, dist_txt, (x2+6, bcy+6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,255), 2)
+                cv2.putText(vis, f"x:{bcx-CX:+d} y:{bcy-CY:+d} d:{dist_txt}", (10,IMAGE_H-12),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,80,255), 2)
         if centered:
             cv2.putText(vis, "CENTERED", (CX-70,CY-50),
@@ -536,6 +585,10 @@ def main():
         target=lambda: app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False),
         daemon=True,
     ).start()
+
+    # 브라우저 자동 오픈 (Flask 뜰 시간 잠깐 준 뒤)
+    threading.Timer(1.5, lambda: webbrowser.open("http://localhost:5000")).start()
+    print("대시보드: http://localhost:5000", flush=True)
 
     rclpy.init()
     node = ElevatorTracker()

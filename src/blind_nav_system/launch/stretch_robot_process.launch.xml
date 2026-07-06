@@ -53,6 +53,30 @@
     <param name="pointcloud.pointcloud_qos" value="SENSOR_DATA"/>
   </node>
 
+  <!-- ====== 2-3) RealSense D405 그리퍼 카메라 (엘리베이터 버튼 인식용) ====== -->
+  <!--
+    [토픽] /gripper_camera/color/image_raw + /gripper_camera/aligned_depth_to_color/image_raw
+    [프로파일] Hello Robot 공식 multi_camera.launch.py가 쓰는 검증된 값 그대로:
+      depth 480x270x15 / color 424x240x15 (D405는 color가 depth 모듈에서 나옴)
+      → 1280x720 기본값으로 뜨면 USB 대역폭 때문에 몸체 카메라 color가 죽음
+    [initial_reset] D405가 애매한 상태로 남아 color만 안 올라오는 문제 방지
+    [확인] ros2 topic hz /gripper_camera/color/image_raw  (~15Hz)
+  -->
+  <include file="$(find-pkg-share stretch_core)/launch/d405_basic.launch.py">
+    <arg name="initial_reset" value="true"/>
+    <arg name="enable_color" value="true"/>
+    <arg name="align_depth.enable" value="true"/>
+    <arg name="depth_module.profile" value="480x270x15"/>
+    <arg name="depth_module.depth_profile" value="480x270x15"/>
+    <arg name="depth_module.color_profile" value="424x240x15"/>
+    <arg name="rgb_camera.profile" value="424x240x15"/>
+    <arg name="rgb_camera.color_profile" value="424x240x15"/>
+    <!-- 안 쓰는 스트림 꺼서 부하 절감 -->
+    <arg name="pointcloud.enable" value="false"/>
+    <arg name="enable_gyro" value="false"/>
+    <arg name="enable_accel" value="false"/>
+  </include>
+
   <!-- ====== 3) safety zone static TF ====== -->
   <node pkg="tf2_ros" exec="static_transform_publisher" name="safety_zone_left_back_tf" output="screen"
         args="--x -0.72 --y 0.72 --z 0.1 --yaw 0 --pitch 0 --roll 0 --frame-id base_link --child-frame-id safety_zone_left_back" />
