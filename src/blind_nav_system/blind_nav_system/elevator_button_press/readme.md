@@ -1,205 +1,181 @@
 # Elevator Button Press
 
-Stretch SE3 로봇의 그리퍼 카메라(D405)로 엘리베이터 버튼을 인식하고,
-웹 UI에서 목표 버튼을 클릭하면 로봇 팔이 자동으로 그 버튼을 카메라 중앙에 오도록 상하 이동하는 모듈.
+Stretch SE3 로봇이 엘리베이터 버튼을 **스스로 찾고, 정렬하고, 접근해서, 사용자의 명시적 승인 한 번으로 누르는** 모듈.
+시각장애인 안내 로봇의 "엘리베이터 여정" 중 **버튼 조작** 단계를 담당한다.
 
----
-
-## 구조 개요
-
-```
-elevator_button_press/
-├── main.py               # ★ 메인 실행 파일 (Flask 웹 UI + ROS2 노드 통합)
-├── elevator_node.py      # ROS2 노드 (카메라 이미지 → 버튼 인식 결과 퍼블리시)
-├── visual_servo_node.py  # Visual servoing 노드
-├── ocr_rcnn_server.py    # 영구 추론 서버 (모델 1회 로딩 후 stdin/stdout 통신)
-├── ocr_rcnn_infer.py     # 단일 이미지 추론 스크립트 (테스트용)
-├── ocr-rcnn-v2/          # OCR-RCNN v2 외부 repo (gitignore 처리)
-└── results/              # 테스트 결과 이미지 저장 폴더 (gitignore)
-```
-
-> **참고:** 테스트 패널 배치 추론 스크립트(`run_test_panels.py`)는 `tools/` 폴더로 이동됨.
-
----
-
-## 사용 모델: OCR-RCNN v2
-
-- **역할**: 엘리베이터 버튼 패널에서 버튼의 위치(bounding box)와 숫자/문자를 동시에 인식
-- **입력**: 640×480 RGB 이미지
-- **출력**: 각 버튼의 `{text, score, belief, box(x1,y1,x2,y2)}`
-- **frozen model 파일** (Google Drive에서 다운로드):
-  - `detection_graph_640x480.pb` — 버튼 위치 감지 (Faster R-CNN 계열)
-  - `ocr_graph.pb` — 버튼 숫자/문자 인식
-- **실행 환경**: `blind_nav_system/venv/` 통합 가상환경 (TF 2.13 + `compat.v1` 패치, `--system-site-packages`로 ROS2 상속)
-
-### 추론 속도 최적화
-
-매 프레임마다 subprocess를 새로 띄우면 TF 모델 로딩에 수초가 걸림.
-`ocr_rcnn_server.py`를 시작 시 1회만 띄우고, 이미지 경로를 stdin으로 전달 → JSON을 stdout으로 수신하는 방식으로 해결.
-
-- **영상 표시**: 카메라 FPS 그대로 실시간
-- **버튼 인식**: 백그라운드 스레드에서 추론, 완료될 때마다 바운딩박스 갱신
-
----
-
-## 최초 설치 (1회만)
-
-### 통합 venv 생성 및 패키지 설치
-
-```bash
-cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system
-
-python3 -m venv --system-site-packages venv
-source /opt/ros/humble/setup.bash
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### frozen model 다운로드 (gdown 사용)
-
-```bash
-# venv 활성화 상태에서 실행
-cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/elevator_button_press/ocr-rcnn-v2/src/button_recognition/scripts/ocr_rcnn_lib/frozen_model
-gdown <detection_graph_640x480.pb Google Drive ID>
-gdown <ocr_graph.pb Google Drive ID>
-```
+> 마지막 갱신: 2026-07-09. 구버전 readme(카메라 드롭다운, ±40px 데드존, 상하 서보만)와는
+> 시스템이 완전히 달라졌으므로 이 문서를 기준으로 볼 것.
 
 ---
 
 ## 실행 방법
 
-### 터미널 1 — 로봇 드라이버
-
 ```bash
-ros2 launch stretch_ros2_bridge stretch_robot_process.launch.xml
-```
+# 터미널 1 — 로봇 드라이버 + 카메라 2대 + 라이다 + Nav2 (한 번 켜고 유지)
+ros2 launch blind_nav_system stretch_robot_process.launch.xml
 
-### 터미널 2 — 메인 스크립트
-
-```bash
+# 터미널 2 — 이 모듈 (앱만 재시작하면 됨, 런치는 유지)
 source /opt/ros/humble/setup.bash
 source ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/venv/bin/activate
-
 python3 ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/elevator_button_press/main.py
 ```
 
-시작 시 터미널에 아래가 출력되면 정상:
-```
-OCR 모델 로딩 중... (최초 1회, 수초 소요)
-OCR 모델 준비 완료.
-```
+브라우저: `http://localhost:5000` (자동으로 열림).
+현장(핫스팟)에서는 로봇과 조작 기기를 같은 핫스팟에 물리고 `http://<로봇IP>:5000`.
 
-### 브라우저
-
-```
-http://localhost:5000
-```
+> **런치 주의사항** (실측으로 확정, [stretch_robot_process.launch.xml](../../launch/stretch_robot_process.launch.xml) 주석 참조):
+> - 카메라 2대는 반드시 `serial_no`로 고정 (body D435if `250222073610` / gripper D405 `130322271074`)
+> - D405는 USB2 연결 → color 1280x720x**6fps**가 상한, depth 파라미터 이름은 `depth_module.depth_profile`
+> - 카메라가 USB에서 사라지면 웜 리부트로 복구 안 됨 → 종료 후 메인 전원 30초 차단(콜드 리셋)
+> - 런치 잦은 재시작은 리얼센스를 얼림 — 런치는 유지하고 **앱만** 재시작
 
 ---
 
-## 웹 UI 사용법
+## 사용 흐름 (운용자 관점)
 
-1. 브라우저에서 `http://localhost:5000` 접속
-2. **카메라 선택** (상단 드롭다운):
-   - `gripper (D405)` — 그리퍼 손목 카메라 (기본값, 버튼 인식용)
-   - `body (D435i)` — 몸체 전방 카메라
-3. 카메라 피드에 인식된 버튼이 초록 박스로 표시됨
-4. 아래 버튼 목록에서 목표 버튼 클릭 → 추적 시작 (파란 배너)
-5. 로봇 팔이 상하로 움직여 해당 버튼을 화면 중앙으로 이동
-6. 배너가 초록 **CENTERED** 로 바뀌면 완료
-7. **Reset (재선택)** 으로 다른 버튼 선택 가능
+1. **장소 모드 선택**: 🏢 홀(호출 ▲▼) ↔ 🛗 차내(층 숫자). 모드에 맞는 팔레트만 활성화된다.
+2. **팔레트에서 목표 클릭** (1~5, ▲, ▼) — 인식 여부와 무관하게 항상 선택 가능. 재클릭 = 해제.
+3. 로봇이 자동으로: 탐색 → 발견 → 정렬(십자에 버튼 중심) → 누르기 직전 거리(20cm)까지 접근 → 대기.
+4. 배너가 ✅ CENTERED가 되면 **🔴 버튼 누르기** 클릭 — 실제 press는 이 명시적 클릭으로만 실행.
+5. press 완료 후 타겟 자동 해제.
 
-### 그리퍼 자세 조정 버튼
+### UI 구성
 
-| 버튼/슬라이더 | 역할 |
+| 요소 | 설명 |
 |---|---|
-| 그리퍼 전방 고정 | wrist_pitch=0.07, wrist_yaw=0.03 으로 복귀 |
-| wrist_pitch 슬라이더 | 그리퍼 상하 각도 수동 조정 (-1.57 ~ 0.5 rad) |
-| wrist_yaw 슬라이더 | 그리퍼 좌우 각도 수동 조정 (-2.88 ~ 1.67 rad) |
-
-> **고정 자세값** (실측으로 결정): pitch = **0.07 rad**, yaw = **0.03 rad**  
-> 이 값에서 그리퍼 D405 카메라가 엘리베이터 패널 정면을 향함.  
-> 스크립트 시작 3초 후 자동으로 이 자세로 이동.
+| 4패널 화면 | 🤏 gripper(인식·추적·거리) / 🌊 depth 컬러맵 / 🔬 OCR 입력(모델이 보는 그대로) / 👁 body(전방) |
+| 노란 십자+원 | 조준점(거리별 손끝 투영 위치)과 허용오차(±0.6cm 상당). 노란 사각형 = 현재 ROI |
+| 🔴 버튼 누르기 | CENTERED + 거리 측정 성공일 때만 활성화 |
+| ✋열기 / ✊닫기 | 그리퍼 수동 (테스트용) |
+| 🏢/🛗 장소 모드 | 홀=▲▼만+화살표 위치 휴리스틱 ON / 차내=숫자만 (차내 열림/닫힘 화살표 오인 방지) |
+| 🚗 몸체이동 토글 | **바퀴 마스터 스위치.** OFF면 전후진·회전 전부 금지. 재시작 시 OFF로 복귀 |
+| 🛡 가드 토글 | 라이다 장애물 가드. 해제는 개발용(빨강 경고), 재시작 시 항상 ON 복귀 |
+| 🏠 홈 포즈 | 손목 전방(-0.02, 0.03) + 팔 완전 수납 — 하나의 멀티관절 목표로 전송(선점 방지) |
+| 🧠 판단 로그 | "감지→행동→판단"의 실시간 기록. `/decisions`에서 전체 텍스트 복사 가능 |
+| `/fail.jpg` | 타겟 인식 실패 순간의 OCR 입력 스냅샷 (모델이 뭘 보고 놓쳤는지 디버그) |
 
 ---
 
-## 제어 방식 (Visual Servoing)
+## 인식·추적 파이프라인
 
-### 개요
+### 3단계 주의(attention) — 자동 확대
 
-버튼이 카메라 화면 중앙에 올 때까지 로봇 팔의 높이(`joint_lift`)를 반복 조정.
+매 인식 라운드(~1Hz)마다 결정. 확대는 640 화면 보간이 아니라 **1280×720 원본에서 crop** + 언샤프.
 
 ```
-[카메라 프레임]
-      │
-      ▼
- OCR-RCNN 추론 → 버튼 bounding box (x1,y1,x2,y2)
-      │
-      ▼
- 버튼 중심 Y좌표 - 화면 중심 Y(240) = error_y
-      │
-      ▼
- new_lift = current_lift - KP_LIFT × error_y
-      │
-      ▼
- /stretch_controller/follow_joint_trajectory (액션 서버)
+타겟을 최근 3초 안에 봄?
+ ├─ Yes → ① 타겟 ROI (박스의 2.5배 영역)      — 5라운드마다 1번 전체화면으로 환기
+ └─ No  → 버튼같은 것 2개+ 군집이 있나?
+      ├─ Yes → ② 군집 ROI (패널 후보 전체)     — 4라운드마다 1번 환기
+      └─ No  → ③ 전체 화면 (탐색)
+확대 중 2라운드 연속 타겟 놓침 → 전체 화면 복귀
 ```
 
-### 제어 대상 관절
+### 신원 관리 (오독 방어)
 
-| 오차 방향 | 제어 관절 | 게인 | 설명 |
-|---|---|---|---|
-| Y (상하) | `joint_lift` | 0.0003 m/px | 버튼이 위에 있으면 팔 올림, 아래면 내림 |
+- **belief 기반 획득**: 같은 글자 후보 중 belief(글자 확신도) 최고, ≥0.45만 잠금
+- **위치 잠금**: 한 번 잡은 타겟 근처(박스폭 2배)에서 온 동명이인만 인정 — '4'를 '1'로 오독한 참칭 무시
+- **잠금 탈취**: 다른 위치 후보가 +0.15 높은 belief로 2라운드 연속 → 그쪽이 진짜로 판단해 이동
+- **화살표(▲▼)**: 모델이 '?','*','%'로 오독(판독 불가 실측) → **위치 휴리스틱**: 버튼형 탐지 중
+  가장 아래=▼ / 가장 위=▲ (홀 모드 전용). 글자 불필요 = 반사에도 면역
+- **원형 피팅**: ROI 확대 화면에서 Hough 원 검출로 박스를 진짜 버튼 원 중심에 스냅
 
-- **wrist_pitch, wrist_yaw는 추적 중 절대 변경하지 않음**
-- 좌우(X) 오차는 제어하지 않음 — 로봇이 엘리베이터 앞에 정위치된 상태 가정
+### 관측 신뢰 규칙 (A안 — "한 프레임이면 충분")
 
-### Dead Zone
+버튼은 정지해 있고 로봇의 모든 이동은 `_last_motion_ts`에 기록된다. 따라서:
+- 관측 후 로봇이 안 움직였으면 그 관측은 **8초까지 유효** (단, 같은 관측으로 행동은 1회만)
+- 접근은 OCR 없이 **조준점의 실시간 depth**로 진행 (인식이 깜빡여도 전진 가능)
+- press는 위치 잠금 20초 내면 관측 없이도 진행 — press 내부의 재측정·근접 재정렬이 최종 검증
 
-오차가 ±40 px 이내이면 정지하고 CENTERED 상태로 전환.
+### 탐색 (타겟도 군집도 없을 때)
 
-### 관절 이동 범위 클램프
+- lift ±5cm / 팔 앞뒤 ±4cm(벽 여유 depth 확인 후) / 베이스 ±3cm — 기준점 복귀형 패턴
+- **탐색 중재자 `_may_explore()`**: 모든 탐색성 이동의 단일 관문 — 이동 후 2.5초 + 정지 인식 1회
+  확보 전 이동 금지. "계속 움직여서 영원히 못 읽는" 자기모순 방지 (적용 후 4분30초 실패 → 4초 성공)
+- `USE_HEIGHT_PRIOR=True`(현장용)면 선택 즉시 lift를 규정 높이로 선점프 (호출 0.80 / 조작반 0.85)
 
-| 관절 | 최솟값 | 최댓값 |
+---
+
+## 정렬·접근·누르기
+
+### 서보 축 배치 (설계 결정)
+
+| 오차 | 제어 | 이유 |
 |---|---|---|
-| joint_lift | 0.15 m | 1.10 m |
+| 상하(ey) | `joint_lift` | 직접적 |
+| 좌우(ex) | **베이스 전/후진** (오도메트리 피드백) | wrist_yaw는 카메라만 돌고 손끝 경로를 못 옮김(기하 실측). 그리퍼가 로봇 오른쪽을 향하므로 화면 오른쪽 = 로봇 뒤쪽 (`BASE_X_SIGN=-1`) |
+| 벽과 수직 | 제자리 회전 (원자적: 팔 접기→회전) | depth 10점 직선 fit, 평면 검증 + 정지 2회 일관 측정 후에만 |
+
+- 허용오차는 픽셀이 아니라 **실거리 ±0.6cm** (`TOL_CM`) — 거리별 동적 데드존
+- CENTERED는 래치가 아님: 히스테리시스(+4px) 넘게 벗어나면 해제·재정렬. 허용 안이라도
+  절반 기준까지 계속 다듬는 polish 단계 존재
+- 조준 오프셋 = `A/d + B` (물리 오프셋은 1/d, 각도 어긋남은 상수) — 실측 3점 fit
+
+### press 시퀀스 (🔴 클릭 후, 6단계)
+
+```
+1. 정렬 유지 단계 접근 (5cm씩, 매 스텝 이동 후 인식 대기 + 상하/좌우 보정)
+2. 근접 거리 재측정 (depth)
+   + 근접 재정렬 (가까울수록 1px의 실거리가 작아 정밀; 좌우는 75% 엄격)
+3. 그리퍼 닫기 (여기서 처음 닫음 — 그 전까지 시야 확보)
+4. 누르기: (거리 − FINGER_STANDOFF) + PRESS_DEPTH 만큼 전진
+   → 접촉 판정: 명령 vs 실제 위치 차 5mm+ = 닿음
+5. 시작 위치 복귀
+6. 그리퍼 열기 + 타겟 자동 해제
+```
+
+### 안전 설계 (최종 사용자가 시각장애인 — "사람 눈이 안전장치면 안 된다")
+
+- **몸체이동 마스터 스위치**: OFF면 바퀴 절대 금지. 모든 바퀴 함수가 이동 직전마다 재확인 (중간 토글도 즉시 반영)
+- **라이다 가드**: 이동 방향 ±30° 섹터 최소거리 < 0.30m면 거부, 이동 중에도 감시.
+  0.25m 미만 반사는 로봇 자기 부속물(케이블)로 간주 무시 (laser는 base 기준 180° 장착)
+- **이동 상한**: 1회 2cm / 누적 15cm (초과 시 자동 OFF — "주차가 틀렸다"는 신호)
+- **원자적 회전**: 팔 뻗은 채 회전 금지 → 접기→회전을 한 덩어리로, 그동안 접근 차단
+- press 중 자동 서보 잠금 (팔 뻗기 목표가 선점·취소되는 버그 방지)
+- 가드 해제·몸체이동은 재시작 시 항상 안전측(가드 ON / 이동 OFF)으로 복귀
 
 ---
 
-## 의존성 구조
+## 캘리브레이션 값 (실측, main.py 상단 상수)
 
-```
-터미널 2: python3 main.py  (시스템 Python 3.10 + ROS2)
-  ├─ Flask 웹 서버 → http://localhost:5000
-  ├─ ROS2 ElevatorTracker 노드
-  │    ├─ 구독: /gripper_camera/color/image_raw  (또는 D435i 토픽)
-  │    ├─ 구독: /joint_states  (현재 lift 위치 파악)
-  │    └─ 액션: /stretch_controller/follow_joint_trajectory
-  └─ 영구 subprocess (시작 시 1회 기동)
-       └─ blind_nav_system/venv/bin/python3 ocr_rcnn_server.py
-            └─ OCR-RCNN v2 (TF 2.13 compat.v1)
-                 ├─ detection_graph_640x480.pb
-                 └─ ocr_graph.pb
+| 상수 | 값 | 의미 / 재보정 방법 |
+|---|---|---|
+| `AIM_Y_A, AIM_Y_B` | 19.5, −42.0 | 상하 조준 오프셋 `A/d+B` (px). 십자 종이에 press → 빗나간 cm 측정, 30cm에서 1cm≈14px |
+| `AIM_X_A, AIM_X_B` | 4.3, 0.0 | 좌우 조준 오프셋 |
+| `TOL_CM` | 0.6 | 정렬 허용 실거리 (2cm 버튼 명중권) |
+| `FINGER_STANDOFF` | 0.145 m | 카메라 렌즈→닫힌 손끝 거리 (press 허공/1cm부족 실측 반영) |
+| `PRESS_DEPTH` | 0.015 m | 버튼 스트로크 |
+| `PRESS_CLOSE_DIST` | 0.20 m | 열린 채 접근하는 한계 거리 |
+| `WRIST_PITCH_DEFAULT` | −0.02 | 5° 하향 — 정반사(glare) 회피 (C안) |
+| `LIFT_PRIOR_CALL/PANEL` | 0.80 / 0.85 | 규정 높이(0.8~1.2m) 기반 lift 선점프. **현장 첫 실측으로 보정할 것** |
+| `USE_HEIGHT_PRIOR` | False | ★현장 나갈 때 True★ (실험실 태블릿은 의자 높이라 방해됨) |
+
+---
+
+## 모델: OCR-RCNN v2
+
+- 입력 640×480 **컬러 RGB 그대로** (흑백/반전 없음) → 출력 `{text, score, belief, box}`
+- `detection_graph_640x480.pb`(버튼 위치) + `ocr_graph.pb`(글자) — venv(TF 2.13 compat.v1)에서 구동
+- `ocr_rcnn_server.py`를 시작 시 1회만 띄우고 stdin/stdout으로 통신 (모델 로딩 1회)
+- 2층 활용: **raw_dets**(비숫자 '?' 포함) = "버튼같은 것" → 패널 단서 / **detections**(유효 라벨) = 신원 확정
+- **한계 실측**: 모니터/태블릿에 띄운 패널은 모아레+정반사로 특정 버튼 오독 — 무광 인쇄물 권장.
+  화살표 글자는 판독 불가 → 위치 휴리스틱으로 우회
+
+설치·모델 다운로드·단독 테스트는 종전과 동일:
+
+```bash
+cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system
+python3 -m venv --system-site-packages venv && source venv/bin/activate && pip install -r requirements.txt
+# frozen model 2개는 Google Drive에서 ocr-rcnn-v2/.../frozen_model/ 에 다운로드 (gdown)
+# 단독 추론: python3 elevator_button_press/ocr_rcnn_infer.py --image <img>
 ```
 
 ---
 
-## 테스트 이미지로 모델 단독 확인
+## 알려진 한계 / 다음 단계
 
-실제 로봇 없이 모델 동작만 확인하려면:
-
-```bash
-source ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/venv/bin/activate
-
-# 배치 테스트 (tools/ 폴더에 위치)
-python3 ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/tools/run_test_panels.py
-# 결과 이미지: elevator_button_press/results/ 폴더에 저장
-```
-
-단일 이미지 추론:
-
-```bash
-python3 ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_nav_system/elevator_button_press/ocr_rcnn_infer.py --image /path/to/image.jpg
-# JSON 출력 예:
-# {"detections": [{"score": 0.98, "text": "3", "belief": 0.95, "box": {...}}]}
-```
+- **접촉 판정은 단단한 벽 전제** — 태블릿은 밀려서 "허공" 오판 (버그 아님)
+- 실물 버튼 **점등 확인**(press 성공 지표)은 미구현 — ROI 밝기 비교 예정
+- **문 열림 감지** (설계됨, 미구현): 정면 라이다/depth 거리 급증(문=사라지는 벽) + 층 표시기
+  OCR(빨간 7세그 숫자 인식 실측 확인) AND 조합. 층 표시기(~2m)는 body 카메라 틸트업 담당
+- 음성 통합: `interface.py`에서 `/elevator/target` 토픽으로 팔레트 선택을 대체하는 구조 예정

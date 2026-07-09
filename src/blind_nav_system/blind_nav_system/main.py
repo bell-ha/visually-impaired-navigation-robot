@@ -498,6 +498,11 @@ def _kill_proc_group(proc: subprocess.Popen, label: str, kill_timeout: int = 6) 
     프로세스 그룹 전체 종료. 정상 종료 성공 여부 반환.
     exec ros2 launch 패턴에서 proc.pid = ros2 launch 자신이므로
     proc.wait()가 모든 자식 노드 종료 후까지 대기함.
+    SIGINT를 쓰는 이유(SIGTERM 금지):
+    - ros2 launch는 SIGTERM을 받으면 자식 노드를 정리하지 않고 즉시 종료 (고아 발생)
+    - rplidar_composition은 SIGINT에만 모터 정지 경로가 연결됨 —
+      SIGTERM이면 rclcpp 컨텍스트 shutdown 후 publish 예외로 SIGABRT 크래시,
+      모터 정지 명령(setMotorSpeed(0))이 시리얼로 안 나가서 LiDAR가 계속 돎
     """
     if proc is None or proc.poll() is not None:
         return True
@@ -509,8 +514,8 @@ def _kill_proc_group(proc: subprocess.Popen, label: str, kill_timeout: int = 6) 
                 pname = f.read().strip()
         except Exception:
             pname = "?"
-        _log("SYS", f"{label} SIGTERM → PID={proc.pid}({pname}) PGID={pgid} (최대 {kill_timeout}s 대기)")
-        os.killpg(pgid, signal.SIGTERM)
+        _log("SYS", f"{label} SIGINT → PID={proc.pid}({pname}) PGID={pgid} (최대 {kill_timeout}s 대기)")
+        os.killpg(pgid, signal.SIGINT)
         try:
             import time as _time
             t0 = _time.monotonic()
@@ -561,7 +566,7 @@ def sys_proc_ctrl(name):
                     pass
 
             if rplidar_pids:
-                _log("SYS", f"rplidar 고아 프로세스 감지 {rplidar_pids} → 소멸자 대기 중 (최대 5s)")
+                _log("SYS", f"rplidar 고아 프로세스 감지 {rplidar_pids} → 종료 대기 (최대 5s)")
                 deadline = _t.monotonic() + 5.0
                 while _t.monotonic() < deadline:
                     _t.sleep(0.3)
@@ -571,19 +576,23 @@ def sys_proc_ctrl(name):
                         break
 
                 if rplidar_pids:
-                    # 5초 지나도 살아있음 → SIGKILL 강제 종료 후 시리얼로 모터 정지
-                    _log("SYS", f"rplidar graceful 실패 → SIGKILL 후 시리얼 모터 정지")
+                    _log("SYS", "rplidar 종료 안 됨 → SIGKILL")
                     for pid in rplidar_pids:
                         try:
                             os.kill(pid, signal.SIGKILL)
                         except Exception:
                             pass
-                    _t.sleep(0.4)  # 포트 해제 대기
-                    _stop_lidar_motor()
-                else:
-                    _log("SYS", "rplidar graceful 종료 확인 (소멸자 실행됨 → 모터 정지)")
+                # 고아로 남았다는 것 자체가 비정상 경로 — 프로세스가 빨리 죽었어도
+                # SIGABRT 크래시 등으로 모터 정지 명령이 안 나갔을 수 있음 (실측: Signal 6 crash 기록).
+                # "빨리 죽음 = 소멸자 실행 = 모터 정지"로 추론하지 말고 무조건 시리얼 정지.
+                _t.sleep(0.4)  # 포트 해제 대기
+                _stop_lidar_motor()
+            elif graceful:
+                _log("SYS", "rplidar 프로세스 없음 (launch가 정상 정리)")
             else:
-                _log("SYS", "rplidar 프로세스 완전 종료 확인")
+                # 그룹째 SIGKILL된 경우 rplidar도 모터 정지 없이 죽었을 수 있음
+                _t.sleep(0.4)
+                _stop_lidar_motor()
 
             if auto_free:
                 try:
@@ -656,24 +665,26 @@ def killall_robot():
                     _kill_proc_group(proc, defn.get("label", n))
             _sys_procs.clear()
 
-            # 2. 이름으로 시스템 전체 검색 → SIGTERM
+            # 2. 이름으로 시스템 전체 검색 → SIGINT (Ctrl+C 동일 — ROS 노드 정상 종료 경로)
+            # pkill -x는 comm(15자 잘림)과 비교하므로 이름을 15자로 잘라야 매치됨
+            # (예: rplidar_composition의 comm은 "rplidar_composi")
             killed = []
             for pname in _ROBOT_PROC_NAMES:
-                r = subprocess.run(["pkill", "-TERM", "-x", pname], capture_output=True)
+                r = subprocess.run(["pkill", "-INT", "-x", pname[:15]], capture_output=True)
                 if r.returncode == 0:
                     killed.append(pname)
             if killed:
-                _log("SYS", f"SIGTERM: {', '.join(killed)}")
+                _log("SYS", f"SIGINT: {', '.join(killed)}")
             else:
                 _log("SYS", "실행 중인 로봇 프로세스 없음")
 
             # 3. 3초 대기 (graceful shutdown)
             _t.sleep(3)
 
-            # 4. 살아남은 것 SIGKILL
+            # 4. 살아남은 것 SIGKILL (comm 15자 잘림 주의)
             force_killed = []
             for pname in _ROBOT_PROC_NAMES:
-                r = subprocess.run(["pkill", "-KILL", "-x", pname], capture_output=True)
+                r = subprocess.run(["pkill", "-KILL", "-x", pname[:15]], capture_output=True)
                 if r.returncode == 0:
                     force_killed.append(pname)
             if force_killed:
@@ -681,7 +692,7 @@ def killall_robot():
 
             # 5. rplidar 확인 후 시리얼 모터 정지
             _t.sleep(0.4)
-            r = subprocess.run(["pgrep", "-x", "rplidar_composition"], capture_output=True)
+            r = subprocess.run(["pgrep", "-x", "rplidar_composition"[:15]], capture_output=True)
             if r.returncode != 0:  # 종료됨 → 포트 사용 가능
                 _stop_lidar_motor()
 
@@ -883,6 +894,9 @@ HTML = """<!DOCTYPE html>
       <button class="tab-btn"        id="tab-SYS"    onclick="setTab('SYS')">시스템<span class="tab-badge" id="badge-SYS"    style="display:none"></span></button>
       <button class="tab-btn"        id="tab-ROS2"   onclick="setTab('ROS2')">ROS2<span class="tab-badge" id="badge-ROS2"   style="display:none"></span></button>
       <button class="tab-btn"        id="tab-RVIZ"   onclick="setTab('RVIZ')">RViz<span class="tab-badge" id="badge-RVIZ"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-BATT"   onclick="setTab('BATT')">배터리<span class="tab-badge" id="badge-BATT"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-FREE"   onclick="setTab('FREE')">정리<span class="tab-badge" id="badge-FREE"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-HOME"   onclick="setTab('HOME')">홈위치<span class="tab-badge" id="badge-HOME"   style="display:none"></span></button>
       <button class="tab-btn"        id="tab-ARD"    onclick="setTab('ARD')">아두이노<span class="tab-badge" id="badge-ARD"    style="display:none"></span></button>
     </div>
     <div id="log-panel"></div>
