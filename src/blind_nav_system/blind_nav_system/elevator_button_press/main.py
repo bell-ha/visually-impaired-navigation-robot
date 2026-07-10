@@ -106,7 +106,10 @@ KP_LIFT   = 0.0003
 # → 전 구간(0.27~0.43m) 계통 오차 ±3mm 수준. 운용 press 거리는 0.25~0.45m 권장.
 AIM_X_A, AIM_X_B = 4.3, 0.0     # 좌우: 고정 ~1cm 오프셋만
 # [보정 2026-07-08] ROI 추적 도입 후 "항상 1cm 아래 누름" 실측 → 물리항 +1cm (4.2)
-AIM_Y_A, AIM_Y_B = 19.5, -42.0  # 상하: 3점 fit + 1cm 물리 보정
+AIM_Y_A, AIM_Y_B = 13.2, -42.0  # 상하: 3점 fit + 1cm 물리 보정
+# 2026-07-10: 19.5 → 13.2 (−6.3 = 1.5cm 상당). READY 동결+직행 press로 다른 변수를
+# 다 제거한 상태에서 "일관되게 1.5cm 위를 누름" 실측 → 고정 물리 오프셋(A/d 항)을
+# 1.5cm만큼 하향. 방향이 남으면 같은 방법으로 재보정 (1.0cm ≈ A −4.2)
 AIM_DIST_DEFAULT = 0.30          # 거리 미측정 시 가정값
 
 def _aim_offsets(dist):
@@ -130,6 +133,11 @@ ARM_JOINT          = "wrist_extension"  # 팔 뻗기 관절 (실측 확인)
 # [실측 보정 2026-07-09] press "허공" 판정 + 손끝이 표면 1cm 앞 정지 실측 → 2.5cm 하향
 FINGER_STANDOFF    = 0.145  # m — 카메라 렌즈에서 닫힌 손가락 끝까지 거리
 PRESS_CLOSE_DIST   = 0.20   # m — 여기까지는 그리퍼 연 채 접근 (열린 손끝이 벽 ~3cm 앞)
+PRESS_READY_DIST   = 0.25   # m — 자동 접근이 "누르기 직전"(PRESS_CLOSE_DIST 0.20)까지 끝난
+                            #     상태에서만 누르기 활성 + 로봇 완전 동결 (사용자 최종 결정:
+                            #     "버튼 정하면 진짜 누르기 직전까지 가고, 그때만 누르게")
+DET_MAX_DEPTH      = 1.5    # m — 이보다 먼 탐지는 버튼일 수 없음 (팔 0.5m + 접근 여유로도 불가)
+                            #     → 복도 건너편 표지판·반사 오탐을 depth로 제거
 
 # ── 높이 사전 지식 (접근성 규정: 호출/조작반 0.8~1.2m) ──
 # 실전 모드: 타겟 선택 시 lift를 규정 높이로 선점프 → 탐색 시간 대폭 단축.
@@ -551,7 +559,7 @@ HTML = """
         }
         const pbtn = document.getElementById('press-btn');
         if (pbtn) {
-          pbtn.disabled = s.pressing || !(s.centered && s.dist != null);
+          pbtn.disabled = s.pressing || !(s.centered && s.dist != null && s.dist <= 0.25);
           pbtn.style.opacity = pbtn.disabled ? 0.4 : 1.0;
         }
         if (s.pressing) {
@@ -561,10 +569,13 @@ HTML = """
                    (Math.abs(s.ex) > s.dz || Math.abs(s.ey) > s.dz)) {
           banner.textContent = `🟡 정렬 유지 중 — 경계 (x:${s.ex} y:${s.ey}, 허용±${s.dz}px)`;
           banner.className = 'tracking';
-        } else if (s.centered) {
+        } else if (s.centered && s.dist != null && s.dist <= 0.25) {
           const done = (s.press_status && s.press_status.startsWith('✅')) ? '  |  ' + s.press_status : '';
-          banner.textContent = `✅ CENTERED — '${s.target}' 도달  |  거리 ${s.dist!=null ? s.dist+'m' : '?'}` + done;
+          banner.textContent = `✅ 준비 완료 — 로봇 정지, '${s.target}' 지금 누르세요  |  거리 ${s.dist}m` + done;
           banner.className = 'centered';
+        } else if (s.centered) {
+          banner.textContent = `🎯 정조준 — 자동 접근 중 (${s.dist!=null ? s.dist+'m' : '?'} → 25cm 도달 시 정지+누르기 활성)`;
+          banner.className = 'tracking';
         } else if (s.target && s.ex == null) {
           banner.textContent = `🔍 '${s.target}' 찾는 중 — 패널(숫자 군집) 추적`;
           banner.className = 'tracking';
@@ -680,6 +691,7 @@ def select():
         state["target_text"] = text
         state["phase"]       = "TRACK"
         state["centered"]    = False
+        state["centered_ts"] = 0.0   # 이전 타겟의 CENTERED 관용 창 무효화
     node = _node_ref[0]
     if node:
         node._roi_miss  = 0   # 새 타겟 → ROI 집중 추적 즉시 재개 가능
@@ -1194,7 +1206,16 @@ class ElevatorTracker(Node):
             return None
         D = float(np.median(valid)) / 1000.0
         # D405 근거리 특화: 5cm~1.5m 범위만 신뢰
+        # (주의: 1.5m 밖도 None → "depth 유효"는 곧 "1.5m 이내 실측"을 의미)
         return D if 0.05 < D < 1.5 else None
+
+    def _is_press_ready(self) -> bool:
+        """정조준 + 누르기 가능 거리 = '클릭 대기' 상태.
+        이때는 모든 자동 이동을 동결한다 — 사용자가 누를 표적이 움직이면
+        클릭 타이밍을 잡을 수 없음. 클릭하면 press 시퀀스가 이어받는다."""
+        with state_lock:
+            return (state["centered"] and state["target_dist"] is not None
+                    and state["target_dist"] <= PRESS_READY_DIST)
 
     def _on_image(self, msg):
         try:
@@ -1447,6 +1468,23 @@ class ElevatorTracker(Node):
                     else:
                         self._croi_miss = getattr(self, "_croi_miss", 0) + 1
 
+            # ── depth 거리 필터: 팔이 닿을 수 없는 원거리 오탐 제거 ──
+            # 버튼처럼 잡혀도 depth가 DET_MAX_DEPTH 밖이면 버튼이 아님.
+            # depth 구멍(None)은 판정 불가 → 통과시킴 (반사 심한 패널에서 진짜
+            # 버튼의 depth가 안 잡히는 경우 억울한 제거 방지)
+            def _too_far(dd):
+                bb = dd["box"]
+                zd = self._depth_at(int((bb["x1"] + bb["x2"]) / 2),
+                                    int((bb["y1"] + bb["y2"]) / 2))
+                return zd is not None and zd > DET_MAX_DEPTH
+            _n_before  = len(raw_dets)
+            raw_dets   = [d for d in raw_dets   if not _too_far(d)]
+            detections = [d for d in detections if not _too_far(d)]
+            _n_cut = _n_before - len(raw_dets)
+            if _n_cut and time.time() - getattr(self, "_far_log_ts", 0) > 5.0:
+                self._far_log_ts = time.time()
+                self._dlog(f"[FILTER] 원거리(>{DET_MAX_DEPTH}m) 오탐 {_n_cut}개 제거")
+
             # 패널 단서 저장: "버튼처럼 생긴 것"들의 박스 (표시 좌표계, 원거리 추적용)
             self._panel_boxes = [d["box"] for d in raw_dets]
             self._panel_ts    = time.time()
@@ -1457,9 +1495,30 @@ class ElevatorTracker(Node):
             #   버튼이 하나뿐이면 그것이 곧 호출 버튼. 글자 불필요 = 반사에도 면역.
             if (place0 == "hall" and tgt0 in ("^", "s")
                     and not any(d["text"] == tgt0 for d in detections)):
-                cands_a = [d for d in raw_dets
-                           if not d.get("text", "").strip().isdigit()
-                           and d.get("score", 0) >= 0.5]
+                # 합성은 "위치"라는 약한 증거만으로 타겟을 만드므로 depth 실측을 요구:
+                # 측정 불가(구멍)나 원거리는 후보 제외 — 검은 바퀴(IR 흡수, depth ?)가
+                # "가장 아래 버튼같은 것"으로 ▼ 합성되던 실측 사례(2026-07-10) 차단
+                def _synth_ok(dd):
+                    bb = dd["box"]
+                    zs = self._depth_at(int((bb["x1"] + bb["x2"]) / 2),
+                                        int((bb["y1"] + bb["y2"]) / 2))
+                    return zs is not None and zs <= DET_MAX_DEPTH
+                # 숫자가 여럿 읽히면 지금 보는 건 차내 조작반일 가능성 — 진짜 호출부
+                # (화살표만 있는 패널)가 아니므로 합성 생략. 없는 ▲▼를 잡동사니
+                # ('*','$' 등 비숫자 탐지)로 지어내던 실측 사례(2026-07-10) 차단.
+                _digits_now = sum(1 for dd in detections
+                                  if dd.get("text", "").strip().isdigit())
+                if _digits_now >= 3:
+                    cands_a = []
+                    if time.time() - getattr(self, "_synth_skip_ts", 0) > 5.0:
+                        self._synth_skip_ts = time.time()
+                        self._dlog(f"[SYNTH] 숫자 {_digits_now}개 보임 — 조작반으로 판단, "
+                                   "▲▼ 합성 생략 (장소 모드 확인 필요)")
+                else:
+                    cands_a = [d for d in raw_dets
+                               if not d.get("text", "").strip().isdigit()
+                               and d.get("score", 0) >= 0.5
+                               and _synth_ok(d)]
                 if cands_a:
                     pick = (max if tgt0 == "s" else min)(
                         cands_a,
@@ -1497,15 +1556,23 @@ class ElevatorTracker(Node):
                             chosen = near
                         # 잠금 탈취: 다른 위치의 후보가 잠금의 확신보다 뚜렷이 높게
                         # 2라운드 연속 나타나면 → 그쪽이 진짜 (오독에 잠긴 상태 교정)
+                        # 단, 잠금 생성 후 4초(탐색 초반)까지만 허용 — 정렬 중 잠금이
+                        # 다른 위치로 점프하면 서보가 새 목표를 쫓아 진동·정렬 폭주
+                        # (2026-07-08 실측: 탈취 3회 → lift 100초 진동 + X정렬 16cm 소진)
                         if best is not chosen and \
+                                now - lk.get("born", 0.0) < 4.0 and \
                                 best.get("belief", 0) >= lk.get("bel", 0.5) + 0.15:
                             self._usurp_streak = getattr(self, "_usurp_streak", 0) + 1
                             if self._usurp_streak >= 2:
                                 chosen = best
                                 self._usurp_streak = 0
+                                _zb = self._depth_at(
+                                    int((best["box"]["x1"] + best["box"]["x2"]) / 2),
+                                    int((best["box"]["y1"] + best["box"]["y2"]) / 2))
                                 self._dlog(
                                     f"[LOCK] 더 확신 높은 '{tgt0}' 발견 → 잠금 이동 "
-                                    f"(belief {best.get('belief', 0):.2f})")
+                                    f"(belief {best.get('belief', 0):.2f}, "
+                                    f"depth {f'{_zb:.2f}m' if _zb else '?'})")
                         else:
                             self._usurp_streak = 0
                     else:
@@ -1515,11 +1582,23 @@ class ElevatorTracker(Node):
                 if chosen is not None:
                     prev = (lk or {}).get("bel")
                     new_b = chosen.get("belief", 0.5)
+                    # born = 잠금 "최초 생성" 시각 (갱신에도 유지) — 탈취 허용 창 판정 기준.
+                    # 잠금이 4초 이상 끊겼다 재생성되면 새 탐색으로 보고 창을 다시 연다.
+                    lk_live = lk is not None and now - lk["ts"] < 4.0
+                    _new_lock = not (lk_live and "born" in lk)
                     self._target_lock = {
                         "cx": (chosen["box"]["x1"] + chosen["box"]["x2"]) / 2,
                         "cy": (chosen["box"]["y1"] + chosen["box"]["y2"]) / 2,
                         "ts": now,
+                        "born": now if _new_lock else lk["born"],
                         "bel": (0.7 * prev + 0.3 * new_b) if prev is not None else new_b}
+                    if _new_lock:
+                        # 잠금 대상까지의 depth를 남김 — 원거리 오탐(복도 건너편 물체)에
+                        # 잠긴 것인지 로그만으로 판별 가능하게
+                        _zl = self._depth_at(int(self._target_lock["cx"]),
+                                             int(self._target_lock["cy"]))
+                        self._dlog(f"[LOCK] '{tgt0}' 잠금 생성 (belief {new_b:.2f}, "
+                                   f"depth {f'{_zl:.2f}m' if _zl else '?'})")
                 # 참칭 후보(선택 안 된 동명이인)는 기억·화면에서 제외
                 detections = [d for d in detections
                               if d["text"] != tgt0 or d is chosen]
@@ -1620,8 +1699,13 @@ class ElevatorTracker(Node):
                 _txt(vis, f"x:{bcx-ax:+d} y:{bcy-ay:+d} d:{dist_txt}", (10, IMAGE_H-14),
                      0.75, (60,160,255))
         if centered:
-            cv2.putText(vis, "CENTERED", (CX-70,CY-50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,80), 3)
+            # 준비 완료(정지·클릭 대기)와 "정렬만 됨, 아직 접근 중"을 화면에서 구분
+            if self._is_press_ready():
+                cv2.putText(vis, "READY - PRESS", (CX-110, CY-50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,80), 3)
+            else:
+                cv2.putText(vis, "ALIGNED (approaching)", (CX-130, CY-50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,220,255), 2)
         return vis
 
     def _scan_step(self, lift, amp_l=0.05, amp_b=0.03, amp_e=0.04):
@@ -1689,6 +1773,7 @@ class ElevatorTracker(Node):
         _rot_ok = False
         if (_flat and _tilt is not None and abs(_tilt) > 4.0
                 and not self._nudging
+                and not self._is_press_ready()   # 클릭 대기 중엔 회전 금지 (동결)
                 and getattr(self, "_rot_count", 0) < 4
                 and self._may_explore()
                 and time.time() - getattr(self, "_rot_ts", 0) > 3.0):
@@ -1733,6 +1818,9 @@ class ElevatorTracker(Node):
             elif det.get("age", 9.9) <= 8.0 and e_mem and e_mem["ts"] > lm + 0.3:
                 usable = e_mem["ts"] != getattr(self, "_servo_acted_ts", None)
         if not usable:
+            # 클릭 대기(누르기 활성) 중엔 인식이 끊겨도 SEEK/스캔으로 움직이지 않음 — 동결 유지
+            if self._is_press_ready():
+                return
             # [진동 방지] 방금(4초 내)까지 그 자리에서 타겟을 봤으면 — 움직이지 말고
             # 재인식을 기다린다. (정렬 위치에서 일시적으로 안 읽힐 때, 군집 추적이
             # 시야를 끌고 내려가 "내려가면 읽히고 올라가면 놓치는" 무한 왕복 방지)
@@ -1749,6 +1837,20 @@ class ElevatorTracker(Node):
                 mx = sum((b["x1"] + b["x2"]) / 2 for b in boxes) / len(boxes)
                 my = sum((b["y1"] + b["y2"]) / 2 for b in boxes) / len(boxes)
                 sex, sey = mx - CX, my - CY
+                # 군집 depth 게이트: 박스별 depth 중 가장 가까운 값으로 판정.
+                # ① 최근접이 1.5m 밖 → 패널일 수 없음 (팔 0.5m)
+                # ② 전부 측정 불가 → 검은 바퀴 등 IR 흡수 오탐 의심 (실측 사례)
+                # 어느 쪽이든 쫓아가지 않고 제자리 대기 (진짜 패널이면 글자 판독이 곧 잡음)
+                _zs = [self._depth_at(int((b["x1"] + b["x2"]) / 2),
+                                      int((b["y1"] + b["y2"]) / 2)) for b in boxes]
+                _zv = [z for z in _zs if z is not None]
+                if (not _zv) or min(_zv) > DET_MAX_DEPTH:
+                    if time.time() - getattr(self, "_seek_far_ts", 0) > 5.0:
+                        self._seek_far_ts = time.time()
+                        self._dlog("[SEEK] 군집 depth 전부 측정불가 — 오탐 의심, 접근 안 함"
+                                   if not _zv else
+                                   f"[SEEK] 군집이 {min(_zv):.2f}m 밖 — 오탐 의심, 접근 안 함")
+                    return
                 COARSE = 45          # 군집은 대략 중앙이면 충분 (정밀 정렬은 타겟 발견 후)
                 if not self._may_explore():
                     return
@@ -1800,8 +1902,21 @@ class ElevatorTracker(Node):
             with state_lock:
                 first = not state["centered"]
                 state["centered"] = True
+                state["centered_ts"] = time.time()   # press 클릭 관용 창 판정용
             if first:
                 self._dlog("CENTERED!")
+            # ── 누르기 활성(정조준 + 60cm 이내) 순간부터 로봇 완전 정지 ──
+            # 자동 접근·polish 서보·베이스 정렬 전부 동결 (사용자 요청: "초록불이면
+            # 무조건 멈춰서 누를 수 있게"). 클릭하면 press 시퀀스가 접근~누르기 담당.
+            # 오차가 히스테리시스(+4px)를 넘어 CENTERED가 풀리면 동결도 풀려 재정렬.
+            if tdist is not None and tdist <= PRESS_READY_DIST:
+                if not getattr(self, "_ready_logged", False):
+                    self._ready_logged = True
+                    self._dlog(f"[READY] 누르기 활성 ({tdist:.2f}m) — "
+                               "자동 이동 전체 동결, 클릭 대기")
+                return
+            if getattr(self, "_ready_logged", False):
+                self._ready_logged = False
             # ── 자동 접근: 정렬됐으면 누르기 직전 거리(20cm)까지 팔을 스스로 전진 ──
             # 살아있는 관측(fresh)일 때만 한 걸음(≤4cm)씩. 정렬이 흐트러지면
             # 아래 재정렬 로직이 잡은 뒤 다시 전진. 접촉 없음(손끝 3cm 앞 정지).
@@ -1818,6 +1933,13 @@ class ElevatorTracker(Node):
                     with state_lock:
                         ext_now = state["arm_ext"]
                     if ext_now is not None:
+                        # 팔 한계에 닿았는데 아직 멀면 → 사용자에게 알림 (조용한 교착 방지)
+                        if float(ext_now) >= ARM_EXT_MAX - 0.005:
+                            if time.time() - getattr(self, "_arm_max_ts", 0) > 8.0:
+                                self._arm_max_ts = time.time()
+                                self._dlog(f"[APPROACH] 팔 한계(0.5m) 도달 — 버튼 {d_live:.2f}m 남음. "
+                                           "로봇을 더 가까이 대야 누르기가 활성화됩니다")
+                            return
                         step = max(0.02, min(0.06,
                                    0.35 * (d_live - PRESS_CLOSE_DIST)))
                         step = min(step, d_live - PRESS_CLOSE_DIST)
@@ -1900,7 +2022,10 @@ class ElevatorTracker(Node):
         with state_lock:
             if state["pressing"]:
                 return "이미 누르기 진행 중"
-            if not state["centered"]:
+            # 깜빡임 관용: 방금(2초 내)까지 CENTERED였으면 클릭 접수 —
+            # 진짜 정렬 여부는 아래 라이브 오차 재검증이 판정 (어긋났으면 사유 반환)
+            if not state["centered"] and \
+                    time.time() - state.get("centered_ts", 0.0) > 2.0:
                 return "CENTERED 상태가 아님 (버튼 선택 후 정렬 완료까지 대기)"
             d    = state["target_dist"]
             ext  = state["arm_ext"]
@@ -1944,6 +2069,9 @@ class ElevatorTracker(Node):
             return "거리 측정 안 됨 (depth ?m)"
         if d > PRESS_DIST_MAX:
             return f"너무 멂 ({d:.2f}m > {PRESS_DIST_MAX}m) — 로봇을 더 가까이"
+        if d > PRESS_READY_DIST:
+            return (f"아직 접근 완료 전 ({d:.2f}m) — 자동 접근이 "
+                    f"{PRESS_READY_DIST*100:.0f}cm 안쪽까지 간 뒤 누르기가 활성화됩니다")
         if ext is None:
             return "팔 위치 미수신 (joint_states 확인)"
         threading.Thread(target=self._press_sequence, args=(d, ext, tgt),
@@ -1960,11 +2088,30 @@ class ElevatorTracker(Node):
         with state_lock:
             state["pressing"] = True
         try:
+            # READY 동결 상태(≤PRESS_READY_DIST, 정조준 완료)에서 클릭된 경우:
+            # 조준은 이미 끝났고 남은 건 몇 cm 전진뿐 → 접근 중 보정·근접 재정렬을
+            # 전부 생략하고 "뻗기→닫기→꾹"만 실행 (사용자 요청: 클릭 후 미세조정 금지)
+            direct = d <= PRESS_READY_DIST + 0.02
             # A. 그리퍼 연 채 "정렬을 유지하며" 단계 접근:
             #    5cm 전진 → 이동 후 인식 대기 → 박스↔십자 보정 → 반복
             #    (박스 중앙 = 십자 중앙을 움크리기 직전까지 유지)
             d_now = d
-            for _s in range(8):
+            if direct:
+                remain0 = d_now - PRESS_CLOSE_DIST
+                if remain0 > 0.01:
+                    with state_lock:
+                        ext_now0 = state["arm_ext"]
+                    if ext_now0 is None:
+                        ext_now0 = start_ext
+                    st(f"1/6 직행 접근: +{remain0*100:.0f}cm (조정 없음)")
+                    if not self._move_joint_wait(
+                            ARM_JOINT,
+                            max(ARM_EXT_MIN, min(ARM_EXT_MAX,
+                                                 float(ext_now0) + remain0)),
+                            2, 8.0):
+                        st("❌ 접근 실패 — 중단"); return
+                    d_now = PRESS_CLOSE_DIST
+            for _s in range(0 if direct else 8):
                 remain = d_now - PRESS_CLOSE_DIST
                 if remain <= 0.01:
                     break
@@ -2024,9 +2171,10 @@ class ElevatorTracker(Node):
             # B-2. 근접 재정렬: 접근 중 처짐/벽 기울기로 생긴 오차를 "가까운 거리"에서
             #      다시 잡는다. 여기서의 1px는 실거리로 훨씬 작아 정밀함.
             #      (press 중 자동 서보는 잠겨 있으므로 여기서 통제된 lift 보정만 수행)
-            if tgt:
+            if tgt and not direct:
                 # 근접 재정렬: 상하(lift) + 좌우(베이스, 가드 확인 포함) 모두 이 거리에서 보정
                 # — 접근 중 생긴 드리프트를 복귀 없이 그 자리에서 해결
+                # (direct 모드에서는 생략 — READY 동결 시점의 조준을 그대로 신뢰)
                 dz2 = _dead_zone_px(d2)
                 last_err = None
                 aligned  = False
