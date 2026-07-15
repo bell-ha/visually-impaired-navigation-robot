@@ -106,17 +106,58 @@ KP_LIFT   = 0.0003
 # → 전 구간(0.27~0.43m) 계통 오차 ±3mm 수준. 운용 press 거리는 0.25~0.45m 권장.
 AIM_X_A, AIM_X_B = 4.3, 0.0     # 좌우: 고정 ~1cm 오프셋만
 # [보정 2026-07-08] ROI 추적 도입 후 "항상 1cm 아래 누름" 실측 → 물리항 +1cm (4.2)
-AIM_Y_A, AIM_Y_B = 13.2, -42.0  # 상하: 3점 fit + 1cm 물리 보정
-# 2026-07-10: 19.5 → 13.2 (−6.3 = 1.5cm 상당). READY 동결+직행 press로 다른 변수를
-# 다 제거한 상태에서 "일관되게 1.5cm 위를 누름" 실측 → 고정 물리 오프셋(A/d 항)을
-# 1.5cm만큼 하향. 방향이 남으면 같은 방법으로 재보정 (1.0cm ≈ A −4.2)
+AIM_Y_A, AIM_Y_B = 9.0, -42.0   # 상하: 3점 fit + 실측 물리 보정
+# 2026-07-10: 19.5 → 13.2 (실험실, "1.5cm 위 눌림" 실측) → 9.0 (실물 엘리베이터
+# 홀 버튼에서 영점 트림 y-1.0cm으로 press 성공 확인 후 그 값을 기본값에 흡수).
+# 현 상태 = 영점 트림 0 기준 정답 조준 — 트림은 "여기서 추가로 틀어질 때"만 사용.
+# 재보정 환산: 1.0cm ≈ A ±4.2 (빗나간 방향으로 십자 이동 = 위로 눌리면 A 감소)
 AIM_DIST_DEFAULT = 0.30          # 거리 미측정 시 가정값
 
+# ── 영점 트림 (현장 자가 보정, 조준경 영점잡기) ──────────────────────────────
+# press가 빗나가면 사용자가 UI 화살표로 "빗나간 방향 + cm"를 입력 → 십자가 그
+# 방향으로 이동 (십자 = 실제 손끝 낙점이 되도록). 파일 영속 — 앱 재시작에도 유지.
+AIM_TRIM_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "aim_trim.json")
+_aim_trim = {"x_cm": 0.0, "y_cm": 0.0}   # +x=오른쪽, +y=아래 (화면 기준)
+try:
+    _aim_trim.update({k: float(v) for k, v in
+                      json.load(open(AIM_TRIM_FILE)).items() if k in _aim_trim})
+except Exception:
+    pass
+
+def _save_aim_trim():
+    try:
+        with open(AIM_TRIM_FILE, "w") as f:
+            json.dump(_aim_trim, f)
+    except Exception:
+        pass
+
+# ── 차내 버튼 배치 프로필 (버튼 맵) ──────────────────────────────────────────
+# 실물 조작반의 버튼 배치(위→아래, 왼→오른쪽)를 사전지식으로 저장.
+# 글자가 하나만 읽혀도(앵커) 나머지 버튼의 정체를 상대 위치로 확정하는 데 사용.
+# UI에서 편집 가능 (다른 엘리베이터 재사용), 파일 영속.
+# 오버레이(cv2) 전용 영문 별칭 — cv2 putText가 한글을 '?'로 깨뜨림. UI/로그는 한글 유지
+_OVERLAY_ALIAS = {"문열림": "door", "종": "bell"}
+
+LAYOUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "button_layout.json")
+# 격자형(엑셀식): 빈 칸("")으로 실물의 열 위치까지 표현 — 정합 정확도에 직접 기여.
+# 기본 3x3, 시연 엘리베이터 실물 배치 (위→아래): 문열림·3 / ·2·5 / 종·1·4
+# ("3 바로 아래가 2" — 사용자 실물 확인. 열 정렬은 현장에서 UI로 교정 가능)
+_layout_rows = [["문열림", "3", ""], ["", "2", "5"], ["종", "1", "4"]]
+try:
+    _lr = json.load(open(LAYOUT_FILE)).get("rows")
+    if isinstance(_lr, list) and all(isinstance(r, list) and r for r in _lr):
+        _layout_rows = [[str(t) for t in r] for r in _lr]
+except Exception:
+    pass
+
 def _aim_offsets(dist):
-    """현재 목표 거리(m)에 맞는 조준 오프셋(px) 반환."""
+    """현재 목표 거리(m)에 맞는 조준 오프셋(px) 반환 (영점 트림 포함).
+    1cm = 4.2/d px (px↔m 환산 상수 420 기준) — 트림은 고정 물리 오프셋이라 A/d형."""
     d = dist if (dist and 0.10 < dist < 1.0) else AIM_DIST_DEFAULT
-    return (int(round(AIM_X_A / d + AIM_X_B)),
-            int(round(AIM_Y_A / d + AIM_Y_B)))
+    return (int(round(AIM_X_A / d + AIM_X_B + _aim_trim["x_cm"] * 4.2 / d)),
+            int(round(AIM_Y_A / d + AIM_Y_B + _aim_trim["y_cm"] * 4.2 / d)))
 
 
 # 허용 정렬 오차를 픽셀이 아니라 "실거리(cm)"로 고정 — 완전 정확 요구 대응.
@@ -161,6 +202,10 @@ BASE_SPEED       = 0.04   # m/s
 # 라이다는 로봇 "중심" 기준이고 몸통 끝은 중심에서 ~17cm.
 # 라이다는 2D 단면이라 책상 상판처럼 위에서 튀어나온 건 못 봄 — 여유를 너무 줄이지 말 것.
 CLEAR_DIST       = 0.30   # m — 이동 방향 최소 여유 (이보다 가까우면 이동 거부)
+CLEAR_MARGIN     = 0.15   # m — 이동량 비례 가드: 여유 ≥ 이동량 + 이 값이면 허용.
+                          #     엘리베이터 차내처럼 좁은 곳(뒤 벽 26cm)에서 2cm 미세
+                          #     정렬까지 30cm 기준으로 막혀 정렬 불가하던 문제 해결
+                          #     (2026-07-13, 사용자 승인 — 라이다 기반 안전은 유지)
 # 로봇 자기 부속물(허브에 꽂힌 케이블 등)이 몸통 밖 ~24cm까지 잡히는 것 실측
 # → 0.25 미만은 자기 몸/부속물로 간주해 무시. 차단 유효 띠 = 0.25~0.30m.
 # [트레이드오프] 25cm 안으로 갑자기 들어온 진짜 장애물도 무시됨 — 개발용 절충.
@@ -228,7 +273,8 @@ state = {
     "jpeg_frame_ocr":   None,  # OCR에 실제로 들어가는 이미지 (줌/샤프닝 보정 후)
     "target_dist":  None,   # 목표 버튼까지 거리 (m, D405 depth)
     "rot_grip":     0,      # gripper 회전 (CW 90° 단위, 웹 버튼으로 조절)
-    "rot_body":     0,      # body 회전
+    "rot_body":     1,      # body 회전 — D435i가 몸체에 90° 돌아가 장착돼 있어
+                            # 기본 1(CW 90°)로 시작해야 사무실 전경이 바로 보임
     "place":        "hall", # 장소 모드: hall(홀, ▲▼만) / cab(차내, 숫자만) — 팔레트·prior 분기
     "arm_ext":      None,   # 현재 팔 뻗기 위치 (wrist_extension, m)
     "wall_tilt":    None,   # 벽 기울기 각도(°) — +면 오른쪽이 멂 (평행 정렬용)
@@ -237,6 +283,7 @@ state = {
     "guard_off":    False,  # 라이다 가드 해제 (개발용 — 재시작 시 항상 가드 ON 복귀)
     "jpeg_fail":    None,   # 타겟 인식 실패 순간의 OCR 입력 스냅샷 (디버그: /fail.jpg)
     "base_travel":  0.0,    # 누적 이동량 (m)
+    "press_ready":  False,  # 정조준+근접 래치 (진입 0.25/유지 0.28 히스테리시스)
     "align_note":   None,   # X정렬 상태 메시지
     "pressing":     False,  # 누르기 시퀀스 진행 중
     "press_status": None,   # 누르기 진행 메시지
@@ -257,11 +304,12 @@ HTML = """
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #111; color: #eee; font-family: sans-serif;
-           display: flex; flex-direction: column; align-items: center;
-           padding: 20px; gap: 14px; }
+           height: 100vh; overflow: hidden;   /* 앱 레이아웃 — 페이지 스크롤 없음 */
+           display: flex; flex-direction: column; align-items: stretch;
+           padding: 0; gap: 0; }
     h2   { font-size: 1.2rem; color: #aef; }
-    #banner { font-size: 1rem; padding: 8px 20px; border-radius: 6px;
-              background: #222; color: #fff; min-width: 500px; text-align: center; }
+    #banner { font-size: 0.95rem; padding: 7px 14px; border-radius: 6px;
+              background: #222; color: #fff; min-width: 0; text-align: center; }
     #banner.tracking { background: #1a2a7a; }
     #banner.centered { background: #1a5a1a; }
     #cam-row { display: flex; gap: 10px; align-items: center; font-size: 0.9rem; color: #aaa; }
@@ -291,7 +339,7 @@ HTML = """
     #info { font-size: 0.8rem; color: #666; }
     /* 슬라이드 토글: 상태가 한눈에 보이는 진짜 스위치 */
     .tgl { display:flex; align-items:center; gap:8px; cursor:pointer; user-select:none; }
-    .tgl-name  { color:#bbb; font-size:0.9rem; }
+    .tgl-name  { color:#bbb; font-size:0.82rem; white-space:nowrap; }
     .tgl-state { font-size:0.8rem; color:#777; min-width:32px; font-weight:700; }
     .tgl-track { width:46px; height:24px; border-radius:12px; background:#3a3a44;
                  position:relative; transition:background .15s; flex-shrink:0; }
@@ -304,114 +352,233 @@ HTML = """
   </style>
 </head>
 <body>
-  <h2>🛗 Elevator Button Tracker</h2>
-
-  <div id="banner">Waiting for camera...</div>
-  <!-- 4패널 2x2 배치: 위 = gripper + depth, 아래 = OCR입력 + body -->
-  <div style="display:flex; flex-direction:column; gap:16px; align-items:center;">
-    <div style="display:flex; gap:16px; align-items:flex-start; justify-content:center;">
-      <figure style="margin:0; text-align:center;">
-        <img id="stream" src="/video?cam=gripper" alt="gripper stream"
-             style="width:640px; background:#000;">
-        <figcaption style="color:#8ad; font-size:0.95rem; margin-top:4px;">
-          🤏 gripper (D405) — 버튼 인식·추적·거리
-          <span id="tilt-info" style="margin-left:8px;font-weight:700;"></span>
-          <button onclick="rotateCam('gripper')"
-                  style="margin-left:8px;background:#334;color:#cdf;border:none;border-radius:5px;padding:3px 10px;cursor:pointer;">↻ 회전</button>
-        </figcaption>
-      </figure>
-      <figure style="margin:0; text-align:center;">
-        <img id="stream-depth" src="/video?cam=depth" alt="depth stream"
-             style="width:640px; background:#000;">
-        <figcaption style="color:#8ad; font-size:0.95rem; margin-top:4px;">
-          🌊 depth — 파랑=가까움 · 빨강=멂 · 검정=측정불가</figcaption>
-      </figure>
-    </div>
-    <div style="display:flex; gap:16px; align-items:flex-start; justify-content:center;">
-      <figure style="margin:0; text-align:center;">
-        <img id="stream-ocr" src="/video?cam=ocr" alt="ocr stream"
-             style="width:640px; background:#000;">
-        <figcaption style="color:#8ad; font-size:0.95rem; margin-top:4px;">
-          🔬 OCR 입력 — 보정 후 (모델이 보는 그대로)</figcaption>
-      </figure>
-      <figure style="margin:0; text-align:center;">
-        <img id="stream-body" src="/video?cam=body" alt="body stream"
-             style="height:480px; background:#000;">
-        <figcaption style="color:#8ad; font-size:0.95rem; margin-top:4px;">
-          👁 body (D435i) — 전방 모니터링
-          <button onclick="rotateCam('body')"
-                  style="margin-left:8px;background:#334;color:#cdf;border:none;border-radius:5px;padding:3px 10px;cursor:pointer;">↻ 회전</button>
-        </figcaption>
-      </figure>
+  <!-- 헤더: 제목+배너+누르기 — 100vh 레이아웃이라 항상 보임 -->
+  <div style="display:flex;gap:10px;align-items:center;padding:6px 10px;flex-shrink:0;
+              background:#101018;border-bottom:1px solid #26263a;">
+    <span style="font-size:1rem;font-weight:700;color:#aef;white-space:nowrap;">🛗 Elevator</span>
+    <div id="banner" style="flex:1;margin:0;">Waiting for camera...</div>
+    <button id="press-btn2" onclick="doPress()" disabled
+            style="background:#a22;color:#fff;border:none;border-radius:8px;
+                   padding:8px 22px;cursor:pointer;font-weight:800;white-space:nowrap;">
+      🔴 누르기 <span style="font-size:0.75rem;opacity:0.7;">Space</span></button>
+  </div>
+  <!-- 본문 그리드: 좌 = 영상+로그 / 우 = 컨트롤 전체 표시 (양쪽 다 스크롤 없음) -->
+  <div style="display:grid;grid-template-columns:1fr 390px;flex:1;min-height:0;gap:10px;padding:8px;">
+    <div style="display:flex;flex-direction:column;min-width:0;min-height:0;gap:4px;">
+  <!-- 영상: gripper 크게(조준 확인) + 우측 썸네일 3개 세로 -->
+  <div style="display:flex;gap:6px;min-height:0;flex-shrink:0;">
+    <figure style="margin:0;text-align:center;flex:2.6;min-width:0;">
+      <img id="stream" src="/video?cam=gripper" alt="gripper stream"
+           style="width:100%;max-height:46vh;object-fit:contain;background:#000;">
+      <figcaption style="color:#8ad;font-size:0.75rem;">
+        🤏 gripper <span id="tilt-info" style="margin-left:6px;font-weight:700;"></span>
+        <button onclick="rotateCam('gripper')"
+                style="margin-left:6px;background:#334;color:#cdf;border:none;border-radius:5px;padding:1px 8px;cursor:pointer;font-size:0.72rem;">↻</button>
+      </figcaption>
+    </figure>
+    <div style="flex:1;display:flex;flex-direction:column;gap:4px;min-width:0;">
+      <img id="stream-depth" src="/video?cam=depth" alt="depth" title="depth"
+           style="width:100%;background:#000;">
+      <img id="stream-ocr" src="/video?cam=ocr" alt="ocr" title="OCR 입력"
+           style="width:100%;background:#000;">
+      <div style="position:relative;">
+        <img id="stream-body" src="/video?cam=body" alt="body" title="body 전방"
+             style="width:100%;background:#000;display:block;">
+        <button onclick="rotateCam('body')" title="body 회전"
+                style="position:absolute;bottom:3px;right:3px;background:#334a;color:#cdf;border:none;border-radius:4px;padding:1px 7px;cursor:pointer;font-size:0.7rem;">↻</button>
+      </div>
     </div>
   </div>
+  <!-- 판단 로그: 좌컬럼의 남는 높이를 전부 사용 (내용만 내부 스크롤) -->
+  <div style="flex:1;min-height:50px;display:flex;flex-direction:column;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <span style="color:#89a;font-size:0.78rem;font-weight:700;">🧠 판단 로그</span>
+      <a href="/decisions" target="_blank" style="color:#68c;font-size:0.72rem;">전체 열기</a>
+    </div>
+    <pre id="dlog" style="background:#0d1117;color:#9fb;border:1px solid #234;
+         border-radius:8px;padding:6px 10px;flex:1;min-height:0;overflow-y:auto;
+         font-size:0.74rem;line-height:1.45;margin:2px 0 0;white-space:pre-wrap;"></pre>
+  </div>
+  </div><!-- 좌컬럼 끝 -->
+  <div style="display:flex;flex-direction:column;gap:7px;min-height:0;">  <!-- 우컬럼: 컨트롤 전체 표시 -->
 
   <!-- 고정 타겟 팔레트: 인식 여부와 무관하게 항상 선택 가능 -->
   <div id="buttons" style="display:flex;gap:10px;"></div>
-  <script>
-    // [표시 라벨, 모델 토큰] — 화살표는 OCR 차셋의 기호 토큰으로 매핑 (^=▲, s=▼ 추정)
-    const TARGETS = [['1','1'],['2','2'],['3','3'],['4','4'],['5','5'],
-                     ['▲','^'],['▼','s']];
-    let currentTarget = null;   // poll()에서 서버 상태로 갱신
-    (function initPalette() {
-      const box = document.getElementById('buttons');
-      TARGETS.forEach(([label, tok], i) => {
-        const b = document.createElement('button');
-        b.className = 'btn'; b.id = 'tgt-' + i; b.textContent = label;
-        b.dataset.tok = tok;
-        b.style.minWidth = '52px'; b.style.fontSize = '1.2rem';
-        // 재클릭 = 선택 해제 (토글)
-        b.onclick = () => { currentTarget === tok ? resetTarget() : selectButton(tok); };
-        box.appendChild(b);
-      });
-    })();
-  </script>
-  <!-- 동작 행: 크게, 자주 쓰는 것 -->
-  <div style="display:flex;gap:12px;align-items:center;">
-    <button id="press-btn" onclick="doPress()" disabled
-            style="background:#a22;color:#fff;border:none;border-radius:10px;
-                   padding:14px 36px;cursor:pointer;font-size:1.2rem;font-weight:800;">
-      🔴 버튼 누르기</button>
-    <button onclick="setGripper(true)"
-            style="background:#264;color:#cfc;border:none;border-radius:6px;padding:10px 16px;cursor:pointer;">✋ 열기</button>
-    <button onclick="setGripper(false)"
-            style="background:#642;color:#fcc;border:none;border-radius:6px;padding:10px 16px;cursor:pointer;">✊ 닫기</button>
-    <button id="reset" onclick="resetTarget()"
-            style="background:#445;color:#dde;border:none;border-radius:6px;padding:10px 16px;cursor:pointer;">↺ 재선택</button>
+  <!-- 배치 편집기: 엑셀형 격자 — 마우스 전용이라 접이식 (평소 숨김) -->
+  <details style="border:1px solid #26263a;border-radius:8px;padding:3px 8px;">
+    <summary style="cursor:pointer;color:#89a;font-size:0.78rem;">🗺 배치 편집기 (펼치기)</summary>
+  <div style="display:flex;gap:12px;align-items:flex-start;background:#14141b;border-radius:10px;padding:8px 6px;">
+    <span style="color:#567;font-size:0.8rem;padding-top:8px;white-space:nowrap;">🗺 배치</span>
+    <div>
+      <div id="layout-grid" style="display:flex;flex-direction:column;gap:4px;"></div>
+      <div style="display:flex;gap:6px;margin-top:8px;align-items:center;">
+        <button onclick="gridResize(1,0)"  style="background:#2a2a3a;color:#9ab;border:none;border-radius:5px;padding:4px 10px;cursor:pointer;font-size:0.78rem;">행+</button>
+        <button onclick="gridResize(-1,0)" style="background:#2a2a3a;color:#9ab;border:none;border-radius:5px;padding:4px 10px;cursor:pointer;font-size:0.78rem;">행−</button>
+        <button onclick="gridResize(0,1)"  style="background:#2a2a3a;color:#9ab;border:none;border-radius:5px;padding:4px 10px;cursor:pointer;font-size:0.78rem;">열+</button>
+        <button onclick="gridResize(0,-1)" style="background:#2a2a3a;color:#9ab;border:none;border-radius:5px;padding:4px 10px;cursor:pointer;font-size:0.78rem;">열−</button>
+        <button onclick="saveLayout()" style="background:#265;color:#cfd;border:none;border-radius:6px;padding:5px 16px;cursor:pointer;font-weight:700;">저장</button>
+        <span style="color:#678;font-size:0.72rem;">실물 그대로 (위→아래) · 빈 칸은 비워두기</span>
+      </div>
+    </div>
   </div>
-  <!-- 모드 행: 토글류 -->
-  <div style="display:flex;gap:10px;align-items:center;">
-    <span style="color:#567;font-size:0.8rem;">모드</span>
+  </details>
+  <script>
+    // 팔레트 = 홀(▲▼) + 차내(실물 배치 격자, /layout 서버 저장 — UI에서 편집)
+    // 배치가 곧 "버튼 맵" 사전지식: 앵커 한 글자만 읽혀도 나머지 버튼 위치 확정에 쓰임
+    let TARGETS = [];             // [표시라벨, 토큰] — poll()이 상태 갱신에 사용
+    let currentTarget = null;     // poll()에서 서버 상태로 갱신
+    const KEY_HINT = {'1':'1','2':'2','3':'3','4':'4','5':'5','^':'6','s':'7'};
+    function buildPalette(rows) {
+      TARGETS = [['▲','^'],['▼','s']];
+      rows.forEach(r => r.forEach(tok => { if (tok && tok.trim()) TARGETS.push([tok, tok]); }));
+      const box = document.getElementById('buttons');
+      box.innerHTML = '';
+      let idx = 0;
+      const mk = (label, tok) => {
+        const b = document.createElement('button');
+        b.className = 'btn'; b.id = 'tgt-' + (idx++);
+        b.dataset.tok = tok;
+        const key = KEY_HINT[tok];
+        b.innerHTML = label + (key ?
+          `<div style="font-size:0.6rem;color:#79a;font-weight:400;line-height:1;">${key}</div>` : '');
+        b.style.minWidth = '52px';
+        b.style.fontSize = label.length > 1 ? '0.85rem' : '1.2rem';
+        b.onclick = () => { currentTarget === tok ? resetTarget() : selectButton(tok); };
+        return b;
+      };
+      const hall = document.createElement('div');
+      // 실물 호출부처럼 세로 배치: ▲ 위 / ▼ 아래
+      hall.style.cssText = 'display:flex;flex-direction:column;gap:6px;align-items:flex-start;';
+      TARGETS.slice(0, 2).forEach(([l, t]) => hall.appendChild(mk(l, t)));
+      const sep = document.createElement('div');
+      sep.style.cssText = 'width:1px;background:#334;align-self:stretch;margin:0 6px;';
+      const cab = document.createElement('div');
+      cab.style.cssText = 'display:flex;flex-direction:column;gap:6px;';
+      rows.forEach(r => {
+        const rd = document.createElement('div');
+        rd.style.cssText = 'display:flex;gap:6px;';
+        r.forEach(tok => {
+          if (tok && tok.trim()) rd.appendChild(mk(tok, tok));
+          else {   // 빈 칸: 자리를 유지해서 팔레트가 실물 모양 그대로 보이게
+            const sp = document.createElement('div');
+            sp.style.cssText = 'min-width:52px;';
+            rd.appendChild(sp);
+          }
+        });
+        cab.appendChild(rd);
+      });
+      box.appendChild(hall); box.appendChild(sep); box.appendChild(cab);
+    }
+    // ── 배치 편집기 (엑셀형 격자) ──
+    let gridRows = 3, gridCols = 3, gridVals = [];
+    function renderGrid() {
+      const g = document.getElementById('layout-grid');
+      g.innerHTML = '';
+      for (let r = 0; r < gridRows; r++) {
+        const rd = document.createElement('div');
+        rd.style.cssText = 'display:flex;gap:4px;';
+        for (let c = 0; c < gridCols; c++) {
+          const inp = document.createElement('input');
+          inp.id = `lg-${r}-${c}`;
+          inp.value = (gridVals[r] && gridVals[r][c]) || '';
+          inp.placeholder = '·';
+          inp.maxLength = 4;
+          inp.style.cssText = 'width:58px;height:36px;text-align:center;' +
+            'background:#181820;color:#cde;border:1px solid #345;border-radius:7px;font-size:0.9rem;';
+          rd.appendChild(inp);
+        }
+        g.appendChild(rd);
+      }
+    }
+    function syncGridVals() {
+      for (let r = 0; r < gridRows; r++) {
+        gridVals[r] = gridVals[r] || [];
+        for (let c = 0; c < gridCols; c++) {
+          const el = document.getElementById(`lg-${r}-${c}`);
+          if (el) gridVals[r][c] = el.value.trim();
+        }
+      }
+    }
+    function gridResize(dr, dc) {
+      syncGridVals();
+      gridRows = Math.max(1, Math.min(6, gridRows + dr));
+      gridCols = Math.max(1, Math.min(6, gridCols + dc));
+      renderGrid();
+    }
+    function saveLayout() {
+      syncGridVals();
+      const rows = [];
+      for (let r = 0; r < gridRows; r++) {
+        const row = [];
+        for (let c = 0; c < gridCols; c++) row.push((gridVals[r] && gridVals[r][c]) || '');
+        rows.push(row);
+      }
+      fetch('/layout', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({rows})})
+        .then(r => r.json())
+        .then(d => { if (d.ok) buildPalette(d.rows); else alert(d.error); });
+    }
+    function loadLayout() {
+      fetch('/layout').then(r => r.json()).then(d => {
+        const rows = d.rows;
+        gridRows = Math.max(3, rows.length);
+        gridCols = Math.max(3, ...rows.map(r => r.length));
+        gridVals = rows.map(r => r.slice());
+        renderGrid();
+        buildPalette(rows);
+      });
+    }
+    loadLayout();
+  </script>
+  <!-- 동작 행: 컴팩트 — 글자 줄바꿈 금지, 버튼 단위로만 감김 -->
+  <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+    <button id="press-btn" onclick="doPress()" disabled
+            style="background:#a22;color:#fff;border:none;border-radius:8px;white-space:nowrap;
+                   padding:8px 16px;cursor:pointer;font-size:0.95rem;font-weight:800;">
+      🔴 누르기 <span style="font-size:0.72rem;opacity:0.7;">Space</span></button>
+    <button onclick="setGripper(true)"
+            style="background:#264;color:#cfc;border:none;border-radius:6px;padding:7px 10px;cursor:pointer;white-space:nowrap;font-size:0.85rem;">✋ 열기 <span style="font-size:0.7rem;opacity:0.7;">O</span></button>
+    <button onclick="setGripper(false)"
+            style="background:#642;color:#fcc;border:none;border-radius:6px;padding:7px 10px;cursor:pointer;white-space:nowrap;font-size:0.85rem;">✊ 닫기 <span style="font-size:0.7rem;opacity:0.7;">C</span></button>
+    <button id="reset" onclick="resetTarget()"
+            style="background:#445;color:#dde;border:none;border-radius:6px;padding:7px 10px;cursor:pointer;white-space:nowrap;font-size:0.85rem;">↺ 재선택 <span style="font-size:0.7rem;opacity:0.7;">Esc</span></button>
+  </div>
+  <!-- 모드 행: 토글류 (컴팩트) -->
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
     <button id="place-btn" onclick="togglePlace()"
-            style="background:#246;color:#ade;border:none;border-radius:6px;padding:7px 13px;cursor:pointer;font-weight:700;">🏢 홀 (호출 ▲▼)</button>
+            style="background:#246;color:#ade;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-weight:700;white-space:nowrap;font-size:0.85rem;">🏢 홀 (호출 ▲▼)</button>
     <div class="tgl amber" id="align-tgl" onclick="toggleBaseAlign()"
          title="바퀴 이동 허용 (전후진 정렬·회전) — OFF면 바퀴 절대 안 움직임">
-      <span class="tgl-name">🚗 몸체이동</span>
+      <span class="tgl-name">🚗 몸체이동 <span style="font-size:0.7rem;opacity:0.7;">⇧1</span></span>
       <div class="tgl-track"><div class="tgl-knob"></div></div>
       <span class="tgl-state" id="align-state">OFF</span>
     </div>
     <div class="tgl" id="guard-tgl" onclick="toggleGuard()"
          title="라이다 장애물 가드 — 끄면 개발용 위험 모드 (재시작 시 자동 복귀)">
-      <span class="tgl-name">🛡 가드</span>
+      <span class="tgl-name">🛡 가드 <span style="font-size:0.7rem;opacity:0.7;">⇧2</span></span>
       <div class="tgl-track"><div class="tgl-knob"></div></div>
       <span class="tgl-state" id="guard-state">ON</span>
     </div>
-    <button id="pose-btn" onclick="setWristForward()"
-            style="background:#334;color:#cdf;border:none;border-radius:6px;padding:7px 13px;cursor:pointer;">🏠 홈 포즈 (전방+팔접기)</button>
+    <button id="pose-btn" onclick="setWristForward()" title="홈 포즈: 손목 전방 + 팔 완전 수납"
+            style="background:#334;color:#cdf;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;white-space:nowrap;font-size:0.85rem;">🏠 홈 <span style="font-size:0.7rem;opacity:0.7;">H</span></button>
+  </div>
+  <!-- 영점 조절: press가 빗나간 "방향"을 입력 → 십자가 그쪽으로 이동 (파일 영속) -->
+  <div style="display:flex;gap:8px;align-items:center;">
+    <span style="color:#567;font-size:0.8rem;">🎯 영점</span>
+    <span style="color:#89a;font-size:0.75rem;white-space:nowrap;" title="실제 눌린 지점이 버튼 기준 어느 쪽이었는지 (⇧+방향키)">빗나간 방향:</span>
+    <button onclick="aimTrim(0,-1)" style="background:#345;color:#dee;border:none;border-radius:5px;padding:5px 11px;cursor:pointer;">↑</button>
+    <button onclick="aimTrim(0,1)"  style="background:#345;color:#dee;border:none;border-radius:5px;padding:5px 11px;cursor:pointer;">↓</button>
+    <button onclick="aimTrim(-1,0)" style="background:#345;color:#dee;border:none;border-radius:5px;padding:5px 11px;cursor:pointer;">←</button>
+    <button onclick="aimTrim(1,0)"  style="background:#345;color:#dee;border:none;border-radius:5px;padding:5px 11px;cursor:pointer;">→</button>
+    <select id="trim-step" style="background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:4px;">
+      <option value="0.5" selected>0.5cm</option>
+      <option value="1.0">1.0cm</option>
+    </select>
+    <span id="trim-now" style="color:#8ac;font-size:0.78rem;min-width:130px;"></span>
+    <button onclick="aimTrim(0,0,true)" style="background:#434;color:#daa;border:none;border-radius:5px;padding:4px 9px;cursor:pointer;font-size:0.75rem;">리셋</button>
   </div>
   <div id="align-note" style="color:#fc4;font-size:0.9rem;min-height:1.2em;"></div>
 
-  <!-- 판단 로그 패널: 로봇이 "무엇을 감지하고 어떤 행동을 왜 했는지" -->
-  <div style="width:900px;max-width:95vw;">
-    <div style="display:flex;justify-content:space-between;align-items:center;">
-      <span style="color:#89a;font-size:0.85rem;font-weight:700;">🧠 판단 로그</span>
-      <a href="/decisions" target="_blank"
-         style="color:#68c;font-size:0.78rem;">전체 텍스트 열기 (복사용)</a>
-    </div>
-    <pre id="dlog" style="background:#0d1117;color:#9fb;border:1px solid #234;
-         border-radius:8px;padding:8px 12px;height:180px;overflow-y:auto;
-         font-size:0.78rem;line-height:1.5;margin:4px 0;white-space:pre-wrap;"></pre>
-  </div>
   <script>
     setInterval(() => {
       fetch('/decisions').then(r => r.text()).then(t => {
@@ -423,6 +590,8 @@ HTML = """
     }, 1000);
   </script>
 
+  <details style="border:1px solid #26263a;border-radius:8px;padding:3px 8px;">
+    <summary style="cursor:pointer;color:#89a;font-size:0.78rem;">🎚 손목·리프트 슬라이더 (lift는 +/− 키로도 조절)</summary>
   <div id="pitch-row">
     wrist_pitch:
     <input type="range" id="pitch-slider" min="-1.57" max="0.5" step="0.01" value="-0.02"
@@ -440,14 +609,17 @@ HTML = """
     <button id="pitch-apply" onclick="applyYaw()">적용</button>
   </div>
   <div id="pitch-row">
-    lift (높이):
+    lift (높이) <span style="font-size:0.72rem;opacity:0.7;">+/−</span>:
     <input type="range" id="lift-slider" min="0.15" max="1.10" step="0.01" value="0.60"
            oninput="document.getElementById('lift-val').value=parseFloat(this.value).toFixed(2)">
     <input type="number" id="lift-val" value="0.60" step="0.01" min="0.15" max="1.10"
            oninput="document.getElementById('lift-slider').value=this.value">
     <button id="pitch-apply" onclick="applyLift()">적용</button>
   </div>
-  <div id="info">감지된 버튼을 클릭하면 추적을 시작합니다.</div>
+  <div id="info" style="font-size:0.75rem;color:#789;">감지된 버튼을 클릭하면 추적을 시작합니다.</div>
+  </details>
+  </div><!-- 우컬럼 끝 -->
+  </div><!-- 본문 그리드 끝 -->
 
   <script>
     // 파이썬 _label_color와 동일한 규칙 (BGR→RGB 변환된 동일 팔레트)
@@ -508,6 +680,52 @@ HTML = """
       // 손목 각도 + 팔 완전 수납까지 한 번에 (홈 포즈)
       fetch('/wrist_forward', {method:'POST'});
     }
+    function aimTrim(sx, sy, reset=false) {
+      const st = parseFloat(document.getElementById('trim-step').value);
+      fetch('/aim_trim', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(reset ? {reset:true} : {dx_cm: sx*st, dy_cm: sy*st})})
+        .then(r=>r.json()).then(d=>{ showTrim(d.x_cm, d.y_cm); });
+    }
+    function showTrim(x, y) {
+      document.getElementById('trim-now').textContent =
+        (x===0 && y===0) ? '누적 없음'
+        : `누적 x${x>=0?'+':''}${x} y${y>=0?'+':''}${y}cm`;
+    }
+    // ── 키보드 단축키 (e.code 기반: 한/영 전환 상태와 무관) ──
+    // 1~5=층, 6=▲, 7=▼, Space=누르기, Esc=재선택, O/C=그리퍼, H=홈, M=모드,
+    // +/-=lift 미세조정, ⇧1=몸체이동, ⇧2=가드, ⇧방향키=영점 트림
+    // 영점 리셋·가드류는 실수 비용이 커서 ⇧ 조합 또는 마우스 전용
+    const KEY_TOK = {Digit1:'1',Digit2:'2',Digit3:'3',Digit4:'4',Digit5:'5',
+                     Numpad1:'1',Numpad2:'2',Numpad3:'3',Numpad4:'4',Numpad5:'5',
+                     Digit6:'^',Digit7:'s',Numpad6:'^',Numpad7:'s'};
+    function liftNudge(d) {
+      const sl = document.getElementById('lift-slider');
+      const v = Math.max(0.15, Math.min(1.10, parseFloat(sl.value) + d));
+      sl.value = v.toFixed(2);
+      document.getElementById('lift-val').value = v.toFixed(2);
+      applyLift();
+    }
+    document.addEventListener('keydown', e => {
+      const t = e.target.tagName;
+      if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return; // 입력창 보호
+      if (e.shiftKey) {
+        if (e.code === 'Digit1') { toggleBaseAlign(); e.preventDefault(); return; }
+        if (e.code === 'Digit2') { toggleGuard();     e.preventDefault(); return; }
+        const TR = {ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0]};
+        if (TR[e.code]) { aimTrim(...TR[e.code]); e.preventDefault(); }
+        return;
+      }
+      if (e.code === 'Space')  { doPress();          e.preventDefault(); return; }
+      if (e.code === 'Escape') { resetTarget();      return; }
+      if (e.code === 'KeyO')   { setGripper(true);   return; }
+      if (e.code === 'KeyC')   { setGripper(false);  return; }
+      if (e.code === 'KeyH')   { setWristForward();  return; }
+      if (e.code === 'KeyM')   { togglePlace();      return; }
+      if (e.code === 'Equal' || e.code === 'NumpadAdd')      { liftNudge(+0.01); return; }
+      if (e.code === 'Minus' || e.code === 'NumpadSubtract') { liftNudge(-0.01); return; }
+      const tok = KEY_TOK[e.code];
+      if (tok) { currentTarget === tok ? resetTarget() : selectButton(tok); }
+    });
     function applyPitch() {
       const v = parseFloat(document.getElementById('pitch-val').value);
       fetch('/wrist_pitch', {method:'POST',
@@ -557,11 +775,13 @@ HTML = """
           document.getElementById('lift-val').value = s.lift.toFixed(2);
           liftSynced = true;
         }
-        const pbtn = document.getElementById('press-btn');
-        if (pbtn) {
-          pbtn.disabled = s.pressing || !(s.centered && s.dist != null && s.dist <= 0.25);
-          pbtn.style.opacity = pbtn.disabled ? 0.4 : 1.0;
-        }
+        ['press-btn', 'press-btn2'].forEach(pid => {   // 본문 + 상단 고정바 동기
+          const pbtn = document.getElementById(pid);
+          if (pbtn) {
+            pbtn.disabled = s.pressing || !s.ready;   // 서버 READY 래치와 정확히 동기
+            pbtn.style.opacity = pbtn.disabled ? 0.4 : 1.0;
+          }
+        });
         if (s.pressing) {
           banner.textContent = `🤖 ${s.press_status || '누르기 진행 중...'}`;
           banner.className = 'tracking';
@@ -569,9 +789,10 @@ HTML = """
                    (Math.abs(s.ex) > s.dz || Math.abs(s.ey) > s.dz)) {
           banner.textContent = `🟡 정렬 유지 중 — 경계 (x:${s.ex} y:${s.ey}, 허용±${s.dz}px)`;
           banner.className = 'tracking';
-        } else if (s.centered && s.dist != null && s.dist <= 0.25) {
+        } else if (s.ready) {
           const done = (s.press_status && s.press_status.startsWith('✅')) ? '  |  ' + s.press_status : '';
-          banner.textContent = `✅ 준비 완료 — 로봇 정지, '${s.target}' 지금 누르세요  |  거리 ${s.dist}m` + done;
+          banner.textContent = `✅ 준비 완료 — 로봇 정지, '${s.target}' 지금 누르세요  |  거리 ${s.dist}m`
+            + (s.lock_shape ? '  · ⚠모양 추론(글자 미확인)' : '') + done;
           banner.className = 'centered';
         } else if (s.centered) {
           banner.textContent = `🎯 정조준 — 자동 접근 중 (${s.dist!=null ? s.dist+'m' : '?'} → 25cm 도달 시 정지+누르기 활성)`;
@@ -587,12 +808,13 @@ HTML = """
           banner.className = '';
         }
 
+        if (s.trim_x != null) showTrim(s.trim_x, s.trim_y);   // 영점 누적 표시 동기화
         currentTarget = s.target;   // 토글 판단용 서버 상태 동기화
         // 장소 모드: 버튼 라벨 동기화 + 팔레트 활성 범위 (홀=▲▼만 / 차내=숫자만)
         const isHall = s.place !== 'cab';
         const plb = document.getElementById('place-btn');
         if (plb) {
-          plb.textContent = isHall ? '🏢 홀 (호출 ▲▼)' : '🛗 차내 (층 숫자)';
+          plb.textContent = (isHall ? '🏢 홀 (호출 ▲▼)' : '🛗 차내 (층 숫자)') + '  M';
           plb.style.background = isHall ? '#246' : '#453';
           plb.style.color = isHall ? '#ade' : '#fd8';
         }
@@ -678,7 +900,51 @@ def status():
                    wall_flat=s.get("wall_flat"),
                    base_align=s.get("base_align"), align_note=s.get("align_note"),
                    guard_off=s.get("guard_off"), place=s.get("place"),
+                   trim_x=_aim_trim["x_cm"], trim_y=_aim_trim["y_cm"],
+                   ready=bool(s.get("centered") and s.get("press_ready")),
+                   lock_shape=bool(s.get("lock_shape")),
                    dz=_dead_zone_px(s.get("target_dist")))
+
+@app.route("/layout", methods=["GET", "POST"])
+def layout_route():
+    """차내 버튼 배치 조회/수정. rows = [["종","1","4"],["2","5"],["문열림","3"]] 형식."""
+    global _layout_rows
+    if request.method == "POST":
+        rows = (request.json or {}).get("rows")
+        if not (isinstance(rows, list) and rows
+                and all(isinstance(r, list) and r
+                        and all(isinstance(t, str) for t in r)
+                        for r in rows)
+                and any(t.strip() for r in rows for t in r)):
+            return jsonify(ok=False, error="형식 오류 — 버튼이 하나 이상 있어야 합니다"), 400
+        _layout_rows = [[t.strip() for t in r] for r in rows]
+        try:
+            with open(LAYOUT_FILE, "w") as f:
+                json.dump({"rows": _layout_rows}, f, ensure_ascii=False)
+        except Exception:
+            pass
+        node = _node_ref[0]
+        if node:
+            node._map_streak = 0   # 배치가 바뀌면 정합을 처음부터 다시
+            node._dlog("[MAP] 배치 수정: " + " / ".join(" ".join(r) for r in _layout_rows))
+    return jsonify(ok=True, rows=_layout_rows)
+
+@app.route("/aim_trim", methods=["POST"])
+def aim_trim():
+    """영점 트림: {dx_cm, dy_cm} 누적 or {reset: true}. 모든 조작은 판단 로그에 기록."""
+    data = request.json or {}
+    if data.get("reset"):
+        _aim_trim["x_cm"] = _aim_trim["y_cm"] = 0.0
+    else:
+        _aim_trim["x_cm"] = round(_aim_trim["x_cm"] + float(data.get("dx_cm", 0)), 2)
+        _aim_trim["y_cm"] = round(_aim_trim["y_cm"] + float(data.get("dy_cm", 0)), 2)
+    _save_aim_trim()
+    node = _node_ref[0]
+    if node:
+        node._dlog(f"[TRIM] 영점 {'리셋' if data.get('reset') else '보정'} → "
+                   f"누적 x{_aim_trim['x_cm']:+.1f}cm y{_aim_trim['y_cm']:+.1f}cm "
+                   "(+x=오른쪽 +y=아래로 십자 이동)")
+    return jsonify(ok=True, x_cm=_aim_trim["x_cm"], y_cm=_aim_trim["y_cm"])
 
 @app.route("/select", methods=["POST"])
 def select():
@@ -692,6 +958,14 @@ def select():
         state["phase"]       = "TRACK"
         state["centered"]    = False
         state["centered_ts"] = 0.0   # 이전 타겟의 CENTERED 관용 창 무효화
+        state["press_ready"]  = False
+        # X정렬 예산 = "타겟 시도당 16cm" — 이전 시도(특히 SEEK)가 먹은 예산 복구.
+        # 예산 소진으로 자동 OFF됐던 경우엔 자동 재활성 (사용자가 끈 것은 존중)
+        state["base_travel"] = 0.0
+        if state.get("align_auto_off"):
+            state["base_align"]     = True
+            state["align_auto_off"] = False
+            state["align_note"]     = "새 타겟 — X정렬 예산 리셋·자동 재활성"
     node = _node_ref[0]
     if node:
         node._roi_miss  = 0   # 새 타겟 → ROI 집중 추적 즉시 재개 가능
@@ -699,6 +973,19 @@ def select():
         node._target_lock = None   # 위치 잠금도 새로 시작
         node._rot_count   = 0      # 수직 정렬 시도 횟수 리셋
         node._dlog(f"[TARGET] '{text}' 선택 — 탐색·정렬·접근 시작")
+        # 인터락: 팔 고정(armleft)과의 트래젝토리 goal 선점 전쟁 방지 —
+        # 타겟 작업 시작 시 대시보드에 자동 해제 요청 (꺼져 있으면 조용히 무시)
+        def _stop_armleft():
+            try:
+                import urllib.request
+                urllib.request.urlopen(urllib.request.Request(
+                    "http://localhost:8080/armleft",
+                    data=b'{"running": false}',
+                    headers={"Content-Type": "application/json"},
+                    method="POST"), timeout=1)
+            except Exception:
+                pass
+        threading.Thread(target=_stop_armleft, daemon=True).start()
         if USE_HEIGHT_PRIOR:
             prior = LIFT_PRIOR_CALL if _pl0 == "hall" else LIFT_PRIOR_PANEL
             with state_lock:
@@ -763,6 +1050,7 @@ def place_toggle():
         state["target_text"] = None
         state["phase"]       = "SELECT"
         state["centered"]    = False
+        state["press_ready"]  = False
     node = _node_ref[0]
     if node:
         node._dlog(f"[MODE] 장소: {'🛗 차내 (층 숫자)' if pl == 'cab' else '🏢 홀 (호출 ▲▼)'}")
@@ -812,6 +1100,7 @@ def reset():
         state["target_text"] = None
         state["phase"]       = "SELECT"
         state["centered"]    = False
+        state["press_ready"]  = False
     return jsonify(ok=True)
 
 @app.route("/wrist_forward", methods=["POST"])
@@ -959,7 +1248,8 @@ class ElevatorTracker(Node):
                 return False   # 몸체 이동 마스터 스위치 OFF — 바퀴 절대 금지
         if not guard_off:
             c = self._clearance(direction)
-            if c is None or c < CLEAR_DIST:
+            # 이동량 비례 가드: 이동 후에도 CLEAR_MARGIN 이격이 남으면 허용
+            if c is None or c < abs(move_m) + CLEAR_MARGIN:
                 return False
         # 오도메트리 피드백: 실제 이동 거리를 재면서 목표 도달 시 정지
         # (시간 제어는 정지마찰 때문에 5mm 명령→2mm 실주행 같은 언더슈트 발생 — 실측)
@@ -970,7 +1260,7 @@ class ElevatorTracker(Node):
         while time.time() - t0 < timeout:
             if not guard_off:
                 c = self._clearance(direction)
-                if c is not None and c < CLEAR_DIST:
+                if c is not None and c < CLEAR_MARGIN:   # 이동 중 최소 이격 침범 → 즉시 정지
                     self._cmd_pub.publish(Twist())
                     return False
             if start_xy is not None and self._odom_xy is not None:
@@ -1042,9 +1332,11 @@ class ElevatorTracker(Node):
             # 상한 도달 → X정렬 자동 OFF (메시지 반복 방지). 재활성화하면 누적 리셋됨.
             with state_lock:
                 state["base_align"] = False
+                state["align_auto_off"] = True   # 예산 소진 OFF — 사용자 OFF와 구분,
+                                                 # 새 타겟 선택 시 자동 재활성 대상
             self._set_align_note(
                 f"누적 이동 {travel*100:.0f}cm 초과 — X정렬 자동 OFF. "
-                "로봇 주차 위치를 옮긴 뒤 다시 켜세요.")
+                "로봇 주차 위치를 옮긴 뒤 다시 켜세요. (새 타겟 선택 시 자동 복구)")
             return
         d = dist if (dist and 0.1 < dist < 1.0) else 0.30
         # 이득 0.7: 오차 전부가 아니라 70%만 이동 (과보정→반대편 튐→진동 방지)
@@ -1065,8 +1357,11 @@ class ElevatorTracker(Node):
                 clear = self._clearance(direction)
                 if clear is None:
                     self._set_align_note("라이다 미수신 — 이동 불가"); return
-                if clear < CLEAR_DIST:
-                    self._set_align_note(f"⚠ {side} {clear:.2f}m — 막힘, 이동 보류"); return
+                # 이동량 비례 가드: 이동 후에도 CLEAR_MARGIN 이격이 남으면 허용
+                if clear < abs(move_m) + CLEAR_MARGIN:
+                    self._set_align_note(
+                        f"⚠ {side} {clear:.2f}m — 막힘, 이동 보류 "
+                        f"(필요 {abs(move_m)+CLEAR_MARGIN:.2f}m)"); return
 
             dur = abs(move_m) / BASE_SPEED
             msg = Twist(); msg.linear.x = direction * BASE_SPEED
@@ -1075,7 +1370,7 @@ class ElevatorTracker(Node):
             while time.time() - t0 < dur:
                 if not guard_off:
                     c = self._clearance(direction)       # 이동 중에도 계속 감시
-                    if c is not None and c < CLEAR_DIST:
+                    if c is not None and c < CLEAR_MARGIN:   # 최소 이격 침범 → 즉시 정지
                         self._set_align_note(f"⚠ 이동 중 {side} 막힘 — 즉시 정지")
                         aborted = True
                         break
@@ -1210,12 +1505,288 @@ class ElevatorTracker(Node):
         return D if 0.05 < D < 1.5 else None
 
     def _is_press_ready(self) -> bool:
-        """정조준 + 누르기 가능 거리 = '클릭 대기' 상태.
+        """정조준 + 누르기 가능 거리 = '클릭 대기' 상태 (히스테리시스 래치).
         이때는 모든 자동 이동을 동결한다 — 사용자가 누를 표적이 움직이면
         클릭 타이밍을 잡을 수 없음. 클릭하면 press 시퀀스가 이어받는다."""
         with state_lock:
-            return (state["centered"] and state["target_dist"] is not None
-                    and state["target_dist"] <= PRESS_READY_DIST)
+            return bool(state["centered"] and state.get("press_ready"))
+
+    def _apply_button_map(self, detections, raw_dets, place0):
+        """버튼 맵 정합: 탐지 박스들을 실물 배치(_layout_rows)에 사상해서
+        글자가 안 읽힌 버튼의 정체를 위치로 확정한 합성 탐지를 추가.
+
+        오독 앵커 방어 3중:
+        ① 모양 모순 — 앵커 가설로 사상했을 때 격자 밖으로 나가는 박스는 감점
+        ② belief 가중 투표 — 여러 앵커가 충돌하면 (읽힌 글자들의 일치 합)이 큰 가설 승
+        ③ 2프레임 연속 같은 정합일 때만 발동 — 지나가는 오독 1방 무시
+        """
+        rows = _layout_rows
+        if place0 != "cab" or not rows:
+            return detections
+        boxes = [d for d in raw_dets if d.get("score", 0) >= 0.4]
+        # ③ depth 유효 박스가 3개+면 depth 미측정 박스는 격자에서 제외 —
+        # 원거리 오탐(멀리 있는 '6', depth None으로 1.5m 필터 통과)이 격자·피치를
+        # 오염시키던 것 방지. 유효 박스가 적으면(depth 전반 실패) 기존 동작 유지
+        _bv = [d for d in boxes
+               if self._depth_at(int((d["box"]["x1"] + d["box"]["x2"]) / 2),
+                                 int((d["box"]["y1"] + d["box"]["y2"]) / 2))
+               is not None]
+        if len(_bv) >= 3:
+            boxes = _bv
+        if len(boxes) < 3:
+            return detections
+        # 1) 버튼 피치(간격) 추정 — 픽셀 기하 정합의 자(尺).
+        # 순번(몇 번째 박스) 기반이 아니라 픽셀 거리 기반이라, 그리퍼가 일부
+        # 버튼을 가려도 나머지 박스의 셀 판정이 밀리지 않는다 (가림 면역).
+        bs = sorted(boxes, key=lambda d: (d["box"]["y1"] + d["box"]["y2"]) / 2)
+        med_w = float(np.median([d["box"]["x2"] - d["box"]["x1"] for d in boxes]))
+        med_h = float(np.median([d["box"]["y2"] - d["box"]["y1"] for d in boxes]))
+        tol = max(10.0, med_h * 0.7)
+        obs_rows: list = []
+        for d in bs:
+            cy = (d["box"]["y1"] + d["box"]["y2"]) / 2
+            if obs_rows and abs(cy - obs_rows[-1]["cy"]) <= tol:
+                obs_rows[-1]["items"].append(d)
+                n = len(obs_rows[-1]["items"])
+                obs_rows[-1]["cy"] += (cy - obs_rows[-1]["cy"]) / n
+            else:
+                obs_rows.append({"cy": cy, "items": [d]})
+        xg, yg = [], []
+        for r in obs_rows:
+            cs = sorted((d["box"]["x1"] + d["box"]["x2"]) / 2 for d in r["items"])
+            xg += [b - a for a, b in zip(cs, cs[1:])]
+        rcys = [r["cy"] for r in obs_rows]
+        yg = [b - a for a, b in zip(rcys, rcys[1:])]
+        pitch_x = float(np.median(xg)) if xg else med_w * 1.6
+        pitch_y = float(np.median(yg)) if yg else med_h * 1.6
+        if pitch_x < med_w * 0.8:   # 겹침 등 비정상 측정 방어
+            pitch_x = med_w * 1.6
+        if pitch_y < med_h * 0.8:
+            pitch_y = med_h * 1.6
+
+        def _ctr(d):
+            return ((d["box"]["x1"] + d["box"]["x2"]) / 2,
+                    (d["box"]["y1"] + d["box"]["y2"]) / 2)
+
+        # 2) 앵커: 읽힌 글자가 배치에 존재하는 탐지 (belief 0.45+)
+        cell_of = {tok: (ri, ci) for ri, row in enumerate(rows)
+                   for ci, tok in enumerate(row) if tok.strip()}
+        anchors = [(d, d.get("text", "").strip()) for d in detections
+                   if d.get("text", "").strip() in cell_of
+                   and d.get("belief", 0) >= 0.45]
+        if not anchors:
+            # ── 모양 전용 정합 (판독 가뭄 폴백) ──────────────────────────────
+            # 글자가 하나도 안 읽혀도 박스 패턴이 배치와 "유일하게" 끼워 맞으면
+            # 라벨 추론. 실측 동기: 차내에서 박스 5개가 배치 패턴 그대로 잡혔는데
+            # 앵커 부재로 몇 분간 침묵 (2026-07-15 11:21). 채택 조건이 앵커
+            # 정합보다 훨씬 엄격: 하드 모순 0 + 유일해 + 박스 5개+ + 2프레임.
+            # 라벨은 belief 0.5 + shape 표식 (화면 '?' 접두, 잠금 시 배너 표시).
+            if len(boxes) < 5:
+                self._map_streak = 0
+                return detections
+            fits = []
+            b0 = boxes[0]
+            b0x, b0y = _ctr(b0)
+            for tok0, (r0, c0) in cell_of.items():
+                # 가설: "박스0 = 셀 (r0,c0)" — 전 박스가 무모순으로 들어맞아야 생존
+                assign: dict = {}
+                ok = True
+                for bd in boxes:
+                    bx, by = _ctr(bd)
+                    fc = c0 + (bx - b0x) / pitch_x
+                    fr = r0 + (by - b0y) / pitch_y
+                    c2, r2 = round(fc), round(fr)
+                    if (abs(fc - c2) > 0.35 or abs(fr - r2) > 0.35
+                            or not (0 <= r2 < len(rows) and 0 <= c2 < len(rows[r2]))
+                            or not rows[r2][c2].strip()
+                            or (r2, c2) in assign):
+                        ok = False
+                        break
+                    assign[(r2, c2)] = bd
+                if ok and len(assign) >= 5:
+                    key = tuple(sorted(rc for rc in assign))
+                    if key not in [k for k, _ in fits]:
+                        fits.append((key, assign))
+            if len(fits) != 1:
+                if time.time() - getattr(self, "_shape_log_ts", 0) > 8.0:
+                    self._shape_log_ts = time.time()
+                    self._dlog("[MAP] 모양 정합 보류 — "
+                               + (f"배치 일치 {len(fits)}가지 (모호)" if fits
+                                  else "무모순 일치 없음")
+                               + f" (박스 {len(boxes)}개, 앵커 0개)")
+                self._map_streak = 0
+                return detections
+            _assign_s = fits[0][1]
+            matched_s = [(bd, rows[r][c].strip())
+                         for (r, c), bd in _assign_s.items()]
+            sig = ("SHAPE",) + tuple(sorted(tok for _, tok in matched_s))
+            if getattr(self, "_map_sig", None) == sig:
+                self._map_streak = getattr(self, "_map_streak", 0) + 1
+            else:
+                self._map_sig, self._map_streak = sig, 1
+            if self._map_streak < 2:
+                return detections
+            # 유도용 셀 좌표 (점프 가드는 앵커 정합과 동일 적용)
+            (r_a, c_a), bd_a = next(iter(_assign_s.items()))
+            _bax, _bay = _ctr(bd_a)
+            _nc = {tok.strip(): (_bax + (ci - c_a) * pitch_x,
+                                 _bay + (ri - r_a) * pitch_y)
+                   for ri, row in enumerate(rows)
+                   for ci, tok in enumerate(row) if tok.strip()}
+            _oldc = getattr(self, "_map_cells", None)
+            _acc = True
+            if _oldc and time.time() - getattr(self, "_map_cells_ts", 0) < 12.0:
+                _sh = set(_nc) & set(_oldc)
+                if _sh and max(abs(_nc[t][0] - _oldc[t][0])
+                               + abs(_nc[t][1] - _oldc[t][1]) for t in _sh) > 100.0:
+                    _pd = getattr(self, "_cells_pending", None)
+                    _acc = bool(_pd and all(
+                        t in _nc and abs(_nc[t][0] - _pd[t][0])
+                        + abs(_nc[t][1] - _pd[t][1]) < 60.0 for t in _pd))
+                    if not _acc:
+                        self._cells_pending = _nc
+            if _acc:
+                self._map_cells, self._map_cells_ts = _nc, time.time()
+                self._cells_pending = None
+            out = list(detections)
+            _added_s = []
+            for bd, tok in matched_s:
+                synth = dict(bd)
+                synth["text"] = tok
+                synth["belief"] = 0.5
+                synth["shape"] = True   # 모양 추론 표식 — 화면 '?' 접두, 잠금 배너 표시
+                out.append(synth)
+                _added_s.append(tok)
+            if time.time() - getattr(self, "_map_log_ts", 0) > 5.0:
+                self._map_log_ts = time.time()
+                self._dlog(f"[MAP] 모양 전용 정합 (앵커 0, 박스 {len(boxes)}개 유일 일치, "
+                           f"streak {self._map_streak}) → {', '.join(_added_s)} 위치 추론")
+            return out
+        # 3) 가설 채점: 앵커 셀 기준으로 각 박스의 (행,열)을 "픽셀 거리/피치"로
+        # 직접 계산 → 격자점에서 벗어남/빈 칸 위/한 칸 중복 = 모순 감점,
+        # 읽힌 글자와 배치 일치 = belief 가중 투표
+        scored = []
+        for ad, at in anchors:
+            ar, ac = cell_of[at]
+            ax, ay = _ctr(ad)
+            assign: dict = {}
+            conflicts, votes = 0.0, 0.0
+            _gr_h, _gr_w = len(rows), max(len(r) for r in rows)
+            for bd in boxes:
+                bx, by = _ctr(bd)
+                fc = ac + (bx - ax) / pitch_x
+                fr = ar + (by - ay) / pitch_y
+                c2, r2 = round(fc), round(fr)
+                res = abs(fc - c2) + abs(fr - r2)
+                # 패널 영역에서 멀리 떨어진 박스는 "무관" (감점 0) — 실물 환경의
+                # 원거리 요소가 올바른 정합까지 깎아내리던 것 방지. 격자 근처
+                # (앵커 기준 한 격자 폭 이내)의 이탈만 모양 모순으로 취급
+                _near = (abs(fr - ar) < _gr_h + 0.6 and abs(fc - ac) < _gr_w + 0.6)
+                if abs(fc - c2) > 0.35 or abs(fr - r2) > 0.35:
+                    if _near:
+                        conflicts += 1.0      # 격자점에서 벗어난 근처 박스 = 불일치
+                    continue
+                if not (0 <= r2 < len(rows) and 0 <= c2 < len(rows[r2])) \
+                        or not rows[r2][c2].strip():
+                    if _near:
+                        conflicts += 1.0      # 격자 밖/빈 칸 위 (근처) = 모양 모순
+                    continue
+                if (r2, c2) in assign:
+                    conflicts += 1.0          # 한 칸에 박스 둘 = 모순 (가까운 쪽 유지)
+                    if assign[(r2, c2)][1] <= res:
+                        continue
+                assign[(r2, c2)] = (bd, res)
+            matched = [(bd, rows[r][c].strip())
+                       for (r, c), (bd, _) in assign.items()]
+            for bd, tok in matched:
+                bt = bd.get("text", "").strip()
+                if bt in cell_of:
+                    if bt == tok:
+                        votes += bd.get("belief", 0.3)
+                    else:
+                        # 글자 불일치 감점은 belief 비례 — 저신뢰 오독(실물 금속에서
+                        # 프레임마다 다발)이 올바른 정합 점수를 인플레이션 감점하던 것
+                        # 방지. 고신뢰 판독과의 모순만 크게 친다
+                        conflicts += min(1.0, bd.get("belief", 0.3))
+            score = len(matched) + votes * 2.0 - conflicts * 2.0
+            scored.append((score, matched, ad, at))
+        # ── 모순 판독 강등 ("1이 맨 윗줄에 잡히면 안 된다" — 사용자 설계) ──
+        # 자기 가설 점수가 명백히 음수 = 그 판독이 맞다면 박스들이 배치와
+        # 기하적으로 모순 → 오독 확정. 삭제하지 않고 강등만: 잠금·앵커 후보
+        # 제외 + 화면 회색(x접두) 표시. 오판 시에도 정보 손실 없음.
+        # 안전장치: 박스 5개+(구조 증거 충분) / belief 0.8+ 판독은 불가침
+        if len(boxes) >= 5:
+            for score, _m, ad, at in scored:
+                if score < -2.0 and ad.get("belief", 0) < 0.8 \
+                        and not ad.get("suspect"):   # 문턱 -2: 경계선 아군 오사 방지
+                    ad["suspect"] = True
+                    if time.time() - getattr(self, "_suspect_log_ts", 0) > 5.0:
+                        self._suspect_log_ts = time.time()
+                        self._dlog(f"[MAP] '{at}' 판독 강등 — 위치가 배치와 모순 "
+                                   "(잠금 후보 제외)")
+        alive = [t for t in scored if not t[2].get("suspect")]
+        if not alive:
+            self._map_streak = 0
+            return detections
+        score, matched, ad_best, at = max(alive, key=lambda x: x[0])
+        if score < 4.0 or len(matched) < 3:
+            self._map_streak = 0
+            return detections
+        sig = tuple(sorted(tok for _, tok in matched))
+        if getattr(self, "_map_sig", None) == sig:
+            self._map_streak = getattr(self, "_map_streak", 0) + 1
+        else:
+            self._map_sig, self._map_streak = sig, 1
+        if self._map_streak < 2:
+            return detections
+        # 맵 유도 탐색용: 모든 셀(가려진 버튼 포함)의 예상 화면 좌표 저장 —
+        # 타겟이 안 보일 때 SEEK가 군집 중심 대신 이 좌표로 시야를 유도
+        _axp, _ayp = _ctr(ad_best)
+        _arb, _acb = cell_of[at]
+        _nc = {
+            tok.strip(): (_axp + (ci - _acb) * pitch_x,
+                          _ayp + (ri - _arb) * pitch_y)
+            for ri, row in enumerate(rows)
+            for ci, tok in enumerate(row) if tok.strip()}
+        # ② 점프 가드: 약한/오독 앵커가 이긴 프레임에 유도 좌표가 100px+ 점프해
+        # 로봇을 엉뚱한 곳으로 끌던 것(y-119px 점프 실측, 16:40:35) 방지 —
+        # 큰 점프는 연속 2회 같은 곳을 가리킬 때만 수용, 아니면 이전 좌표 유지
+        _oldc = getattr(self, "_map_cells", None)
+        _accept = True
+        if _oldc and time.time() - getattr(self, "_map_cells_ts", 0) < 12.0:
+            _shared = set(_nc) & set(_oldc)
+            if _shared and max(
+                    abs(_nc[t][0] - _oldc[t][0]) + abs(_nc[t][1] - _oldc[t][1])
+                    for t in _shared) > 100.0:
+                _pd = getattr(self, "_cells_pending", None)
+                _accept = bool(_pd and all(
+                    t in _nc and abs(_nc[t][0] - _pd[t][0])
+                    + abs(_nc[t][1] - _pd[t][1]) < 60.0 for t in _pd))
+                if not _accept:
+                    self._cells_pending = _nc
+        if _accept:
+            self._map_cells = _nc
+            self._map_cells_ts = time.time()
+            self._cells_pending = None
+        # 4) 아직 정체 없는 셀에 합성 탐지 부여 (진짜 관측은 건드리지 않음)
+        # 강등(suspect)된 판독은 이름 선점권 없음 — 진짜 자리에 맵 라벨이 붙게
+        have = {d.get("text", "").strip() for d in detections
+                if not d.get("suspect")}
+        out = list(detections)
+        added = []
+        for bd, tok in matched:
+            if tok in have or bd.get("text", "").strip() == tok:
+                continue
+            synth = dict(bd)
+            synth["text"] = tok
+            synth["belief"] = max(0.5, min(0.75, bd.get("belief", 0.3)))
+            out.append(synth)
+            have.add(tok)
+            added.append(tok)
+        if added and time.time() - getattr(self, "_map_log_ts", 0) > 5.0:
+            self._map_log_ts = time.time()
+            self._dlog(f"[MAP] 배치 정합 (앵커 '{at}') → {', '.join(added)} 위치 확정")
+        return out
 
     def _on_image(self, msg):
         try:
@@ -1486,7 +2057,15 @@ class ElevatorTracker(Node):
                 self._dlog(f"[FILTER] 원거리(>{DET_MAX_DEPTH}m) 오탐 {_n_cut}개 제거")
 
             # 패널 단서 저장: "버튼처럼 생긴 것"들의 박스 (표시 좌표계, 원거리 추적용)
-            self._panel_boxes = [d["box"] for d in raw_dets]
+            # ③ depth 유효 박스 3개+면 미측정 박스 제외 — 원거리 오탐이 군집 중심을
+            # 끌어당기던 것 방지 (전반 실패 시엔 전부 유지)
+            _pb_ok, _pb_no = [], []
+            for d in raw_dets:
+                _b = d["box"]
+                _z = self._depth_at(int((_b["x1"] + _b["x2"]) / 2),
+                                    int((_b["y1"] + _b["y2"]) / 2))
+                (_pb_ok if _z is not None else _pb_no).append(_b)
+            self._panel_boxes = _pb_ok if len(_pb_ok) >= 3 else (_pb_ok + _pb_no)
             self._panel_ts    = time.time()
 
             # ── 화살표(호출 버튼) 위치 휴리스틱 ──
@@ -1527,6 +2106,23 @@ class ElevatorTracker(Node):
                     synth["text"]   = tgt0
                     synth["belief"] = max(0.5, pick.get("belief", 0))
                     detections = detections + [synth]
+            # ── 문 심볼 별칭: ◄► 를 OCR이 '<>','><' 등으로 잘 읽음 (실측 belief 0.90).
+            # 차내 배치에 문열림이 있으면 최고 belief 심볼 판독을 문열림 후보로 승격 —
+            # 합성 의존을 벗어나 직접 잠금·앵커 가능. 위치가 배치와 모순이면
+            # 아래 맵의 강등 검증이 걸러줌 (안전장치 동일 적용)
+            if place0 == "cab" and any("문열림" in r for r in _layout_rows) \
+                    and not any(d.get("text") == "문열림" for d in detections):
+                _door = [d for d in raw_dets
+                         if d.get("text", "").strip() in ("<", ">", "<>", "><")
+                         and d.get("score", 0) >= 0.4]
+                if _door:
+                    _alias = dict(max(_door, key=lambda d: d.get("belief", 0)))
+                    _alias["text"] = "문열림"
+                    detections = detections + [_alias]
+
+            # ── 버튼 맵: 차내에서 배치 사전지식으로 안 읽힌 버튼의 정체 확정 ──
+            detections = self._apply_button_map(detections, raw_dets, place0)
+
             if roi is None and tgt0 and any(d["text"] == tgt0 for d in detections):
                 self._roi_miss = 0   # 전체화면에서 재발견 → ROI 재개
 
@@ -1539,7 +2135,8 @@ class ElevatorTracker(Node):
             # 한 번 잡은 타겟은 위치를 잠그고, 이후 같은 글자는 그 근처에서 온 것만 인정.
             # 멀리서 갑자기 나타난 동명이인(예: '2'가 '3'으로 오독)은 참칭으로 무시.
             if tgt0:
-                cands = [d for d in detections if d["text"] == tgt0]
+                cands = [d for d in detections
+                         if d["text"] == tgt0 and not d.get("suspect")]
                 lk = getattr(self, "_target_lock", None)
                 chosen = None
                 if cands:
@@ -1592,13 +2189,16 @@ class ElevatorTracker(Node):
                         "ts": now,
                         "born": now if _new_lock else lk["born"],
                         "bel": (0.7 * prev + 0.3 * new_b) if prev is not None else new_b}
+                    with state_lock:
+                        state["lock_shape"] = bool(chosen.get("shape"))
                     if _new_lock:
                         # 잠금 대상까지의 depth를 남김 — 원거리 오탐(복도 건너편 물체)에
-                        # 잠긴 것인지 로그만으로 판별 가능하게
+                        # 잠긴 것인지 로그만으로 판별 가능하게. 모양 추론 근거면 명시
                         _zl = self._depth_at(int(self._target_lock["cx"]),
                                              int(self._target_lock["cy"]))
                         self._dlog(f"[LOCK] '{tgt0}' 잠금 생성 (belief {new_b:.2f}, "
-                                   f"depth {f'{_zl:.2f}m' if _zl else '?'})")
+                                   f"depth {f'{_zl:.2f}m' if _zl else '?'}"
+                                   f"{', 모양 추론' if chosen.get('shape') else ''})")
                 # 참칭 후보(선택 안 된 동명이인)는 기억·화면에서 제외
                 detections = [d for d in detections
                               if d["text"] != tgt0 or d is chosen]
@@ -1675,6 +2275,8 @@ class ElevatorTracker(Node):
             is_target = (phase == "TRACK" and d["text"] == target)
             fresh = d.get("fresh", True)
             color = (0,0,255) if is_target else _label_color(d["text"])
+            if d.get("suspect"):
+                color = (128, 128, 128)   # 강등 판독은 회색 (잠금 후보 아님)
             # 유지(coast) 중인 박스는 얇게 + 라벨에 ~ 접두사
             cv2.rectangle(vis, (x1,y1), (x2,y2), color,
                           (3 if is_target else 2) if fresh else 1)
@@ -1683,10 +2285,16 @@ class ElevatorTracker(Node):
             dist = self._depth_at(bcx, bcy)
             dist_txt = f"{dist:.2f}m" if dist else "?m"
             # 라벨 정리: 목표만 상세(점수/거리), 나머지는 숫자만 작게 — 화면 가림 방지
+            # 한글 별칭: cv2는 한글 폰트를 못 그려 '?'로 깨짐 → 오버레이만 영문 표기
+            _disp = _OVERLAY_ALIAS.get(d["text"], d["text"])
+            if d.get("suspect"):
+                _disp = "x" + _disp   # 배치 모순으로 강등된 판독 표시
+            elif d.get("shape"):
+                _disp = "?" + _disp   # 모양 추론 라벨 (글자 미확인 — 배치 패턴 근거)
             if is_target:
-                label, fs, bh = f"{'~' if not fresh else ''}{d['text']} {d['score']:.2f} {dist_txt}", 0.5, 20
+                label, fs, bh = f"{'~' if not fresh else ''}{_disp} {d['score']:.2f} {dist_txt}", 0.5, 20
             else:
-                label, fs, bh = f"{'~' if not fresh else ''}{d['text']}", 0.45, 15
+                label, fs, bh = f"{'~' if not fresh else ''}{_disp}", 0.45, 15
             bw = int(len(label) * 18 * fs)
             cv2.rectangle(vis, (x1, y1-bh), (x1+bw, y1), color, -1)
             cv2.putText(vis, label, (x1+2, y1-4),
@@ -1771,9 +2379,15 @@ class ElevatorTracker(Node):
         # ── 자동 수직 정렬: 벽 기울기(평면 검증 통과)가 4° 넘으면 그만큼 제자리 회전 ──
         # tilt<0(왼쪽이 멂) → 시계방향("오른쪽으로") / tilt>0 → 반시계. 재측정 반복 수렴.
         _rot_ok = False
+        with state_lock:
+            _ext_rot = state["arm_ext"]
         if (_flat and _tilt is not None and abs(_tilt) > 4.0
                 and not self._nudging
                 and not self._is_press_ready()   # 클릭 대기 중엔 회전 금지 (동결)
+                # 접근 시작 후(팔 뻗음)에도 회전 금지 — 회전은 팔을 접으므로 접근을
+                # 통째로 버리게 됨. READY 직후 CENTERED 한 프레임 깜빡임을 회전이
+                # 비집고 들어와 동결을 뚫던 실측 사례(10:26:45) 차단
+                and (_ext_rot is None or _ext_rot < 0.05)
                 and getattr(self, "_rot_count", 0) < 4
                 and self._may_explore()
                 and time.time() - getattr(self, "_rot_ts", 0) > 3.0):
@@ -1805,7 +2419,8 @@ class ElevatorTracker(Node):
                 return
         if _flat and _tilt is not None and abs(_tilt) <= 3.0:
             self._rot_count = 0   # 수직 유지 중이면 카운터 회복
-        det = next((d for d in detections if d["text"] == target), None)
+        det = next((d for d in detections
+                    if d["text"] == target and not d.get("suspect")), None)
         # [A안] 관측 신뢰 규칙: fresh거나, "그 관측 이후 로봇이 안 움직였다면" 8초까지 유효.
         # (버튼은 정지해 있고 자기 이동은 전부 기록됨 — 시각은 간헐적 교정자면 충분)
         # 단 "같은 관측으로는 1회만" 행동 — 낡은 박스 기반 반복 이동(폭주) 방지.
@@ -1821,6 +2436,42 @@ class ElevatorTracker(Node):
             # 클릭 대기(누르기 활성) 중엔 인식이 끊겨도 SEEK/스캔으로 움직이지 않음 — 동결 유지
             if self._is_press_ready():
                 return
+            # ── 판독 없는 접근 지속: CENTERED 래치 + 잠금 20초 이내면 남은 접근은
+            # depth만으로 진행. 문 심볼처럼 판독이 드문(1분/회 실측) 타겟이
+            # "한 스텝 가고 정지"하던 것 해결 — 판독 1회로 READY까지 완주 가능
+            with state_lock:
+                _cent_hold = state["centered"]
+            _lk_c = getattr(self, "_target_lock", None)
+            if (_cent_hold and _lk_c and time.time() - _lk_c["ts"] < 20.0
+                    and self._goal_done and not self._nudging
+                    and time.time() - getattr(self, "_approach_sent", 0) > 1.5):
+                _oxc, _oyc = _aim_offsets(tdist)
+                _dlc = self._depth_at(CX + _oxc, CY + _oyc)
+                # ① 접근 완료 시 READY 래치 — 판독 없는 마지막 구간에서도 개찰구가
+                # 열리게 (0.24m 도달하고도 READY 미발동으로 완주 실패하던 것, 16:40 실측).
+                # 동결 덕에 조준은 CENTERED 시점 그대로고, 클릭 시 재검증은 유지됨.
+                if _dlc and _dlc <= PRESS_READY_DIST:
+                    with state_lock:
+                        _was_r2 = state.get("press_ready", False)
+                        state["press_ready"] = True
+                    if not _was_r2:
+                        self._dlog(f"[READY] 누르기 활성 ({_dlc:.2f}m, 잠금 유지 접근 완료) — "
+                                   "자동 이동 전체 동결, 클릭 대기")
+                    return
+                if _dlc and _dlc > PRESS_CLOSE_DIST + 0.03:
+                    with state_lock:
+                        _extc = state["arm_ext"]
+                    if _extc is not None and float(_extc) < ARM_EXT_MAX - 0.005:
+                        _stepc = max(0.02, min(0.06,
+                                     0.35 * (_dlc - PRESS_CLOSE_DIST)))
+                        _stepc = min(_stepc, _dlc - PRESS_CLOSE_DIST)
+                        self._approach_sent = time.time()
+                        self._dlog(f"[APPROACH] 자동 접근(depth, 잠금 유지) "
+                                   f"+{_stepc*100:.0f}cm (버튼 {_dlc:.2f}m)")
+                        self._send_goal([ARM_JOINT],
+                            [max(ARM_EXT_MIN, min(ARM_EXT_MAX,
+                                                  float(_extc) + _stepc))])
+                        return
             # [진동 방지] 방금(4초 내)까지 그 자리에서 타겟을 봤으면 — 움직이지 말고
             # 재인식을 기다린다. (정렬 위치에서 일시적으로 안 읽힐 때, 군집 추적이
             # 시야를 끌고 내려가 "내려가면 읽히고 올라가면 놓치는" 무한 왕복 방지)
@@ -1828,11 +2479,96 @@ class ElevatorTracker(Node):
             if lk_hold and time.time() - lk_hold["ts"] < 4.0:
                 return
 
+            # ── 맵 유도 탐색: 타겟이 배치에 있고 맵 정합이 신선하면, 군집 중심이
+            # 아니라 "맵이 예측한 타겟 위치"로 시야를 유도. 가장자리 버튼(문열림 등)
+            # 에서 군집 추적과 타겟 서보가 반대로 끌던 줄다리기(예산 2회 소진 실측,
+            # 15:55~15:57) 제거 — 두 컨트롤러가 같은 지점을 향하게 함.
+            _mc = getattr(self, "_map_cells", None)
+            if (_mc and target in _mc
+                    # 신선도 12초: 앵커 판독 주기(5~10초 실측)보다 길게 — 3초였을 땐
+                    # 판독 사이 공백에 군집 SEEK가 하이재킹해서 문열림을 놓침 (16:29 실측).
+                    # 12초 넘게 정합이 끊기면(진짜 실종) 군집 SEEK가 재획득 담당.
+                    # 그 사이 이동은 지글(±22px)·정렬 스텝(±35px)뿐이라 ±45px 관용 내.
+                    and time.time() - getattr(self, "_map_cells_ts", 0) < 12.0):
+                gx, gy = _mc[target]
+                sex_m, sey_m = gx - CX, gy - CY
+                if abs(sey_m) < 45 and abs(sex_m) < 45:
+                    # 예상 위치 도달. 그냥 기다리면 정반사 각도에 얼어붙어 판독이 안
+                    # 나옴(1분/회 실측) → 인식 부스트 지글: lift ±1.2cm 교대로 반사
+                    # 각도를 계속 바꿔 판독 유도. 탐색 중재자(_may_explore)가
+                    # "이동→정지→인식" 리듬을 보장, 폭이 작아 맵 유도와 충돌 없음
+                    if time.time() - getattr(self, "_mapwait_log_ts", 0) > 5.0:
+                        self._mapwait_log_ts = time.time()
+                        self._dlog(f"[SEEK] '{target}' 예상 위치 도달 — 재인식 대기 중")
+                    if self._may_explore():
+                        self._jiggle_dir = -getattr(self, "_jiggle_dir", -1)
+                        _js = 0.012 * self._jiggle_dir
+                        self._dlog(f"[SEEK] 인식 부스트 지글 (lift {_js*100:+.1f}cm)")
+                        self._send_goal(["joint_lift"],
+                                        [max(0.15, min(1.10, float(lift) + _js))])
+                    return
+                if not self._may_explore():
+                    return
+                if abs(sey_m) >= 45:
+                    self._dlog(f"[SEEK] 맵 예상 위치로 높이 이동 ('{target}', y{sey_m:+.0f}px)")
+                    self._send_goal(["joint_lift"],
+                                    [max(0.15, min(1.10, float(lift) - KP_LIFT * sey_m))])
+                else:
+                    with state_lock:
+                        _ba_m = state["base_align"]
+                    if _ba_m:
+                        self._dlog(f"[SEEK] 맵 예상 위치로 전후 이동 ('{target}', x{sex_m:+.0f}px)")
+                        self._maybe_base_nudge(sex_m, None)
+                return
+
             # 타겟 미인식 → "버튼처럼 생긴 것들"(비숫자 포함) 군집 = 패널 후보 중심으로
             # 시야를 옮김 (집요 추적). 글자를 못 읽는 원거리에서도 작동.
             boxes = list(getattr(self, "_panel_boxes", []))
             if time.time() - getattr(self, "_panel_ts", 0) > 2.5:
                 boxes = []
+
+            # ── 패널 시야 가드: 배치 타겟 + 박스 3개 이상 보이면 군집의 "옆으로
+            # 끌기"(높이/전후 중심 맞추기) 금지. 판독 가뭄이 아무리 길어도 예상
+            # 위치를 지키며 ①멀면 전진(판독 거리 확보) ②가까우면 지글만 한다.
+            # 군집 추적은 패널을 정말 잃었을 때(박스<3)만 재획득용으로 발동.
+            # (줄다리기로 예산 16cm 소진 반복 실측 — 시간 창 연장으로도 못 막던 것)
+            _lay_toks = {tok for r in _layout_rows for tok in r if tok.strip()}
+            if target in _lay_toks and len(boxes) >= 3:
+                # 탈출구: 정합이 30초+ 죽어 있으면 (판독 가뭄 — 지글도 무성과)
+                # "잘못된 자리를 성실히 지키는" 교착이므로, 군집 재센터링을 1회
+                # 허용해 앵커가 읽히는 시야로 복귀시킨다 (30초에 1회 스로틀 —
+                # 줄다리기 회귀 방지). '5' 선택 후 3분 지글 교착 실측(18:05~08).
+                if (time.time() - getattr(self, "_map_cells_ts", 0) > 30.0
+                        and time.time() - getattr(self, "_guard_esc_ts", 0) > 30.0):
+                    self._guard_esc_ts = time.time()
+                    self._dlog("[SEEK] 자리 지킴 무성과 30초 — 군집 재센터링 1회 허용")
+                    # return 없이 아래 군집 블록으로 통과 → 재센터링 1회
+                else:
+                    if time.time() - getattr(self, "_panelwait_log_ts", 0) > 5.0:
+                        self._panelwait_log_ts = time.time()
+                        self._dlog(f"[SEEK] 패널 시야 내 — '{target}' 자리 지킴 (전진/지글만)")
+                    if self._may_explore():
+                        _wd = self._depth_at(CX, CY)
+                        with state_lock:
+                            _ext_g = state["arm_ext"]
+                        if (_wd and _wd > 0.35 and not self._nudging
+                                and _ext_g is not None
+                                and float(_ext_g) < ARM_EXT_MAX - 0.005):
+                            _st_g = min(0.04, _wd - 0.30)
+                            self._approach_sent = time.time()
+                            self._dlog(f"[APPROACH] 판독 거리 확보 전진 +{_st_g*100:.0f}cm "
+                                       f"(벽 {_wd:.2f}m)")
+                            self._send_goal([ARM_JOINT],
+                                [max(ARM_EXT_MIN, min(ARM_EXT_MAX,
+                                                      float(_ext_g) + _st_g))])
+                        else:
+                            self._jiggle_dir = -getattr(self, "_jiggle_dir", -1)
+                            _js3 = 0.012 * self._jiggle_dir
+                            self._dlog(f"[SEEK] 인식 부스트 지글 (lift {_js3*100:+.1f}cm)")
+                            self._send_goal(["joint_lift"],
+                                            [max(0.15, min(1.10, float(lift) + _js3))])
+                    return
+
             if len(boxes) >= 2:
                 mx = sum((b["x1"] + b["x2"]) / 2 for b in boxes) / len(boxes)
                 my = sum((b["y1"] + b["y2"]) / 2 for b in boxes) / len(boxes)
@@ -1859,6 +2595,17 @@ class ElevatorTracker(Node):
                     self._send_goal(["joint_lift"],
                                     [max(0.15, min(1.10, float(lift) - KP_LIFT * sey))])
                 elif abs(sex) >= COARSE:
+                    # 몸체이동 OFF/X정렬 소진이면 어차피 못 움직임 — 헛로그 스팸 방지
+                    with state_lock:
+                        _ba_seek = state["base_align"]
+                    if not _ba_seek:
+                        if time.time() - getattr(self, "_seek_off_ts", 0) > 10.0:
+                            self._seek_off_ts = time.time()
+                            self._dlog("[SEEK] 전후 이동 필요하나 몸체이동 OFF — 생략")
+                        return
+                    # (SEEK 회수 상한은 제거 — 사용자 결정 2026-07-13. 가드에 거부된
+                    # 시도까지 세서 3번 만에 로봇이 굳던 부작용. 과도 이동 방지는
+                    # 16cm 마스터 예산 + 타겟당 리셋이 담당)
                     self._dlog(f"[SEEK] 군집 중심으로 전후 이동 (x{sex:+.0f}px)")
                     self._maybe_base_nudge(sex, None)
                 else:
@@ -1909,14 +2656,21 @@ class ElevatorTracker(Node):
             # 자동 접근·polish 서보·베이스 정렬 전부 동결 (사용자 요청: "초록불이면
             # 무조건 멈춰서 누를 수 있게"). 클릭하면 press 시퀀스가 접근~누르기 담당.
             # 오차가 히스테리시스(+4px)를 넘어 CENTERED가 풀리면 동결도 풀려 재정렬.
-            if tdist is not None and tdist <= PRESS_READY_DIST:
-                if not getattr(self, "_ready_logged", False):
-                    self._ready_logged = True
+            with state_lock:
+                _was_ready = state.get("press_ready", False)
+            # 히스테리시스: 진입 0.25 / 유지 0.28 — depth 지터로 동결이 풀렸다
+            # 잠기며 READY 후에도 접근이 한 번 더 나가던 것(11:24:10 실측) 방지
+            if tdist is not None and \
+                    tdist <= PRESS_READY_DIST + (0.03 if _was_ready else 0.0):
+                with state_lock:
+                    state["press_ready"] = True
+                if not _was_ready:
                     self._dlog(f"[READY] 누르기 활성 ({tdist:.2f}m) — "
                                "자동 이동 전체 동결, 클릭 대기")
                 return
-            if getattr(self, "_ready_logged", False):
-                self._ready_logged = False
+            if _was_ready:
+                with state_lock:
+                    state["press_ready"] = False
             # ── 자동 접근: 정렬됐으면 누르기 직전 거리(20cm)까지 팔을 스스로 전진 ──
             # 살아있는 관측(fresh)일 때만 한 걸음(≤4cm)씩. 정렬이 흐트러지면
             # 아래 재정렬 로직이 잡은 뒤 다시 전진. 접촉 없음(손끝 3cm 앞 정지).
@@ -1929,6 +2683,12 @@ class ElevatorTracker(Node):
                     and self._goal_done and not self._nudging
                     and time.time() - getattr(self, "_approach_sent", 0) > 1.5):
                 d_live = self._depth_at(CX + ox, CY + oy)   # 조준점 실시간 거리
+                # 침묵 정체 방지: depth 구멍이면 접근이 조용히 멈추던 것 — 이유를 로그로
+                # (문열림 CENTERED 후 20초 무로그 정체 실측, 2026-07-13 16:07)
+                if d_live is None and \
+                        time.time() - getattr(self, "_dhole_log_ts", 0) > 5.0:
+                    self._dhole_log_ts = time.time()
+                    self._dlog("[APPROACH] 조준점 depth 측정불가 — 접근 대기 (구멍/반사 의심)")
                 if d_live and d_live > PRESS_CLOSE_DIST + 0.03:
                     with state_lock:
                         ext_now = state["arm_ext"]
@@ -1971,6 +2731,7 @@ class ElevatorTracker(Node):
             was_centered = state["centered"]
             if was_centered and (abs(ex) > dz + 4 or abs(ey) > dz + 4):
                 state["centered"] = False
+                state["press_ready"] = False   # 정조준이 깨지면 READY 래치도 해제
                 was_centered = False
         if was_centered:
             return   # 경계 근처 미세 진동은 무시 (모터 덜덜거림 방지)
@@ -2040,13 +2801,18 @@ class ElevatorTracker(Node):
         e_pm = self._det_mem.get(tgt)
         lm_p = getattr(self, "_last_motion_ts", 0)
         def _obs_ok(x):
-            if x.get("text") != tgt:
+            if x.get("text") != tgt or x.get("suspect"):
                 return False
             if x.get("age", 9.9) < 2.0:
                 return True
             return (x.get("age", 9.9) < 8.0 and e_pm is not None
                     and e_pm["ts"] > lm_p + 0.3)
         det = next((x for x in dets if _obs_ok(x)), None)
+        # 모양 추론 근거 press는 분석용으로 명시 기록 (차단은 안 함 — 사용자 결정).
+        # 특히 '종'(비상벨)은 오배치 시 대가가 커서 반드시 로그에 남긴다
+        if det is not None and det.get("shape"):
+            self._dlog(f"[PRESS] {'⚠ ' if tgt == '종' else ''}'{tgt}' press 근거가 "
+                       "모양 추론 (글자/심볼 미확인) — 화면 십자 위치 확인 권장")
         if det is None:
             # [한 프레임 대응] 최근 관측은 없지만 위치 잠금이 20초 내면 진행 허용.
             # press 내부의 depth 재측정·근접 재정렬·접촉 판정이 최종 검증을 담당.
@@ -2069,7 +2835,9 @@ class ElevatorTracker(Node):
             return "거리 측정 안 됨 (depth ?m)"
         if d > PRESS_DIST_MAX:
             return f"너무 멂 ({d:.2f}m > {PRESS_DIST_MAX}m) — 로봇을 더 가까이"
-        if d > PRESS_READY_DIST:
+        with state_lock:
+            _ready_latched = state.get("press_ready", False)
+        if not _ready_latched and d > PRESS_READY_DIST:
             return (f"아직 접근 완료 전 ({d:.2f}m) — 자동 접근이 "
                     f"{PRESS_READY_DIST*100:.0f}cm 안쪽까지 간 뒤 누르기가 활성화됩니다")
         if ext is None:
@@ -2091,7 +2859,7 @@ class ElevatorTracker(Node):
             # READY 동결 상태(≤PRESS_READY_DIST, 정조준 완료)에서 클릭된 경우:
             # 조준은 이미 끝났고 남은 건 몇 cm 전진뿐 → 접근 중 보정·근접 재정렬을
             # 전부 생략하고 "뻗기→닫기→꾹"만 실행 (사용자 요청: 클릭 후 미세조정 금지)
-            direct = d <= PRESS_READY_DIST + 0.02
+            direct = d <= PRESS_READY_DIST + 0.05   # READY 유지 문턱(0.28)까지 포함
             # A. 그리퍼 연 채 "정렬을 유지하며" 단계 접근:
             #    5cm 전진 → 이동 후 인식 대기 → 박스↔십자 보정 → 반복
             #    (박스 중앙 = 십자 중앙을 움크리기 직전까지 유지)

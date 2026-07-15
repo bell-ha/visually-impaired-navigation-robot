@@ -286,6 +286,19 @@ def set_mode():
     if _manual_mode:
         # 수동 전환 시: 진행 중인 목적지 취소 + LOCKED 상태로
         _write("iface", "/cancel")
+        # 인터락: 엘리베이터 앱 타겟 자동 해제 — 두 앱이 /stretch/cmd_vel을
+        # 동시에 지휘하면 수동 조작이 먹히지 않음 (Base bump 연발 실측).
+        # 엘리베이터 앱이 꺼져 있으면 조용히 무시.
+        def _silence_elevator():
+            try:
+                import urllib.request
+                urllib.request.urlopen(
+                    urllib.request.Request("http://localhost:5000/reset",
+                                           method="POST"), timeout=1)
+                _log("MAIN", "수동 전환 → 엘리베이터 타겟 자동 해제 (바퀴 지휘권 단일화)")
+            except Exception:
+                pass
+        threading.Thread(target=_silence_elevator, daemon=True).start()
     else:
         # 자동 전환 시: 수동 이동 정지 명령 한 번만 발행 후 Nav2에 제어권 넘김
         with _manual_lock:
@@ -794,7 +807,7 @@ HTML = """<!DOCTYPE html>
   .badge { padding: 4px 12px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; }
   .badge-auto   { background: #065f46; color: #6ee7b7; }
   .badge-manual { background: #7c2d12; color: #fdba74; }
-  .layout { display: grid; grid-template-columns: 1fr 320px; flex: 1; overflow: hidden; }
+  .layout { display: grid; grid-template-columns: 1fr auto; flex: 1; overflow: hidden; }
 
   /* 로그 패널 */
   #log-panel { padding: 12px; overflow-y: auto; font-family: monospace; font-size: 0.8rem; background: #0f172a; }
@@ -816,11 +829,12 @@ HTML = """<!DOCTYPE html>
   .ts { color: #475569; margin-right: 6px; }
 
   /* 컨트롤 패널 */
-  .ctrl-panel { background: #1e293b; border-left: 1px solid #334155; padding: 16px; display: flex; flex-direction: column; gap: 0; overflow-y: auto; }
-  .ctrl-panel > div { padding: 14px 0; border-bottom: 1px solid #1e293b; }
-  .ctrl-panel > div:first-child { padding-top: 0; }
-  .ctrl-panel > div:last-child  { border-bottom: none; padding-bottom: 0; }
+  .ctrl-panel { background: #1e293b; border-left: 1px solid #334155; padding: 16px; width: 320px; overflow-y: auto; }
+  .ctrl-col > div { padding: 14px 0; border-bottom: 1px solid #1e293b; }
+  .ctrl-col:first-child > div:first-child { padding-top: 0; }
+  .ctrl-col:last-child > div:last-child  { border-bottom: none; padding-bottom: 0; }
   .ctrl-panel h2 { font-size: 0.68rem; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+
 
   /* 버튼 통일 시스템 */
   .btn { display: block; width: 100%; border: none; border-radius: 6px; padding: 9px 14px; font-size: 0.82rem; font-weight: 600; cursor: pointer; text-align: center; color: #fff; transition: opacity .15s; }
@@ -846,6 +860,8 @@ HTML = """<!DOCTYPE html>
   .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #1e293b; }
   .toggle-row:last-child { border-bottom: none; }
   .toggle-label { font-size: 0.82rem; color: #e2e8f0; }
+  .kbd { display:inline-block; background:#334155; color:#cbd5e1; border-radius:4px;
+         padding:0 5px; font-size:0.65rem; font-family:monospace; margin-left:6px; vertical-align:1px; }
   .toggle-switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
   .toggle-switch input { opacity: 0; width: 0; height: 0; }
   .toggle-slider { position: absolute; inset: 0; background: #475569; border-radius: 24px; cursor: pointer; transition: background .2s; }
@@ -874,6 +890,44 @@ HTML = """<!DOCTYPE html>
   .sys-dot.on { background:#22c55e; box-shadow:0 0 4px #22c55e; }
   /* tab 배지 — 숫자 없이 점(dot)만 */
   .tab-badge { display:inline-block; width:6px; height:6px; border-radius:50%; background:#ef4444; margin-left:4px; vertical-align:middle; }
+
+  /* ── 반응형: 반드시 스타일시트 맨 끝에 위치 (동일 특이도 규칙을 덮어쓰기 위해) ── */
+  /* 화면 높이가 낮으면 패널을 2열로 펼쳐 스크롤 없이 모두 보이게 */
+  @media (max-height: 1300px) and (min-width: 1100px) {
+    .ctrl-panel { width: 660px; display: flex; align-items: flex-start; }
+    .ctrl-col { flex: 1; min-width: 0; }
+    .ctrl-col + .ctrl-col { border-left: 1px solid #334155; padding-left: 26px; margin-left: 26px; }
+    .ctrl-col > div:first-child { padding-top: 0; }
+    .ctrl-col > div:last-child  { border-bottom: none; }
+  }
+  /* 더 낮으면 컴팩트 모드: 여백/버튼/패드 축소 */
+  @media (max-height: 780px) {
+    .ctrl-panel { padding: 8px 14px; }
+    .ctrl-col > div, .ctrl-col:first-child > div:first-child { padding: 6px 0; }
+    .ctrl-panel h2 { margin-bottom: 4px; }
+    .btn { padding: 5px 10px; font-size: 0.78rem; }
+    .btn-sm { padding: 3px 10px; font-size: 0.74rem; }
+    .dpad { grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); gap: 4px; }
+    .dpad-btn { font-size: 1.05rem; border-radius: 8px; }
+    .sys-proc-row { padding: 2px 0; }
+    header { padding: 6px 20px; }
+    #kbd-help { font-size: 0.66rem !important; line-height: 1.5 !important;
+                padding: 5px 8px !important; margin-top: 6px !important; }
+    #manual-section .speed-wrap { margin-bottom: 6px !important; }
+    #manual-section .btn-danger { margin-top: 6px !important; font-size: 0.8rem !important; }
+    #sys-proc-list > div:last-child { margin-top: 6px !important; padding-top: 6px !important; }
+    .chair-card { padding: 6px 12px; }
+    .toggle-row { padding: 2px 0; }
+    .toggle-switch { width: 38px; height: 20px; }
+    .toggle-slider::before { width: 14px; height: 14px; }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
+    #speed-settings { gap: 4px !important; margin-top: 0 !important; }
+  }
+  /* 좁은 화면에서는 1열로 복귀 (로그 영역 확보) */
+  @media (max-width: 1099px) {
+    .ctrl-panel { width: 320px; display: block; }
+    .ctrl-col + .ctrl-col { border-left: none; padding-left: 0; margin-left: 0; }
+  }
 </style>
 </head>
 <body>
@@ -902,6 +956,7 @@ HTML = """<!DOCTYPE html>
     <div id="log-panel"></div>
   </div>
   <div class="ctrl-panel">
+   <div class="ctrl-col">
     <div>
       <h2>모드 전환</h2>
       <div class="mode-btns">
@@ -920,7 +975,7 @@ HTML = """<!DOCTYPE html>
       <div class="speed-wrap" style="margin-bottom:10px">
         <label>속도</label>
         <input type="range" id="speed" min="5" max="40" value="15"
-               oninput="document.getElementById('spv').textContent=this.value">
+               oninput="setSpeed(parseInt(this.value))">
         <span class="speed-val" id="spv">15</span>
       </div>
       <div class="dpad">
@@ -935,6 +990,12 @@ HTML = """<!DOCTYPE html>
         <div></div>
       </div>
       <button class="btn btn-danger" style="margin-top:10px;font-size:0.9rem" onclick="emergencyStop()">■ 비상 정지</button>
+      <div id="kbd-help" style="margin-top:10px;background:#1e293b;border-radius:6px;padding:8px 10px;font-size:0.72rem;color:#94a3b8;line-height:1.7">
+        ⌨️ <b style="color:#cbd5e1">키보드 단축키</b><br>
+        방향키 ↑↓←→ : 이동 토글 (같은 키 다시 누르면 정지)<br>
+        키패드 + / − : 속도 조절 (±5)<br>
+        숫자 1~4 : 기능 설정 토글 · Shift+1~5 : 시스템 프로세스
+      </div>
     </div>
 
     <div>
@@ -945,33 +1006,35 @@ HTML = """<!DOCTYPE html>
         <button class="btn btn-neutral" onclick="sendPull()">당김 트리거</button>
       </div>
     </div>
+   </div>
 
+   <div class="ctrl-col">
     <div>
       <h2>기능 설정</h2>
       <div style="margin-top:4px">
         <div class="toggle-row">
-          <span class="toggle-label">팔 위치 고정</span>
+          <span class="toggle-label">팔 위치 고정<span class="kbd">1</span></span>
           <label class="toggle-switch">
             <input type="checkbox" id="armleft-toggle" onchange="toggleArmleft()">
             <span class="toggle-slider"></span>
           </label>
         </div>
         <div class="toggle-row">
-          <span class="toggle-label">사회적 회피</span>
+          <span class="toggle-label">사회적 회피<span class="kbd">2</span></span>
           <label class="toggle-switch">
             <input type="checkbox" id="social-nav-toggle" checked onchange="toggleSocialNav()">
             <span class="toggle-slider"></span>
           </label>
         </div>
         <div class="toggle-row">
-          <span class="toggle-label">장애물 밀기</span>
+          <span class="toggle-label">장애물 밀기<span class="kbd">3</span></span>
           <label class="toggle-switch">
             <input type="checkbox" id="obstacle-push-toggle" checked onchange="toggleObstaclePush()">
             <span class="toggle-slider"></span>
           </label>
         </div>
         <div class="toggle-row">
-          <span class="toggle-label">온라인 모드</span>
+          <span class="toggle-label">온라인 모드<span class="kbd">4</span></span>
           <label class="toggle-switch">
             <input type="checkbox" id="net-mode-toggle" checked onchange="toggleNetMode()">
             <span class="toggle-slider"></span>
@@ -996,27 +1059,27 @@ HTML = """<!DOCTYPE html>
       <div id="sys-proc-list" style="margin-top:6px">
         <div class="sys-proc-row" id="sysrow-launch">
           <span class="sys-dot" id="sysdot-launch"></span>
-          <span class="sys-proc-label">ROS2 Launch</span>
+          <span class="sys-proc-label">ROS2 Launch<span class="kbd">⇧1</span></span>
           <button class="btn btn-primary btn-sm" id="sysbtn-launch" onclick="toggleSysProc('launch')">시작</button>
         </div>
         <div class="sys-proc-row" id="sysrow-rviz">
           <span class="sys-dot" id="sysdot-rviz"></span>
-          <span class="sys-proc-label">RViz2</span>
+          <span class="sys-proc-label">RViz2<span class="kbd">⇧2</span></span>
           <button class="btn btn-primary btn-sm" id="sysbtn-rviz" onclick="toggleSysProc('rviz')">시작</button>
         </div>
         <div class="sys-proc-row" id="sysrow-battery">
           <span class="sys-dot" id="sysdot-battery"></span>
-          <span class="sys-proc-label">배터리 확인</span>
+          <span class="sys-proc-label">배터리 확인<span class="kbd">⇧3</span></span>
           <button class="btn btn-neutral btn-sm" id="sysbtn-battery" onclick="toggleSysProc('battery')">실행</button>
         </div>
         <div class="sys-proc-row" id="sysrow-free">
           <span class="sys-dot" id="sysdot-free"></span>
-          <span class="sys-proc-label">프로세스 정리</span>
+          <span class="sys-proc-label">프로세스 정리<span class="kbd">⇧4</span></span>
           <button class="btn btn-neutral btn-sm" id="sysbtn-free" onclick="toggleSysProc('free')">실행</button>
         </div>
         <div class="sys-proc-row" id="sysrow-home">
           <span class="sys-dot" id="sysdot-home"></span>
-          <span class="sys-proc-label">홈 위치</span>
+          <span class="sys-proc-label">홈 위치<span class="kbd">⇧5</span></span>
           <button class="btn btn-neutral btn-sm" id="sysbtn-home" onclick="toggleSysProc('home')">실행</button>
         </div>
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid #1e293b">
@@ -1029,7 +1092,7 @@ HTML = """<!DOCTYPE html>
 
     <div>
       <h2>속도 설정</h2>
-      <div style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
+      <div id="speed-settings" style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
         <div>
           <label style="color:#94a3b8;font-size:0.8rem">로봇 속도: <span id="robot-speed-val">0.26</span> m/s</label>
           <input type="range" min="0.10" max="0.50" step="0.02" value="0.26" style="width:100%"
@@ -1042,6 +1105,7 @@ HTML = """<!DOCTYPE html>
         </div>
       </div>
     </div>
+   </div>
   </div>
 </div>
 
@@ -1078,6 +1142,20 @@ function loadLocations() {
 loadLocations();
 
 function getSpeed() { return parseInt(document.getElementById('speed').value) / 100; }
+
+const DIR_MUL = {fwd:[1,0], bwd:[-0.5,0], left:[0,1], right:[0,-1]};
+
+function setSpeed(v) {
+  v = Math.max(5, Math.min(40, v));
+  document.getElementById('speed').value = v;
+  document.getElementById('spv').textContent = v;
+  // 주행 중이면 새 속도 즉시 반영
+  if (activeDir) {
+    const [lxMul, azMul] = DIR_MUL[activeDir];
+    currentLx = lxMul * v / 100;
+    currentAz = azMul * v / 100 * 2;
+  }
+}
 
 // 토글: 같은 버튼 재클릭 → 정지 / 다른 버튼 클릭 → 방향 전환
 function toggleCmd(dir, lxMul, azMul) {
@@ -1310,14 +1388,64 @@ function killAllRobot() {
     });
 }
 
-// 키보드 지원 (방향키 = 토글)
+// 키보드 지원
+//   방향키      : 이동 토글 (같은 키 다시 = 정지)  [수동 모드]
+//   키패드 +,-  : 속도 조절                        [수동 모드]
+//   1~4         : 기능 설정 토글                   [항상]
+//   Shift+1~5   : 시스템 프로세스                  [항상, 종료 시 confirm]
 const keyToDir = {'ArrowUp':['fwd',1,0],'ArrowDown':['bwd',-0.5,0],
                   'ArrowLeft':['left',0,1],'ArrowRight':['right',0,-1]};
+const FEATURE_KEYS = {1:'armleft-toggle', 2:'social-nav-toggle',
+                      3:'obstacle-push-toggle', 4:'net-mode-toggle'};
+const SYS_KEYS   = {1:'launch', 2:'rviz', 3:'battery', 4:'free', 5:'home'};
+const SYS_LABELS = {launch:'ROS2 Launch', rviz:'RViz2', battery:'배터리 확인',
+                    free:'프로세스 정리', home:'홈 위치'};
+
+// e.code 기반이라 한/영 상태와 무관하게 동작 (Digit1/Numpad1 → '1')
+function digitOf(e) {
+  const m = e.code.match(/^(?:Digit|Numpad)([1-9])$/);
+  return m ? m[1] : null;
+}
+
 document.addEventListener('keydown', e => {
-  if (!manualMode || !keyToDir[e.key]) return;
-  const [dir, lx, az] = keyToDir[e.key];
-  if (activeDir !== dir) toggleCmd(dir, lx, az);
-  e.preventDefault();
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && e.target.type !== 'range'
+      && e.target.type !== 'checkbox') return;
+
+  const digit = digitOf(e);
+
+  // Shift+숫자 : 시스템 프로세스
+  if (e.shiftKey && digit && SYS_KEYS[digit]) {
+    if (e.repeat) return;
+    const name = SYS_KEYS[digit];
+    if (sysState[name] && !confirm(`${SYS_LABELS[name]}을(를) 종료할까요?`)) return;
+    toggleSysProc(name);
+    e.preventDefault();
+    return;
+  }
+
+  // 숫자 : 기능 설정 토글
+  if (!e.shiftKey && digit && FEATURE_KEYS[digit]) {
+    if (e.repeat) return;
+    const cb = document.getElementById(FEATURE_KEYS[digit]);
+    if (cb) cb.click();  // checked 토글 + onchange 핸들러 실행
+    e.preventDefault();
+    return;
+  }
+
+  // 이하 수동 모드 전용
+  if (!manualMode) return;
+  if (keyToDir[e.key]) {
+    if (e.repeat) return;  // 키를 꾹 눌러도 토글이 반복되지 않게
+    const [dir, lx, az] = keyToDir[e.key];
+    toggleCmd(dir, lx, az);
+    e.preventDefault();
+  } else if (e.key === '+') {
+    setSpeed(parseInt(document.getElementById('speed').value) + 5);
+    e.preventDefault();
+  } else if (e.key === '-') {
+    setSpeed(parseInt(document.getElementById('speed').value) - 5);
+    e.preventDefault();
+  }
 });
 </script>
 </body>
