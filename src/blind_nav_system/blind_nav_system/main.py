@@ -618,6 +618,32 @@ def sys_proc_ctrl(name):
         threading.Thread(target=_do_kill, daemon=True).start()
         return jsonify(ok=True, running=False)
 
+    # [FastDDS 찌꺼기 예방] 컴퓨터 비정상 종료 후 /dev/shm에 남은 공유메모리 잔재는
+    # "기존 노드는 멀쩡한데 새로 시작하는 프로그램만 통신 실패"라는 괴상한 고장을 만든다
+    # (2026-07-15 두 차례 실측 — 앱이 'Action server not available'/'대기 중' 무한 반복).
+    # ROS 프로세스가 하나도 없을 때의 launch 시작 = 잔재가 전부 주인 없는 상태이므로
+    # 이때만 안전하게 전체 청소. (대시보드 자신의 세마포어는 unlink돼도 계속 유효)
+    if name == "launch":
+        try:
+            r = subprocess.run(["pgrep", "-f",
+                                "ros2 launch|stretch_driver|rplidar|realsense2|"
+                                "component_container|nav2|amcl|map_server"],
+                               capture_output=True, text=True)
+            if not r.stdout.strip():
+                import glob as _glob
+                stale = _glob.glob("/dev/shm/fastrtps_*") + \
+                        _glob.glob("/dev/shm/fast_datasharing*") + \
+                        _glob.glob("/dev/shm/sem.fastrtps*")
+                for f in stale:
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+                if stale:
+                    _log("SYS", f"FastDDS 공유메모리 잔재 {len(stale)}개 청소 (비정상 종료 예방)")
+        except Exception:
+            pass   # 청소 실패가 launch 시작을 막으면 안 됨
+
     try:
         proc = subprocess.Popen(
             defn["cmd"],

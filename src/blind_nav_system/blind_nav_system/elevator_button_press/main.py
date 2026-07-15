@@ -33,6 +33,8 @@ INFER_SERVER  = os.path.join(os.path.dirname(__file__), "ocr_rcnn_server.py")
 # 효과 없으면 0.07로 번복. 변경 후 착지 세로 오차는 캘리브레이션 press 1회로 재보정 필요.
 WRIST_PITCH_DEFAULT = -0.02
 WRIST_YAW_DEFAULT   = 0.03
+WRIST_YAW_IN        = 3.4    # 이동 단계(②③④⑥) 그리퍼 안쪽 수납 각 — 문틀 충돌 방지.
+                             # tools/armleft.py의 검증값 (+3.4 rad = 몸통 안쪽)
 
 # 영구 추론 프로세스 (모델을 한 번만 로딩)
 _infer_proc = None
@@ -198,7 +200,9 @@ LASER_YAW_OFFSET = 3.141592653589793  # 실측 TF: laser가 base 기준 180° �
 BASE_STEP_MAX    = 0.02   # m — 1회 이동 상한
 BASE_TRAVEL_MAX  = 0.15   # m — 누적 이동 상한 (넘으면 정지, 주차가 틀렸다는 뜻)
 # 0.02는 정지 마찰을 못 이겨 바퀴가 헛돌면서 누적치만 쌓임 (10cm 이동했다는데 오차 그대로 실측)
-BASE_SPEED       = 0.04   # m/s
+BASE_SPEED       = 0.04   # m/s — press 정렬 미세이동용 (그대로 유지)
+MANUAL_SPEED     = 0.10   # m/s — 조종 패드·자동 안무 전용 (2026-07-15 사용자 요청 증속)
+MANUAL_ROT_SPEED = 0.30   # rad/s — 수동/자동 회전 속도
 # 라이다는 로봇 "중심" 기준이고 몸통 끝은 중심에서 ~17cm.
 # 라이다는 2D 단면이라 책상 상판처럼 위에서 튀어나온 건 못 봄 — 여유를 너무 줄이지 말 것.
 CLEAR_DIST       = 0.30   # m — 이동 방향 최소 여유 (이보다 가까우면 이동 거부)
@@ -276,6 +280,13 @@ state = {
     "rot_body":     1,      # body 회전 — D435i가 몸체에 90° 돌아가 장착돼 있어
                             # 기본 1(CW 90°)로 시작해야 사무실 전경이 바로 보임
     "place":        "hall", # 장소 모드: hall(홀, ▲▼만) / cab(차내, 숫자만) — 팔레트·prior 분기
+    "scene":        None,   # 여정 단계 (0~5, SCENES 인덱스) — 조종 패드 티칭 구간 표시
+    "scene_acc":    {"fwd_cm": 0.0, "rot_deg": 0.0},  # 현재 단계 누적 이동량 (티칭 기록)
+    "scene_ts":     0.0,    # 현재 단계 시작 시각 — press 완료가 이 이후여야 다음 단계 해제
+    "press_ok_ts":  0.0,    # 마지막 press ✅ 완료 시각
+    "door_base":    None,   # ③ 문대기 진입 시점 전방 여유 (닫힌 문 기준선)
+    "door_open":    False,  # ③에서 여유 점프(+0.5m, 2연속) 감지 → ④ 탑승 해제
+    "door_streak":  0,      # 문 열림 판정 연속 관측 수 (노이즈 방지)
     "arm_ext":      None,   # 현재 팔 뻗기 위치 (wrist_extension, m)
     "wall_tilt":    None,   # 벽 기울기 각도(°) — +면 오른쪽이 멂 (평행 정렬용)
     "wall_flat":    None,   # 앞면이 평면인가 (False면 기울기 측정 거부)
@@ -288,7 +299,9 @@ state = {
     "pressing":     False,  # 누르기 시퀀스 진행 중
     "press_status": None,   # 누르기 진행 메시지
 }
-state_lock = threading.Lock()
+# RLock(재진입 허용): _dlog가 내부에서 이 락을 잡으므로, 락 보유 중 _dlog 호출이
+# 일반 Lock이면 자기 자신과 교착 → 앱 전체 동결 (2026-07-15 ③ 문대기 동결 사건)
+state_lock = threading.RLock()
 
 # 판단/행동 로그 버퍼 (웹 패널 표시 + 복사용). HTTP 접근 로그는 침묵시킴.
 _DECISIONS = collections.deque(maxlen=400)
@@ -562,6 +575,35 @@ HTML = """
     <button id="pose-btn" onclick="setWristForward()" title="홈 포즈: 손목 전방 + 팔 완전 수납"
             style="background:#334;color:#cdf;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;white-space:nowrap;font-size:0.85rem;">🏠 홈 <span style="font-size:0.7rem;opacity:0.7;">H</span></button>
   </div>
+  <!-- 여정 단계 탭: 클릭=단계 전환(누적 매듭+리셋), ①⑤는 홀/차내 모드 자동 -->
+  <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
+    <span style="color:#567;font-size:0.8rem;">🧭 여정</span>
+    <button id="scn-0" onclick="setScene(0)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">① 호출</button>
+    <button id="scn-1" onclick="setScene(1)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">② 문앞</button>
+    <button id="scn-2" onclick="setScene(2)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">③ 문대기</button>
+    <button id="scn-3" onclick="setScene(3)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">④ 탑승</button>
+    <button id="scn-4" onclick="setScene(4)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">⑤ 층</button>
+    <button id="scn-5" onclick="setScene(5)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">⑥ 하차</button>
+    <span id="scn-hint" style="font-size:0.74rem;color:#9ab;white-space:nowrap;"></span>
+  </div>
+  <!-- 조종 패드: 클릭 1번 = 스텝 1번 (⇧1 무관, 낮춘 가드 — 이동 중 26cm 비상정지) -->
+  <div id="pad-row" style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;border-radius:6px;padding:2px;">
+    <span style="color:#567;font-size:0.8rem;">🕹</span>
+    <button onclick="stepRot(1)"   style="background:#334;color:#cdf;border:none;border-radius:5px;padding:5px 8px;cursor:pointer;font-size:0.8rem;white-space:nowrap;">↺ 좌 <span style="font-size:0.68rem;opacity:0.7;">A</span></button>
+    <button onclick="stepMove(1)"  style="background:#264;color:#cfc;border:none;border-radius:5px;padding:5px 8px;cursor:pointer;font-size:0.8rem;white-space:nowrap;">▲ 전진 <span style="font-size:0.68rem;opacity:0.7;">W</span></button>
+    <button onclick="stepMove(-1)" style="background:#442;color:#ffc;border:none;border-radius:5px;padding:5px 8px;cursor:pointer;font-size:0.8rem;white-space:nowrap;">▼ 후진 <span style="font-size:0.68rem;opacity:0.7;">S</span></button>
+    <button onclick="stepRot(-1)"  style="background:#334;color:#cdf;border:none;border-radius:5px;padding:5px 8px;cursor:pointer;font-size:0.8rem;white-space:nowrap;">↻ 우 <span style="font-size:0.68rem;opacity:0.7;">D</span></button>
+    <select id="step-cm" title="전·후진 스텝 크기" onchange="this.blur()" style="background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:4px;">
+      <option value="1">1cm</option><option value="5" selected>5cm</option>
+      <option value="10">10cm</option><option value="30">30cm</option>
+    </select>
+    <select id="step-deg" title="회전 스텝 크기" onchange="this.blur()" style="background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:4px;">
+      <option value="5">5°</option><option value="10" selected>10°</option>
+      <option value="45">45°</option><option value="90">90°</option>
+    </select>
+    <span id="clr-info" style="font-size:0.76rem;color:#8ac;white-space:nowrap;"></span>
+    <span id="acc-info" style="font-size:0.76rem;color:#a9c;white-space:nowrap;"></span>
+  </div>
   <!-- 영점 조절: press가 빗나간 "방향"을 입력 → 십자가 그쪽으로 이동 (파일 영속) -->
   <div style="display:flex;gap:8px;align-items:center;">
     <span style="color:#567;font-size:0.8rem;">🎯 영점</span>
@@ -570,7 +612,7 @@ HTML = """
     <button onclick="aimTrim(0,1)"  style="background:#345;color:#dee;border:none;border-radius:5px;padding:5px 11px;cursor:pointer;">↓</button>
     <button onclick="aimTrim(-1,0)" style="background:#345;color:#dee;border:none;border-radius:5px;padding:5px 11px;cursor:pointer;">←</button>
     <button onclick="aimTrim(1,0)"  style="background:#345;color:#dee;border:none;border-radius:5px;padding:5px 11px;cursor:pointer;">→</button>
-    <select id="trim-step" style="background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:4px;">
+    <select id="trim-step" onchange="this.blur()" style="background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:4px;">
       <option value="0.5" selected>0.5cm</option>
       <option value="1.0">1.0cm</option>
     </select>
@@ -692,8 +734,8 @@ HTML = """
         : `누적 x${x>=0?'+':''}${x} y${y>=0?'+':''}${y}cm`;
     }
     // ── 키보드 단축키 (e.code 기반: 한/영 전환 상태와 무관) ──
-    // 1~5=층, 6=▲, 7=▼, Space=누르기, Esc=재선택, O/C=그리퍼, H=홈, M=모드,
-    // +/-=lift 미세조정, ⇧1=몸체이동, ⇧2=가드, ⇧방향키=영점 트림
+    // 1~5=층, 6=▲, 7=▼, Space=누르기, Esc=재선택+스텝정지, O/C=그리퍼, H=홈, M=모드,
+    // W/S/A/D=조종 패드 스텝, +/-=lift 미세조정, ⇧1=몸체이동, ⇧2=가드, ⇧방향키=영점 트림
     // 영점 리셋·가드류는 실수 비용이 커서 ⇧ 조합 또는 마우스 전용
     const KEY_TOK = {Digit1:'1',Digit2:'2',Digit3:'3',Digit4:'4',Digit5:'5',
                      Numpad1:'1',Numpad2:'2',Numpad3:'3',Numpad4:'4',Numpad5:'5',
@@ -704,6 +746,20 @@ HTML = """
       sl.value = v.toFixed(2);
       document.getElementById('lift-val').value = v.toFixed(2);
       applyLift();
+    }
+    function setScene(n) {
+      fetch('/scene', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({n})});
+    }
+    function stepMove(sign) {
+      const cm = parseFloat(document.getElementById('step-cm').value);
+      fetch('/step_move', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({cm: sign * cm})});
+    }
+    function stepRot(sign) {
+      const dg = parseFloat(document.getElementById('step-deg').value);
+      fetch('/step_move', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({deg: sign * dg})});
     }
     document.addEventListener('keydown', e => {
       const t = e.target.tagName;
@@ -716,13 +772,18 @@ HTML = """
         return;
       }
       if (e.code === 'Space')  { doPress();          e.preventDefault(); return; }
-      if (e.code === 'Escape') { resetTarget();      return; }
+      if (e.code === 'Escape') { fetch('/step_stop', {method:'POST'}); resetTarget(); return; }
       if (e.code === 'KeyO')   { setGripper(true);   return; }
       if (e.code === 'KeyC')   { setGripper(false);  return; }
       if (e.code === 'KeyH')   { setWristForward();  return; }
       if (e.code === 'KeyM')   { togglePlace();      return; }
       if (e.code === 'Equal' || e.code === 'NumpadAdd')      { liftNudge(+0.01); return; }
       if (e.code === 'Minus' || e.code === 'NumpadSubtract') { liftNudge(-0.01); return; }
+      // 조종 패드 스텝: W/S=전/후진, A/D=좌/우회전 (스텝 크기는 셀렉트 박스)
+      if (e.code === 'KeyW') { stepMove(1);  return; }
+      if (e.code === 'KeyS') { stepMove(-1); return; }
+      if (e.code === 'KeyA') { stepRot(1);   return; }
+      if (e.code === 'KeyD') { stepRot(-1);  return; }
       const tok = KEY_TOK[e.code];
       if (tok) { currentTarget === tok ? resetTarget() : selectButton(tok); }
     });
@@ -810,6 +871,48 @@ HTML = """
 
         if (s.trim_x != null) showTrim(s.trim_x, s.trim_y);   // 영점 누적 표시 동기화
         currentTarget = s.target;   // 토글 판단용 서버 상태 동기화
+        // 조종 패드: 전·후방 여유 (초록>50cm / 노랑>30cm / 빨강) + 단계 누적
+        const clrCol = v => v == null ? '#888' : (v > 0.5 ? '#4e8' : (v > 0.3 ? '#fc4' : '#f66'));
+        const ci = document.getElementById('clr-info');
+        if (ci) ci.innerHTML =
+          `앞 <b style="color:${clrCol(s.clear_f)}">${s.clear_f == null ? '?' : s.clear_f.toFixed(2)}m</b>` +
+          ` 뒤 <b style="color:${clrCol(s.clear_b)}">${s.clear_b == null ? '?' : s.clear_b.toFixed(2)}m</b>`;
+        const ai = document.getElementById('acc-info');
+        if (ai && s.scene_acc) ai.textContent =
+          `누적 ${s.scene_acc.fwd_cm >= 0 ? '+' : ''}${s.scene_acc.fwd_cm.toFixed(1)}cm / ` +
+          `${s.scene_acc.rot_deg >= 0 ? '+' : ''}${Math.round(s.scene_acc.rot_deg)}°`;
+        // 여정 단계: 현재=초록, 조건 충족된 다음 단계=파랑 테두리.
+        // 잠금은 안 함 (연습 환경 배려) — 조건 없이 건너뛰면 서버가 ⚠ 로그만 남김
+        const cur = s.scene;
+        for (let i = 0; i < 6; i++) {
+          const b = document.getElementById('scn-' + i);
+          if (!b) continue;
+          const on = (cur === i);
+          b.style.background = on ? '#265' : '#2a2a3e';
+          b.style.color      = on ? '#cfc' : '#89a';
+          b.style.outline    = on ? '1px solid #4e8'
+                             : (cur != null && i === cur + 1 && s.scene_next_ok
+                                ? '1px solid #46a' : 'none');
+        }
+        // 단계별 안내 + 이동 단계에서 조종 패드 강조
+        const HINTS = ['▼/▲ 선택 → Space', '🤖 자동: 전진 56cm→우회전 90° · Esc=중단',
+                       '🚪 문 열림 대기 중…', '🤖 자동: 전진 185cm · Esc=중단',
+                       '층 선택 → Space', '🤖 자동: 후진 186cm · Esc=중단'];
+        const sh = document.getElementById('scn-hint');
+        if (sh) {
+          if (cur == null) sh.textContent = '';
+          else if (cur === 2 && s.door_open) { sh.textContent = '🚪 문 열림! → ④ 탑승'; sh.style.color = '#4e8'; }
+          else if (cur === 2) {
+            sh.textContent = `🚪 닫힘 — 앞 ${s.clear_f == null ? '?' : s.clear_f.toFixed(2)}m` +
+                             ` (기준 ${s.door_base == null ? '?' : s.door_base.toFixed(2)}m, +0.5 점프=열림)`;
+            sh.style.color = '#fc4';
+          }
+          else if ((cur === 0 || cur === 4) && s.scene_next_ok) { sh.textContent = '✅ press 완료 → 다음 단계'; sh.style.color = '#4e8'; }
+          else { sh.textContent = HINTS[cur]; sh.style.color = '#9ab'; }
+        }
+        const pr = document.getElementById('pad-row');
+        if (pr) pr.style.outline =
+          (cur != null && cur !== 0 && cur !== 4) ? '1px solid #46a' : 'none';
         // 장소 모드: 버튼 라벨 동기화 + 팔레트 활성 범위 (홀=▲▼만 / 차내=숫자만)
         const isHall = s.place !== 'cab';
         const plb = document.getElementById('place-btn');
@@ -883,6 +986,65 @@ def video():
 def status():
     with state_lock:
         s = state.copy()
+    # 전·후방 라이다 여유 (조종 패드 실시간 표시용 — 문 열림도 이 값의 점프로 보임)
+    _n = _node_ref[0]
+    clear_f = clear_b = None
+    if _n is not None:
+        try:
+            _cf = _n._clearance(1.0); _cb = _n._clearance(-1.0)
+            clear_f = round(_cf, 2) if _cf is not None else None
+            clear_b = round(_cb, 2) if _cb is not None else None
+        except Exception:
+            pass
+    # ③ 문대기: 전방 여유 점프 감시 → 문 열림 판정.
+    # 실측(2026-07-15): 이 홀 대기 위치에서 닫힘 0.97m / 열림 1.66m —
+    # 절대 기준 1.5m + 점프 +0.5m + 2연속 관측 (0.85m/1회는 닫힌 문을 오판했음)
+    if s.get("scene") == 2 and _n is not None and clear_f is not None:
+        base_set_now = False
+        with state_lock:
+            base = state.get("door_base")
+            if base is None:
+                state["door_base"] = clear_f
+                state["door_streak"] = 0
+                # 진입 시점부터 아주 멀면(≥1.5m) 문이 열려 있던 것으로 판단
+                if clear_f >= 1.5:
+                    state["door_open"] = True
+                base = clear_f
+                opened_now = state["door_open"]
+                base_set_now = not opened_now   # 로그는 락 밖에서 (교착 방지)
+            elif not state["door_open"] and (
+                    clear_f - base > 0.5
+                    # 절대 규칙(1.5m)은 기준선이 진짜 닫힌 문 거리(<1.0m)일 때만 —
+                    # 기준선이 원래 큰 장소에서 +11cm에 열림 오판하는 것 방지
+                    or (base < 1.0 and clear_f >= 1.5)):
+                streak = state.get("door_streak", 0) + 1
+                state["door_streak"] = streak
+                opened_now = streak >= 2          # 노이즈 방지: 2연속 관측
+                if opened_now:
+                    state["door_open"] = True
+            else:
+                state["door_streak"] = 0
+                opened_now = False
+        if base_set_now:
+            _n._dlog(f"[SCENE] 문 닫힘 기준선 {base:.2f}m 설정 — "
+                     "+0.5m 점프(2연속) 또는 1.5m 이상이면 열림 판정")
+        if opened_now:
+            _n._dlog(("[SCENE] 🚪 진입 시 이미 열림으로 판단 "
+                      f"(전방 여유 {clear_f:.2f}m ≥ 0.85m)"
+                      if base == clear_f else
+                      f"[SCENE] 🚪 문 열림 감지 (전방 여유 {base:.2f}→{clear_f:.2f}m)")
+                     + " — ④ 탑승 활성화")
+        with state_lock:
+            s["door_open"] = state["door_open"]
+    # 다음 단계 해제 조건: ①⑤=press 완료 / ③=문 열림 / ②④=사용자 판단(항상 가능)
+    sc = s.get("scene")
+    next_ok = False
+    if sc in (1, 3):
+        next_ok = True
+    elif sc in (0, 4):
+        next_ok = (s.get("press_ok_ts") or 0) > (s.get("scene_ts") or 0)
+    elif sc == 2:
+        next_ok = bool(s.get("door_open"))
     target = s["target_text"]
     ex = ey = None
     if target:
@@ -903,7 +1065,11 @@ def status():
                    trim_x=_aim_trim["x_cm"], trim_y=_aim_trim["y_cm"],
                    ready=bool(s.get("centered") and s.get("press_ready")),
                    lock_shape=bool(s.get("lock_shape")),
-                   dz=_dead_zone_px(s.get("target_dist")))
+                   dz=_dead_zone_px(s.get("target_dist")),
+                   scene=s.get("scene"), scene_acc=s.get("scene_acc"),
+                   clear_f=clear_f, clear_b=clear_b,
+                   door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
+                   door_base=s.get("door_base"))
 
 @app.route("/layout", methods=["GET", "POST"])
 def layout_route():
@@ -1041,12 +1207,15 @@ def base_align_toggle():
             state["align_note"]  = None
     return jsonify(ok=True, enabled=on)
 
-@app.route("/place", methods=["POST"])
-def place_toggle():
-    """장소 모드 토글: 홀(밖, 호출 ▲▼) ↔ 차내(안, 층 숫자). 전환 시 타겟 해제."""
+def _set_place(pl, send_lift=True):
+    """장소 모드 설정 (hall/cab). 바뀔 때만 타겟 해제 + lift 규정 높이 선이동.
+    /place 토글과 여정 단계(①⑤ 자동 모드)가 공유하는 단일 경로.
+    send_lift=False면 lift goal 생략 — 호출측이 자세 goal에 lift를 합쳐 보낼 때
+    (goal을 따로 쏘면 단일-goal 서버가 앞의 것을 선점·유실시키므로)."""
     with state_lock:
-        state["place"] = "cab" if state["place"] == "hall" else "hall"
-        pl = state["place"]
+        if state["place"] == pl:
+            return
+        state["place"] = pl
         state["target_text"] = None
         state["phase"]       = "SELECT"
         state["centered"]    = False
@@ -1059,11 +1228,112 @@ def place_toggle():
         prior = LIFT_PRIOR_CALL if pl == "hall" else LIFT_PRIOR_PANEL
         with state_lock:
             cur_lift = state["lift"]
-        if cur_lift is None or abs(cur_lift - prior) > 0.03:
+        if send_lift and (cur_lift is None or abs(cur_lift - prior) > 0.03):
             node._dlog(f"[MODE] 규정 높이 선이동: lift "
                        f"{('%.2f' % cur_lift) if cur_lift is not None else '?'}→{prior:.2f}")
             node._send_goal(["joint_lift"], [prior])
+
+@app.route("/place", methods=["POST"])
+def place_toggle():
+    """장소 모드 토글: 홀(밖, 호출 ▲▼) ↔ 차내(안, 층 숫자). 전환 시 타겟 해제."""
+    with state_lock:
+        pl = "cab" if state["place"] == "hall" else "hall"
+    _set_place(pl)
     return jsonify(ok=True, place=pl)
+
+# ── 여정 단계 + 조종 패드 (리허설 티칭용) ──────────────────────
+SCENES = ["① 호출 press", "② 문앞 정렬", "③ 문 열림 대기",
+          "④ 탑승", "⑤ 층 press", "⑥ 하차"]
+# 단계별 자동 안무 (2026-07-15 16:35 리허설 티칭값) — 단계 클릭 시 자동 재생.
+# Esc로 중단 → 패드 보정 → 같은 단계 재클릭 시 잔여만 이어서 실행 (scene_acc 기준).
+# ※ press 정렬이 매번 다른 위치에서 끝나므로(이번엔 X정렬 11.5cm) 몇 cm 보정은 정상.
+SCENE_MOVES = {
+    1: [("fwd", 56.5), ("rot", -90.0)],   # ② 문앞: 전진 56.5cm → 우회전 90°
+    3: [("fwd", 185.0)],                  # ④ 탑승: 전진 185cm
+    5: [("fwd", -186.0)],                 # ⑥ 하차: 후진 186cm
+}
+
+@app.route("/scene", methods=["POST"])
+def scene_set():
+    """여정 단계 전환 — 이전 단계의 누적 이동량을 로그로 매듭짓고 카운터 리셋.
+    성공 리허설의 [SCENE] 매듭 로그가 곧 시나리오 고정 거리의 티칭값이 된다."""
+    n = int((request.json or {}).get("n", 0))
+    n = max(0, min(len(SCENES) - 1, n))
+    node = _node_ref[0]
+    with state_lock:
+        prev = state.get("scene")
+        acc  = dict(state.get("scene_acc") or {})
+        _pok   = state.get("press_ok_ts") or 0   # 경고 판정용 — 덮어쓰기 전에 캡처
+        _sts   = state.get("scene_ts") or 0
+        _dopen = bool(state.get("door_open"))
+        state["scene"] = n
+        if prev != n:      # 같은 단계 재클릭 = 이어하기 → 누적 유지 (잔여만 재실행)
+            state["scene_acc"] = {"fwd_cm": 0.0, "rot_deg": 0.0}
+            state["scene_ts"]  = time.time()
+            if n == 2:                   # ③ 문대기: 닫힌 문 기준선 새로 측정
+                state["door_base"]   = None
+                state["door_open"]   = False
+                state["door_streak"] = 0
+    if node:
+        if prev is not None and prev != n and (abs(acc.get("fwd_cm", 0)) > 0.5
+                                               or abs(acc.get("rot_deg", 0)) > 1):
+            node._dlog(f"[SCENE] {SCENES[prev]} 매듭 — 누적: "
+                       f"전진 {acc['fwd_cm']:+.1f}cm · 회전 {acc['rot_deg']:+.0f}°")
+        node._dlog(f"[SCENE] {SCENES[n]} " + ("재개" if prev == n else "시작"))
+        # 조건 미충족 전진은 차단하지 않고 경고만 (금지 대신 경고 원칙 — 연습 환경 배려)
+        if prev is not None and n > prev:
+            if prev in (0, 4) and not (_pok > _sts):
+                node._dlog(f"[SCENE] ⚠ {SCENES[prev]} press 미완료 상태로 진행")
+            elif prev == 2 and n == 3 and not _dopen:
+                node._dlog("[SCENE] ⚠ 문 열림 미감지 상태로 탑승 시작")
+    # 단계별 자세 — 반드시 한 goal로 묶어 전송 (단일-goal 서버의 선점·유실 방지)
+    if n in (0, 4):
+        # press 단계: 홀/차내 모드 + 그리퍼 전방(인식 자세) + 열기 + lift 규정 높이
+        _set_place("hall" if n == 0 else "cab", send_lift=False)
+        if node:
+            prior = LIFT_PRIOR_CALL if n == 0 else LIFT_PRIOR_PANEL
+            node._dlog("[SCENE] 인식 자세 — 그리퍼 전방·열기, lift 규정 높이")
+            node._send_goal(
+                ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll",
+                 GRIPPER_JOINT, "joint_lift"],
+                [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, 0.0, GRIPPER_OPEN_M, prior])
+    else:
+        # 이동 단계(②③④⑥): 팔 수납 + 그리퍼 안쪽 + 닫기 — 문틀·벽 충돌 방지
+        if node:
+            node._dlog("[SCENE] 이동 자세 — 팔 수납·그리퍼 안쪽·닫기")
+            node._send_goal(
+                ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll",
+                 ARM_JOINT, GRIPPER_JOINT],
+                [WRIST_PITCH_DEFAULT, WRIST_YAW_IN, 0.0, ARM_EXT_MIN, GRIPPER_CLOSE_M])
+    # 단계 전환 = 진행 중이던 자동 안무·수동 스텝 즉시 취소 (새 의도가 우선)
+    if node:
+        node._step_abort = True
+    # 자동 안무 재생 (②④⑥): 티칭값 − 누적 = 잔여를 자동 실행
+    if node and n in SCENE_MOVES:
+        threading.Thread(target=node._run_scene_moves, args=(n,), daemon=True).start()
+    return jsonify(ok=True, scene=n)
+
+@app.route("/step_move", methods=["POST"])
+def step_move():
+    """조종 패드 단발 스텝: {cm: ±n} 전/후진 또는 {deg: ±n} 좌(+)/우(−) 회전.
+    ⇧1(몸체이동) 토글과 무관한 수동 전용 통로 — 사용자가 지켜보며 1스텝씩 명령.
+    가드는 낮춰 적용(시작 여유 ≥ 이동량+5cm, 이동 중 26cm 비상정지), ⇧2로 해제 가능."""
+    d = request.json or {}
+    node = _node_ref[0]
+    if node is None:
+        return jsonify(ok=False, error="node 없음"), 503
+    cm  = float(d.get("cm", 0.0))
+    deg = float(d.get("deg", 0.0))
+    threading.Thread(target=node._manual_step, args=(cm, deg), daemon=True).start()
+    return jsonify(ok=True)
+
+@app.route("/step_stop", methods=["POST"])
+def step_stop():
+    """진행 중인 수동 스텝 즉시 중단 (Esc)."""
+    node = _node_ref[0]
+    if node:
+        node._step_abort = True
+    return jsonify(ok=True)
 
 @app.route("/gripper", methods=["POST"])
 def gripper_ctrl():
@@ -1119,8 +1389,8 @@ def wrist_forward():
     node = _node_ref[0]
     if node:
         node._send_goal(
-            ["joint_wrist_pitch", "joint_wrist_yaw", ARM_JOINT],
-            [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, ARM_EXT_MIN])
+            ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll", ARM_JOINT],
+            [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, 0.0, ARM_EXT_MIN])
     return jsonify(ok=True)
 
 @app.route("/wrist_pitch", methods=["POST"])
@@ -1194,13 +1464,20 @@ class ElevatorTracker(Node):
     def _init_wrist_once(self):
         if self._wrist_initialized:
             return
+        # 앱 재시작 직후엔 DDS가 드라이버 액션 서버를 아직 발견 못 했을 수 있음 —
+        # 이번 틱은 건너뛰고 3초 타이머가 다시 부를 때 재시도 (발견 후에만 초기화)
+        if not self.action_client.wait_for_server(timeout_sec=0.5):
+            self._dlog("드라이버 액션 서버 대기 중… (3초 후 재시도)")
+            return
         self._wrist_initialized = True
-        self.set_wrist_pitch(WRIST_PITCH_DEFAULT)
-        self.set_wrist_yaw(WRIST_YAW_DEFAULT)
-        # 인식 모드: 그리퍼를 열어 카메라 시야 확보
-        self.set_gripper(GRIPPER_OPEN_M)
+        # 인식 모드 자세: 손목 전방 + 그리퍼 열기(카메라 시야 확보).
+        # 반드시 한 goal로 묶어 전송 — 따로 보내면 단일-goal 서버가 앞의 것을 선점·유실
+        self._send_goal(
+            ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll", GRIPPER_JOINT],
+            [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, 0.0, GRIPPER_OPEN_M])
         self._dlog(
-            f"Wrist initialized: pitch={WRIST_PITCH_DEFAULT}, yaw={WRIST_YAW_DEFAULT}, gripper open"
+            f"Wrist initialized: pitch={WRIST_PITCH_DEFAULT}, yaw={WRIST_YAW_DEFAULT}, "
+            "roll=0, gripper open"
         )
 
     def _on_image_body(self, msg):
@@ -1328,6 +1605,180 @@ class ElevatorTracker(Node):
             return True
         finally:
             self._nudging = False
+
+    # ── 조종 패드 수동 스텝 (여정 티칭용) ──────────────────────
+    def _manual_step(self, cm, deg):
+        """단발 스텝 (별도 스레드). base_align(⇧1)과 무관한 수동 전용 통로 —
+        클릭 1번 = 정해진 양 1번이라 마스터 스위치를 요구할 이유가 없음.
+        가드는 낮춰 적용: 시작 여유 ≥ 이동량+5cm, 이동 중 26cm 침범 시 비상정지.
+        (라이다가 25cm 미만 레이는 자기 몸으로 보고 버리므로 26cm이 측정 바닥.)
+        guard_off(⇧2)면 생략. 결과는 [MOVE] 로그 + scene_acc 누적 = 티칭 기록."""
+        if getattr(self, "_step_busy", False):
+            self._dlog("[MOVE] 이미 이동 중 — 무시 (멈추려면 Esc)")
+            return
+        with state_lock:
+            pressing_now = state.get("pressing")
+            guard_off = state["guard_off"]
+        if pressing_now:
+            self._dlog("[MOVE] press 진행 중 — 스텝 거부")
+            return
+        self._step_busy  = True
+        self._step_abort = False
+        self._nudging    = True     # 자동 서보·접근과 바퀴 명령 겹침 방지
+        try:
+            if abs(deg) >= 1.0:
+                self._manual_rot(deg, guard_off)
+            elif abs(cm) >= 0.5:
+                self._manual_trans(cm, guard_off)
+        finally:
+            self._nudging   = False
+            self._step_busy = False
+
+    def _manual_trans(self, cm, guard_off):
+        move_m = max(-0.5, min(0.5, cm / 100.0))
+        direction = 1.0 if move_m > 0 else -1.0
+        lbl  = "전진" if direction > 0 else "후진"
+        side = "전방" if direction > 0 else "후방"
+        c0 = self._clearance(direction)
+        if not guard_off and (c0 is None or c0 < abs(move_m) + 0.05):
+            self._dlog(f"[MOVE] {lbl} {abs(move_m)*100:.0f}cm 거부 — {side} 여유 "
+                       f"{'측정불가' if c0 is None else '%.2fm' % c0} < 이동+5cm")
+            return
+        self._last_motion_ts = time.time()
+        start_xy = self._odom_xy
+        msg = Twist(); msg.linear.x = direction * MANUAL_SPEED
+        t0 = time.time()
+        timeout = abs(move_m) / MANUAL_SPEED * 3.0 + 1.0
+        stopped = None
+        while time.time() - t0 < timeout:
+            if getattr(self, "_step_abort", False):
+                stopped = "사용자 정지"; break
+            if not guard_off:
+                c = self._clearance(direction)
+                if c is not None and c < 0.26:
+                    stopped = f"비상정지 {c:.2f}m"; break
+            if start_xy is not None and self._odom_xy is not None:
+                dx_ = self._odom_xy[0] - start_xy[0]
+                dy_ = self._odom_xy[1] - start_xy[1]
+                if (dx_*dx_ + dy_*dy_) ** 0.5 >= abs(move_m):
+                    break
+            elif time.time() - t0 > abs(move_m) / MANUAL_SPEED:
+                break
+            self._cmd_pub.publish(msg)
+            time.sleep(1 / 15)
+        self._cmd_pub.publish(Twist())
+        moved = abs(move_m)   # 오도메트리 없으면 명령값으로 기록
+        if start_xy is not None and self._odom_xy is not None:
+            dx_ = self._odom_xy[0] - start_xy[0]
+            dy_ = self._odom_xy[1] - start_xy[1]
+            moved = (dx_*dx_ + dy_*dy_) ** 0.5
+        with state_lock:
+            acc = state.get("scene_acc") or {"fwd_cm": 0.0, "rot_deg": 0.0}
+            acc["fwd_cm"] = acc.get("fwd_cm", 0.0) + direction * moved * 100.0
+            state["scene_acc"] = acc
+            acc_now = acc["fwd_cm"]
+        c1 = self._clearance(direction)
+        self._dlog(f"[MOVE] {lbl} {direction*moved*100:+.1f}cm"
+                   + (f" ({stopped})" if stopped else "")
+                   + f" — 단계 누적 {acc_now:+.1f}cm · {side} 여유 "
+                   + ("?" if c1 is None else f"{c1:.2f}m"))
+
+    def _manual_rot(self, deg, guard_off):
+        ang = max(-1.6, min(1.6, deg * 3.14159265 / 180.0))   # 1회 최대 ~90°
+        lbl = "좌회전" if ang > 0 else "우회전"
+        # 팔 뻗은 채 회전 금지 (기존 안전 규칙) — 자동으로 먼저 수납
+        with state_lock:
+            _ext = state["arm_ext"]
+        if _ext is not None and _ext > 0.02:
+            self._dlog("[MOVE] 회전 전 팔 수납 (안전)")
+            self._move_joint_wait(ARM_JOINT, ARM_EXT_MIN, 2, 8.0)
+        if not guard_off:
+            s = self._scan
+            if s is not None:
+                r = np.asarray(s.ranges, dtype=float)
+                m = np.isfinite(r) & (r > SELF_HIT_MIN)
+                if m.any() and float(r[m].min()) < 0.26:
+                    self._dlog(f"[MOVE] {lbl} 거부 — 주변 {float(r[m].min()):.2f}m "
+                               "장애물 (26cm 미만)")
+                    return
+        self._last_motion_ts = time.time()
+        wz  = MANUAL_ROT_SPEED if ang > 0 else -MANUAL_ROT_SPEED
+        dur = abs(ang) / MANUAL_ROT_SPEED
+        msg = Twist(); msg.angular.z = wz
+        t0 = time.time()
+        stopped = None
+        while time.time() - t0 < dur:
+            if getattr(self, "_step_abort", False):
+                stopped = "사용자 정지"; break
+            self._cmd_pub.publish(msg)
+            time.sleep(1 / 15)
+        self._cmd_pub.publish(Twist())
+        done_deg = deg * (min(1.0, (time.time() - t0) / dur) if dur > 0 else 0.0)
+        with state_lock:
+            acc = state.get("scene_acc") or {"fwd_cm": 0.0, "rot_deg": 0.0}
+            acc["rot_deg"] = acc.get("rot_deg", 0.0) + done_deg
+            state["scene_acc"] = acc
+            acc_now = acc["rot_deg"]
+        self._dlog(f"[MOVE] {lbl} {done_deg:+.0f}°"
+                   + (f" ({stopped})" if stopped else "")
+                   + f" — 단계 누적 회전 {acc_now:+.0f}°")
+
+    def _run_scene_moves(self, n):
+        """여정 단계 자동 안무 재생 (별도 스레드) — 티칭값에서 단계 누적을 뺀
+        잔여만 실행. Esc(_step_abort)로 중단 → 패드 보정 → 같은 단계 재클릭 시
+        잔여부터 이어감. 가드 거부/비상정지로 진행이 멈추면 남은 양을 로그로 알림."""
+        moves = SCENE_MOVES.get(n)
+        if not moves:
+            return
+        # 이전 자동 안무 스레드가 있으면 종료를 기다림 (중복 주행 방지)
+        t0 = time.time()
+        while getattr(self, "_auto_busy", False) and time.time() - t0 < 3.0:
+            time.sleep(0.05)
+        self._auto_busy = True
+        try:
+            # 이동 자세 goal(그리퍼 스윙)이 끝날 때까지 잠깐 대기 후 주행
+            t0 = time.time()
+            while not self._goal_done and time.time() - t0 < 5.0:
+                time.sleep(0.1)
+            self._step_abort = False
+            self._run_scene_moves_inner(n, moves)
+        finally:
+            self._auto_busy = False
+
+    def _run_scene_moves_inner(self, n, moves):
+        for kind, target in moves:
+            key = "fwd_cm" if kind == "fwd" else "rot_deg"
+            with state_lock:
+                done = (state.get("scene_acc") or {}).get(key, 0.0)
+            remain = target - done
+            tol = 1.0 if kind == "fwd" else 3.0
+            if abs(remain) < tol:
+                continue
+            self._dlog(f"[AUTO] {SCENES[n]} — "
+                       + (f"{'전진' if remain > 0 else '후진'} {abs(remain):.0f}cm"
+                          if kind == "fwd" else f"회전 {remain:+.0f}°")
+                       + " 자동 실행 (Esc=중단)")
+            while abs(remain) >= tol:
+                if getattr(self, "_step_abort", False):
+                    self._dlog("[AUTO] 중단됨 — 패드 보정 후 같은 단계를 다시 누르면 "
+                               f"잔여({abs(remain):.0f}{'cm' if kind == 'fwd' else '°'})부터 이어감")
+                    return
+                if kind == "fwd":
+                    step = max(-25.0, min(25.0, remain))
+                    self._manual_step(step, 0.0)
+                else:
+                    step = max(-90.0, min(90.0, remain))
+                    self._manual_step(0.0, step)
+                with state_lock:
+                    new_done = (state.get("scene_acc") or {}).get(key, 0.0)
+                if abs(new_done - done) < 0.3:   # 스텝이 거부되거나 전혀 못 움직임
+                    self._dlog(f"[AUTO] 진행 불가 (가드/장애물) — 잔여 "
+                               f"{abs(target - new_done):.0f}{'cm' if kind == 'fwd' else '°'}. "
+                               "패드로 상황 정리 후 단계 재클릭")
+                    return
+                done = new_done
+                remain = target - done
+        self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓")
 
     def _maybe_base_nudge(self, ex: float, dist):
         """좌우 픽셀 오차 → 안전 확인 후 베이스 소폭 전/후진 (별도 스레드)."""
@@ -3071,6 +3522,7 @@ class ElevatorTracker(Node):
             st("✅ 누르기 완료")
             # 수행 완료 → 타겟 자동 해제 (안 하면 추적·자동접근이 같은 버튼에 재시작됨)
             with state_lock:
+                state["press_ok_ts"] = time.time()   # 여정 단계 순차 해제 근거
                 state["target_text"] = None
                 state["phase"]       = "SELECT"
                 state["centered"]    = False
