@@ -49,10 +49,13 @@
     <!-- [성능 최적화] 해상도 낮춰서 포인트클라우드 Hz 향상 -->
     <!-- 424x240x15: 장애물 감지 용도로 충분, CPU 부하 대폭 감소 -->
     <param name="depth_module.profile" value="424x240x15"/>
-    <!-- color: 낮은 해상도로 활성화 (vision_assistant.py 에서 이미지 분석용) -->
+    <!-- color: 1280x720 — 엘리베이터 층 표시기 판독용 (2026-07-15).
+         424x240에서는 2m 거리 7세그 숫자가 세로 4~6px라 사람 눈에 보여도
+         카메라에선 소멸 (실측). depth/포인트클라우드는 424 유지 → Nav2 영향 없음.
+         D435i는 USB3라 대역폭 여유. CPU 상승 시 align_depth(720p 정렬) 끄는 것 고려 -->
     <param name="align_depth.enable" value="true"/>
     <param name="enable_color" value="true"/>
-    <param name="rgb_camera.profile" value="424x240x15"/>
+    <param name="rgb_camera.profile" value="1280x720x15"/>
     <!-- QoS를 SENSOR_DATA로: 데이터 손실보다 속도 우선 -->
     <param name="pointcloud.pointcloud_qos" value="SENSOR_DATA"/>
   </node>

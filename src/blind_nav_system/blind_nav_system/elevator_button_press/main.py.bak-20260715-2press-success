@@ -184,9 +184,9 @@ DET_MAX_DEPTH      = 1.5    # m — 이보다 먼 탐지는 버튼일 수 없음
 # 실전 모드: 타겟 선택 시 lift를 규정 높이로 선점프 → 탐색 시간 대폭 단축.
 # 실험실 태블릿(의자 높이 ~0.7m)에선 방해되므로 False. ★현장 나갈 때 True로★
 USE_HEIGHT_PRIOR = False
-LIFT_PRIOR_CALL  = 0.94   # 호출 버튼(▲▼) lift — 실측(2026-07-15): 실물 홀 press 0.92~0.97
-LIFT_PRIOR_PANEL = 0.94   # 차내 층 버튼 lift — 실측: 실물 차내 press 0.91('5')~0.98('3' 부근)
-# (실물 엘리베이터 실측 기반. 태블릿 연습 환경은 0.43~0.50이었음 — 장소 다르면 +/-로 조정)
+LIFT_PRIOR_CALL  = 0.80   # 호출 버튼(▲▼) 예상 lift
+LIFT_PRIOR_PANEL = 0.85   # 차내 층 버튼 예상 lift
+# (lift↔카메라 실높이 오프셋은 현장 첫 측정으로 보정)
 PRESS_DEPTH        = 0.015  # m — 버튼 표면을 지나 밀어넣는 깊이 (버튼 스트로크)
 PRESS_DIST_MAX     = 0.60   # m — 이보다 멀면 누르기 거부
 ARM_EXT_MIN, ARM_EXT_MAX = 0.00, 0.50  # wrist_extension 안전 범위
@@ -591,7 +591,7 @@ HTML = """
   </script>
 
   <details style="border:1px solid #26263a;border-radius:8px;padding:3px 8px;">
-    <summary style="cursor:pointer;color:#89a;font-size:0.78rem;">🎚 손목·리프트 슬라이더 (lift: +/− 키)</summary>
+    <summary style="cursor:pointer;color:#89a;font-size:0.78rem;">🎚 손목·리프트 슬라이더 (lift는 +/− 키로도 조절)</summary>
   <div id="pitch-row">
     wrist_pitch:
     <input type="range" id="pitch-slider" min="-1.57" max="0.5" step="0.01" value="-0.02"
@@ -1054,15 +1054,6 @@ def place_toggle():
     node = _node_ref[0]
     if node:
         node._dlog(f"[MODE] 장소: {'🛗 차내 (층 숫자)' if pl == 'cab' else '🏢 홀 (호출 ▲▼)'}")
-        # 모드 전환 = 새 패널 앞에 섰다는 뜻 → lift를 실측 규정 높이로 선이동
-        # (탐색 스캔이 0.5m 아래에서 헤매는 시간 절약; 타겟은 방금 해제돼 서보와 충돌 없음)
-        prior = LIFT_PRIOR_CALL if pl == "hall" else LIFT_PRIOR_PANEL
-        with state_lock:
-            cur_lift = state["lift"]
-        if cur_lift is None or abs(cur_lift - prior) > 0.03:
-            node._dlog(f"[MODE] 규정 높이 선이동: lift "
-                       f"{('%.2f' % cur_lift) if cur_lift is not None else '?'}→{prior:.2f}")
-            node._send_goal(["joint_lift"], [prior])
     return jsonify(ok=True, place=pl)
 
 @app.route("/gripper", methods=["POST"])
@@ -2430,35 +2421,6 @@ class ElevatorTracker(Node):
             self._rot_count = 0   # 수직 유지 중이면 카운터 회복
         det = next((d for d in detections
                     if d["text"] == target and not d.get("suspect")), None)
-        # ── [최소 박스 추적] 라벨이 이 프레임에 없을 때만, 잠금 위치에서 가장
-        # 가까운 버튼 박스를 그 버튼으로 간주해 조준 공백을 메움 — 라벨 깜빡임
-        # (모양 추론 프레임 변동)이 READY를 풀고 재정렬시키던 것 완화.
-        # 안전 제약: ①잠금 수명(ts)은 안 건드림 — 신원 유효기간 연장은 라벨만 가능
-        # ②반경 = 버튼 폭 이내 (버튼 간격의 절반 미만 → 옆 버튼으로 못 뜀)
-        # ③패널 박스가 신선(2.5s)할 때만. 실패 시 기존 동작 그대로.
-        if det is None:
-            _lk_tr = getattr(self, "_target_lock", None)
-            _pbs_tr = getattr(self, "_panel_boxes", [])
-            if (_lk_tr and time.time() - _lk_tr["ts"] < 20.0
-                    and _pbs_tr
-                    and time.time() - getattr(self, "_panel_ts", 0) < 2.5):
-                _bw_tr = float(np.median([b["x2"] - b["x1"] for b in _pbs_tr]))
-                _nb, _nd = None, 1e9
-                for _b in _pbs_tr:
-                    _d0 = (abs((_b["x1"] + _b["x2"]) / 2 - _lk_tr["cx"])
-                           + abs((_b["y1"] + _b["y2"]) / 2 - _lk_tr["cy"]))
-                    if _d0 < _nd:
-                        _nb, _nd = _b, _d0
-                if _nb is not None and _nd <= max(50.0, _bw_tr):
-                    det = {"box": dict(_nb), "text": target,
-                           "belief": _lk_tr.get("bel", 0.5),
-                           "fresh": True, "track": True}
-                    _lk_tr["cx"] = (_nb["x1"] + _nb["x2"]) / 2
-                    _lk_tr["cy"] = (_nb["y1"] + _nb["y2"]) / 2
-                    if time.time() - getattr(self, "_track_log_ts", 0) > 8.0:
-                        self._track_log_ts = time.time()
-                        self._dlog(f"[TRACK] '{target}' 라벨 공백 — "
-                                   "잠금 박스 연속 추적으로 조준 유지")
         # [A안] 관측 신뢰 규칙: fresh거나, "그 관측 이후 로봇이 안 움직였다면" 8초까지 유효.
         # (버튼은 정지해 있고 자기 이동은 전부 기록됨 — 시각은 간헐적 교정자면 충분)
         # 단 "같은 관측으로는 1회만" 행동 — 낡은 박스 기반 반복 이동(폭주) 방지.
