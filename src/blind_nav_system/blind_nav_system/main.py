@@ -505,7 +505,7 @@ def web_pull():
     _log("WEB", "당김 트리거 (웹)")
     return jsonify(ok=True)
 
-_social_nav_enabled = True
+_social_nav_enabled = False   # 기본 비활성 (2026-07-24 사용자 요청)
 
 @app.route("/toggle_social_nav", methods=["POST"])
 def toggle_social_nav():
@@ -519,7 +519,7 @@ def toggle_social_nav():
 def obstacle_status():
     return jsonify(_obstacle_state)
 
-_obstacle_push_enabled = True
+_obstacle_push_enabled = False   # 기능 제거 (2026-07-24 사용자 결정 — UI 토글도 삭제)
 
 @app.route("/toggle_obstacle_push", methods=["POST"])
 def toggle_obstacle_push():
@@ -1200,17 +1200,11 @@ HTML = """<!DOCTYPE html>
         <div class="toggle-row">
           <span class="toggle-label">사회적 회피<span class="kbd">2</span></span>
           <label class="toggle-switch">
-            <input type="checkbox" id="social-nav-toggle" checked onchange="toggleSocialNav()">
+            <input type="checkbox" id="social-nav-toggle" onchange="toggleSocialNav()">
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <div class="toggle-row">
-          <span class="toggle-label">장애물 밀기<span class="kbd">3</span></span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="obstacle-push-toggle" checked onchange="toggleObstaclePush()">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
+        <!-- 장애물 밀기 토글 제거 (2026-07-24 사용자 결정) — 백엔드 코드는 휴면 상태로 보존 -->
         <div class="toggle-row">
           <span class="toggle-label">온라인 모드<span class="kbd">4</span></span>
           <label class="toggle-switch">
@@ -1445,21 +1439,15 @@ fetch('/armleft_status').then(r => r.json()).then(d => {
   document.getElementById('armleft-toggle').checked = armleftRunning;
 });
 
-let socialNavOn = true;
+let socialNavOn = false;   // 기본 비활성 (서버 디폴트와 일치)
 function toggleSocialNav() {
   fetch('/toggle_social_nav', {method:'POST'}).then(r => r.json()).then(d => {
     socialNavOn = d.enabled;
-    document.getElementById('social-nav-toggle').checked = socialNavOn;
+    const t = document.getElementById('social-nav-toggle');
+    if (t) t.checked = socialNavOn;
   });
 }
-
-let obstaclePushOn = true;
-function toggleObstaclePush() {
-  fetch('/toggle_obstacle_push', {method:'POST'}).then(r => r.json()).then(d => {
-    obstaclePushOn = d.enabled;
-    document.getElementById('obstacle-push-toggle').checked = obstaclePushOn;
-  });
-}
+// toggleObstaclePush 제거 (2026-07-24) — UI 토글 삭제됨
 
 function switchMap() {
   const f   = document.getElementById('floor-sel').value;
@@ -1654,7 +1642,7 @@ function killAllRobot() {
 const keyToDir = {'ArrowUp':['fwd',1,0],'ArrowDown':['bwd',-0.5,0],
                   'ArrowLeft':['left',0,1],'ArrowRight':['right',0,-1]};
 const FEATURE_KEYS = {1:'armleft-toggle', 2:'social-nav-toggle',
-                      3:'obstacle-push-toggle', 4:'net-mode-toggle'};
+                      4:'net-mode-toggle'};   // 3(장애물 밀기) 제거 (2026-07-24)
 const SYS_KEYS   = {1:'launch', 2:'rviz', 3:'battery', 4:'free', 5:'home'};
 const SYS_LABELS = {launch:'ROS2 Launch', rviz:'RViz2', battery:'배터리 확인',
                     free:'프로세스 정리', home:'홈 위치'};
@@ -1742,8 +1730,8 @@ def _clean_stale_shm_at_boot():
 
 
 def main():
-    Path("/tmp/social_nav_enabled").write_text("1")    # 시작 시 ON
-    Path("/tmp/obstacle_push_enabled").write_text("1") # 시작 시 ON
+    Path("/tmp/social_nav_enabled").write_text("1" if _social_nav_enabled else "0")
+    Path("/tmp/obstacle_push_enabled").write_text("1" if _obstacle_push_enabled else "0")
     _clean_stale_shm_at_boot()   # ← init_ros()보다 반드시 먼저
     init_ros()
     start_subprocesses()
