@@ -127,8 +127,15 @@ def _normalize_tts(text: str) -> str:
     text = text.replace("ITRC", "아이티알씨")
     return text
 
+def _dest_tts(name: str) -> str:
+    """목적지 TTS 표기. '부스'는 행사 부스(ITRC ...)에만 붙임 —
+    방 호수(523호 등)에 '부스'가 붙던 행사용 하드코딩 제거
+    (2026-07-24, location.yaml 5층 방 목록 복원과 함께)."""
+    d = _normalize_tts(name)
+    return f"{d} 부스" if "ITRC" in name else d
+
 def msg4(candidates: List[str]) -> str:
-    c = [f"{_normalize_tts(n)} 부스" for n in candidates[:3]]
+    c = [_dest_tts(n) for n in candidates[:3]]
     if len(c) == 1:
         joined = c[0]
     elif len(c) == 2:
@@ -138,11 +145,11 @@ def msg4(candidates: List[str]) -> str:
     return f"후보가 여러 개 있습니다. {joined} 중 어디로 가실까요?"
 
 def msg5(dest: str) -> str:
-    d = f"{_normalize_tts(dest)} 부스"
+    d = _dest_tts(dest)
     return f"{d}로 이동할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
 
 def msg12(dest: str) -> str:
-    d = f"{_normalize_tts(dest)} 부스"
+    d = _dest_tts(dest)
     return f"{d}로 목적지를 변경할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
 
 
@@ -941,8 +948,11 @@ class GuidanceStateMachine:
             return True
 
         except Exception as e:
-            if self._debug:
-                print(f"[NAV] ROS2 start error: {e}", file=__import__("sys").stderr)
+            # 실패는 무조건 로그에 — debug 플래그 뒤에 숨기면 "안내를 시작하지
+            # 못했습니다"의 원인을 영영 알 수 없음 (2026-07-24 실측)
+            import traceback
+            print(f"[NAV-ERR] ROS2 start 실패: {type(e).__name__}: {e}", flush=True)
+            traceback.print_exc(file=__import__("sys").stdout)
             return False
 
     def _ros_stop(self) -> None:
@@ -1298,6 +1308,9 @@ class InterfaceApp:
                 self._ev_q.put(Event(kind="cancel"))
             elif s == "/backup":
                 self._ev_q.put(Event(kind="backup_warn"))
+            elif s.startswith("/goto "):
+                # 대시보드 장소 클릭 — 정확한 목적지명으로 즉시 출발 (GPT·마이크 생략)
+                self._ev_q.put(Event(kind="goto", text=s[6:].strip()))
             elif s in ("/offline", "/online"):
                 global _force_offline
                 _force_offline = (s == "/offline")
@@ -1543,6 +1556,20 @@ class InterfaceApp:
     # ──────────────────────────────────────────
     # Text (음성 인식 결과) 처리
     # ──────────────────────────────────────────
+    def _handle_goto(self, name: str) -> None:
+        """대시보드 장소 클릭 → 즉시 출발.
+        ★ 임시방편 (2026-07-24 사용자 결정): 개발 효율을 위해 확인 절차를 생략.
+        정식 설계는 "되묻기"가 맞음 — 최종판에서는 msg5 확인(READY_CONFIRM)으로
+        복원할 것: self._say(msg5(name)); self._go_ready_confirm(name)
+        이름이 목록과 정확히 일치할 때만 동작 — GPT·별칭 해석·마이크 전부 생략.
+        (음성 흐름의 확인 절차는 그대로 유지 — 이 직행 통로는 클릭 전용)"""
+        if name not in self.destinations():
+            print(f"[GOTO] 목록에 없는 목적지 무시: {name}", flush=True)
+            return
+        if self.state == State.NAV:
+            self.nav.stop()   # 주행 중 클릭 = 목적지 즉시 변경
+        self._go_nav(name)
+
     def _handle_text(self, text: str) -> None:
         s, ph = self.state, self.phase
 
@@ -1830,6 +1857,8 @@ class InterfaceApp:
                 self._handle_pull()
             elif ev.kind == "text" and ev.text:
                 self._handle_text(ev.text)
+            elif ev.kind == "goto" and ev.text:
+                self._handle_goto(ev.text)
             elif ev.kind == "stt_empty":
                 self._handle_stt_empty()
             elif ev.kind == "stt_timeout":

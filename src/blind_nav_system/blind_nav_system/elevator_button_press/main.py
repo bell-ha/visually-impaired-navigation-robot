@@ -11,6 +11,10 @@ import collections
 import logging
 import cv2
 import numpy as np
+# FastDDS 공유메모리 비활성화(UDP 강제) — 어느 터미널에서 시작해도 적용되도록
+# 코드에서 직접 주입 (rclpy import 전이어야 함). SHM 반복 고장 방지 — 2026-07-24
+os.environ.setdefault("FASTRTPS_DEFAULT_PROFILES_FILE",
+                      os.path.expanduser("~/.ros/fastdds_no_shm.xml"))
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -202,6 +206,10 @@ BASE_TRAVEL_MAX  = 0.15   # m — 누적 이동 상한 (넘으면 정지, 주차
 # 0.02는 정지 마찰을 못 이겨 바퀴가 헛돌면서 누적치만 쌓임 (10cm 이동했다는데 오차 그대로 실측)
 BASE_SPEED       = 0.04   # m/s — press 정렬 미세이동용 (그대로 유지)
 MANUAL_SPEED     = 0.10   # m/s — 조종 패드·자동 안무 전용 (2026-07-15 사용자 요청 증속)
+BOARD_SPEED      = 0.20   # m/s — 긴 직진(≥30cm, 탑승·하차 안무) 전용 증속.
+                          # 0.10이면 185cm에 ~19s가 걸려 닫히는 문에 걸림
+                          # (2026-07-21 사용자 요청). 최대 0.3의 2/3 — 비상정지
+                          # 제동거리 여유 유지. 이동 중 26cm 감시는 그대로 연속 작동.
 MANUAL_ROT_SPEED = 0.30   # rad/s — 수동/자동 회전 속도
 # 라이다는 로봇 "중심" 기준이고 몸통 끝은 중심에서 ~17cm.
 # 라이다는 2D 단면이라 책상 상판처럼 위에서 튀어나온 건 못 봄 — 여유를 너무 줄이지 말 것.
@@ -298,10 +306,19 @@ state = {
     "align_note":   None,   # X정렬 상태 메시지
     "pressing":     False,  # 누르기 시퀀스 진행 중
     "press_status": None,   # 누르기 진행 메시지
+    "authority":    True,   # 이동 제어권 — 대시보드(8080)가 부여/회수하는 주도권.
+                            # False면 모든 이동(서보·스캔·패드·안무·press) 거부,
+                            # 카메라·OCR·UI 관찰은 유지. 시작 시 대시보드가 떠
+                            # 있으면 False(부여 대기), 없으면 True(단독 개발 모드).
 }
 # RLock(재진입 허용): _dlog가 내부에서 이 락을 잡으므로, 락 보유 중 _dlog 호출이
 # 일반 Lock이면 자기 자신과 교착 → 앱 전체 동결 (2026-07-15 ③ 문대기 동결 사건)
 state_lock = threading.RLock()
+
+def _authority_ok() -> bool:
+    """이동 제어권 확인 — 모든 이동 진입점의 공통 관문."""
+    with state_lock:
+        return bool(state.get("authority", True))
 
 # 판단/행동 로그 버퍼 (웹 패널 표시 + 복사용). HTTP 접근 로그는 침묵시킴.
 _DECISIONS = collections.deque(maxlen=400)
@@ -362,6 +379,18 @@ HTML = """
     .tgl.amber.on .tgl-track { background:#b8651a; }
     .tgl.on .tgl-knob { left:25px; }
     .tgl.warn .tgl-track { background:#b22; }
+    /* 좁은 창: 2열 그리드 → 1열 + 페이지 스크롤 허용 (로그·컨트롤 접근 보장) */
+    @media (max-width: 1100px) {
+      body { overflow: auto !important; height: auto !important; }
+      #main-grid { grid-template-columns: 1fr !important; }
+      #dlog { min-height: 30vh !important; }
+    }
+    /* 로그 전체화면 오버레이 (⛶ 확대 버튼 토글) */
+    #dlog.expanded {
+      position: fixed; left: 2vw; top: 5vh; width: 96vw; height: 90vh;
+      z-index: 999; font-size: 0.9rem; box-shadow: 0 0 40px #000;
+      border-color: #46a;
+    }
   </style>
 </head>
 <body>
@@ -376,7 +405,7 @@ HTML = """
       🔴 누르기 <span style="font-size:0.75rem;opacity:0.7;">Space</span></button>
   </div>
   <!-- 본문 그리드: 좌 = 영상+로그 / 우 = 컨트롤 전체 표시 (양쪽 다 스크롤 없음) -->
-  <div style="display:grid;grid-template-columns:1fr 390px;flex:1;min-height:0;gap:10px;padding:8px;">
+  <div id="main-grid" style="display:grid;grid-template-columns:1fr 390px;flex:1;min-height:0;gap:10px;padding:8px;">
     <div style="display:flex;flex-direction:column;min-width:0;min-height:0;gap:4px;">
   <!-- 영상: gripper 크게(조준 확인) + 우측 썸네일 3개 세로 -->
   <div style="display:flex;gap:6px;min-height:0;flex-shrink:0;">
@@ -406,7 +435,12 @@ HTML = """
   <div style="flex:1;min-height:50px;display:flex;flex-direction:column;">
     <div style="display:flex;justify-content:space-between;align-items:center;">
       <span style="color:#89a;font-size:0.78rem;font-weight:700;">🧠 판단 로그</span>
-      <a href="/decisions" target="_blank" style="color:#68c;font-size:0.72rem;">전체 열기</a>
+      <div style="display:flex;gap:10px;align-items:center;">
+        <button id="log-zoom-btn" onclick="toggleLogZoom()" title="로그를 전체화면으로 확대/복귀"
+                style="background:#234;color:#9fc;border:none;border-radius:5px;
+                       padding:2px 10px;cursor:pointer;font-size:0.72rem;">⛶ 확대</button>
+        <a href="/decisions" target="_blank" style="color:#68c;font-size:0.72rem;">전체 열기</a>
+      </div>
     </div>
     <pre id="dlog" style="background:#0d1117;color:#9fb;border:1px solid #234;
          border-radius:8px;padding:6px 10px;flex:1;min-height:0;overflow-y:auto;
@@ -584,6 +618,12 @@ HTML = """
     <button id="scn-3" onclick="setScene(3)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">④ 탑승</button>
     <button id="scn-4" onclick="setScene(4)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">⑤ 층</button>
     <button id="scn-5" onclick="setScene(5)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">⑥ 하차</button>
+    <button id="next-btn" onclick="nextScene()"
+            title="다음 단계로 진행 — 조건 미충족이면 경고만 남기고 진행"
+            style="background:#2a2a3e;color:#9ab;border:none;border-radius:6px;
+                   padding:4px 14px;cursor:pointer;font-size:0.8rem;font-weight:800;
+                   white-space:nowrap;transition:background .2s, box-shadow .2s;">
+      ▶ 다음 <span style="font-size:0.68rem;opacity:0.7;">N</span></button>
     <span id="scn-hint" style="font-size:0.74rem;color:#9ab;white-space:nowrap;"></span>
   </div>
   <!-- 조종 패드: 클릭 1번 = 스텝 1번 (⇧1 무관, 낮춘 가드 — 이동 중 26cm 비상정지) -->
@@ -622,6 +662,19 @@ HTML = """
   <div id="align-note" style="color:#fc4;font-size:0.9rem;min-height:1.2em;"></div>
 
   <script>
+    function toggleLogZoom() {
+      const el = document.getElementById('dlog');
+      const on = el.classList.toggle('expanded');
+      document.getElementById('log-zoom-btn').textContent = on ? '✕ 닫기' : '⛶ 확대';
+      if (on) el.scrollTop = el.scrollHeight;   // 확대 직후 최신 로그로
+    }
+    // 확대 상태에서 로그 바깥(오버레이 밖) 클릭 시 자동 복귀
+    document.addEventListener('click', e => {
+      const el = document.getElementById('dlog');
+      if (el && el.classList.contains('expanded')
+          && !el.contains(e.target)
+          && e.target.id !== 'log-zoom-btn') toggleLogZoom();
+    });
     setInterval(() => {
       fetch('/decisions').then(r => r.text()).then(t => {
         const el = document.getElementById('dlog');
@@ -751,6 +804,13 @@ HTML = """
       fetch('/scene', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({n})});
     }
+    let curScene = null;   // poll()이 서버 상태로 갱신 — "▶ 다음" 버튼용
+    function nextScene() {
+      // 여정 시작 전이면 ①부터, 아니면 다음 단계로. 조건 미충족이어도 진행
+      // (서버가 경고 로그만 남김 — "금지 대신 경고" 원칙)
+      const n = curScene == null ? 0 : Math.min(5, curScene + 1);
+      setScene(n);
+    }
     function stepMove(sign) {
       const cm = parseFloat(document.getElementById('step-cm').value);
       fetch('/step_move', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -777,6 +837,7 @@ HTML = """
       if (e.code === 'KeyC')   { setGripper(false);  return; }
       if (e.code === 'KeyH')   { setWristForward();  return; }
       if (e.code === 'KeyM')   { togglePlace();      return; }
+      if (e.code === 'KeyN')   { nextScene();        return; }
       if (e.code === 'Equal' || e.code === 'NumpadAdd')      { liftNudge(+0.01); return; }
       if (e.code === 'Minus' || e.code === 'NumpadSubtract') { liftNudge(-0.01); return; }
       // 조종 패드 스텝: W/S=전/후진, A/D=좌/우회전 (스텝 크기는 셀렉트 박스)
@@ -809,6 +870,7 @@ HTML = """
     function poll() {
       fetch('/status').then(r => r.json()).then(s => {
         const banner = document.getElementById('banner');
+        banner.style.background = '';   // 제어권 배너의 배경 오버라이드 초기화
         // X정렬 상태 메시지
         const an = document.getElementById('align-note');
         if (an) an.textContent = s.align_note || '';
@@ -843,7 +905,11 @@ HTML = """
             pbtn.style.opacity = pbtn.disabled ? 0.4 : 1.0;
           }
         });
-        if (s.pressing) {
+        if (s.authority === false) {
+          banner.textContent = '⛔ 제어권 없음 — 대시보드(8080)에서 엘리베이터 제어권을 켜세요 (관찰만 가능)';
+          banner.className = '';
+          banner.style.background = '#5a1a1a';
+        } else if (s.pressing) {
           banner.textContent = `🤖 ${s.press_status || '누르기 진행 중...'}`;
           banner.className = 'tracking';
         } else if (s.centered && s.ex != null &&
@@ -893,6 +959,20 @@ HTML = """
           b.style.outline    = on ? '1px solid #4e8'
                              : (cur != null && i === cur + 1 && s.scene_next_ok
                                 ? '1px solid #46a' : 'none');
+        }
+        // "▶ 다음" 버튼: 조건 충족 = 초록 발광 (지금 눌러도 됨), 평소 = 회색
+        curScene = cur;
+        const nb = document.getElementById('next-btn');
+        if (nb) {
+          nb.disabled = (cur === 5);
+          nb.style.opacity = nb.disabled ? 0.35 : 1.0;
+          if (cur != null && cur < 5 && s.scene_next_ok) {
+            nb.style.background = '#2a8f2a'; nb.style.color = '#fff';
+            nb.style.boxShadow  = '0 0 12px #2a8f2a';
+          } else {
+            nb.style.background = '#2a2a3e'; nb.style.color = '#9ab';
+            nb.style.boxShadow  = 'none';
+          }
         }
         // 단계별 안내 + 이동 단계에서 조종 패드 강조
         const HINTS = ['▼/▲ 선택 → Space', '🤖 자동: 전진 56cm→우회전 90° · Esc=중단',
@@ -1000,6 +1080,16 @@ def status():
     # 실측(2026-07-15): 이 홀 대기 위치에서 닫힘 0.97m / 열림 1.66m —
     # 절대 기준 1.5m + 점프 +0.5m + 2연속 관측 (0.85m/1회는 닫힌 문을 오판했음)
     if s.get("scene") == 2 and _n is not None and clear_f is not None:
+        # 문 감지는 좁은 원뿔(±10°)로 재측정 — ±30° min은 문 옆 벽·문틀에 잡혀
+        # 문이 열려도 값이 안 뜀 (2026-07-21 현장 실측: 열림에도 0.95→0.97m).
+        # 0.95m 거리에서 ±10° = 좌우 ±17cm → 문 폭(~90cm) 한가운데만 본다.
+        # UI 표시(clear_f)도 이 값으로 통일 — 기준선과 같은 자로 재야 혼란 없음.
+        try:
+            _df = _n._clearance(1.0, half_ang=0.175)
+            if _df is not None:
+                clear_f = round(_df, 2)
+        except Exception:
+            pass
         base_set_now = False
         with state_lock:
             base = state.get("door_base")
@@ -1045,6 +1135,13 @@ def status():
         next_ok = (s.get("press_ok_ts") or 0) > (s.get("scene_ts") or 0)
     elif sc == 2:
         next_ok = bool(s.get("door_open"))
+    # ▶ 다음 준비 알림: 게이트 있는 단계(①⑤ press·③ 문열림)에서 조건이
+    # 충족되는 순간 1회만 로그 — ②④⑥은 항상 진행 가능이라 알림 생략
+    if _n is not None and sc in (0, 2, 4):
+        if next_ok and getattr(_n, "_next_ok_prev", None) != (sc, True):
+            _n._dlog(f"[SCENE] ▶ 다음 단계 준비 완료 — {SCENES[sc + 1]} 진행 가능 "
+                     "(▶ 다음 버튼 또는 N키)")
+        _n._next_ok_prev = (sc, next_ok)
     target = s["target_text"]
     ex = ey = None
     if target:
@@ -1067,6 +1164,7 @@ def status():
                    lock_shape=bool(s.get("lock_shape")),
                    dz=_dead_zone_px(s.get("target_dist")),
                    scene=s.get("scene"), scene_acc=s.get("scene_acc"),
+                   authority=bool(s.get("authority", True)),
                    clear_f=clear_f, clear_b=clear_b,
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
                    door_base=s.get("door_base"))
@@ -1287,10 +1385,13 @@ def scene_set():
             elif prev == 2 and n == 3 and not _dopen:
                 node._dlog("[SCENE] ⚠ 문 열림 미감지 상태로 탑승 시작")
     # 단계별 자세 — 반드시 한 goal로 묶어 전송 (단일-goal 서버의 선점·유실 방지)
+    _auth = _authority_ok()
+    if node and not _auth:
+        node._dlog("[SCENE] ⛔ 제어권 없음 — 자세 변경·자동 안무 생략 (단계 표시만 전환)")
     if n in (0, 4):
         # press 단계: 홀/차내 모드 + 그리퍼 전방(인식 자세) + 열기 + lift 규정 높이
         _set_place("hall" if n == 0 else "cab", send_lift=False)
-        if node:
+        if node and _auth:
             prior = LIFT_PRIOR_CALL if n == 0 else LIFT_PRIOR_PANEL
             node._dlog("[SCENE] 인식 자세 — 그리퍼 전방·열기, lift 규정 높이")
             node._send_goal(
@@ -1298,8 +1399,20 @@ def scene_set():
                  GRIPPER_JOINT, "joint_lift"],
                 [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, 0.0, GRIPPER_OPEN_M, prior])
     else:
+        # 이동 단계(②③④⑥): 타겟 강제 해제 — press 실패 경로는 타겟을 유지하므로,
+        # 그 상태로 주행에 들어가면 서보/자동접근(phase TRACK 잔존)이 주행 중
+        # 팔을 도로 뻗을 수 있음 (문틀 충돌 위험). 이동 단계 = 추적 종료가 원칙.
+        with state_lock:
+            if state["target_text"] is not None:
+                state["target_text"] = None
+                state["phase"]       = "SELECT"
+                state["centered"]    = False
+                state["press_ready"] = False
+                if node:
+                    _DECISIONS.append(f"{time.strftime('%H:%M:%S')} "
+                                      f"[SCENE] 이동 단계 진입 — 타겟 자동 해제 (추적 종료)")
         # 이동 단계(②③④⑥): 팔 수납 + 그리퍼 안쪽 + 닫기 — 문틀·벽 충돌 방지
-        if node:
+        if node and _auth:
             node._dlog("[SCENE] 이동 자세 — 팔 수납·그리퍼 안쪽·닫기")
             node._send_goal(
                 ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll",
@@ -1381,6 +1494,36 @@ def reset():
         state["centered"]    = False
         state["press_ready"]  = False
     return jsonify(ok=True)
+
+@app.route("/authority", methods=["GET", "POST"])
+def authority_route():
+    """이동 제어권 부여/회수 — 대시보드(8080)가 호출하는 주도권 관리 API.
+    회수 시: 진행 중인 모든 이동 즉시 중단 + 바퀴 정지 + 타겟 해제."""
+    if request.method == "GET":
+        with state_lock:
+            return jsonify(granted=bool(state.get("authority", True)))
+    granted = bool((request.json or {}).get("granted", False))
+    node = _node_ref[0]
+    with state_lock:
+        prev = bool(state.get("authority", True))
+        state["authority"] = granted
+        if not granted:
+            # 회수 = 즉시 전면 정지: 타겟 해제 + 진행 중 스텝/안무 중단
+            state["target_text"] = None
+            state["phase"]       = "SELECT"
+            state["centered"]    = False
+            state["press_ready"] = False
+    if node and prev != granted:
+        if not granted:
+            node._step_abort = True                # 수동 스텝·자동 안무 즉시 탈출
+            try:
+                node._cmd_pub.publish(Twist())     # 바퀴 정지 (안전 최우선)
+            except Exception:
+                pass
+            node._dlog("[AUTH] ⛔ 제어권 회수됨 (대시보드) — 모든 이동 중단·차단, 관찰만 가능")
+        else:
+            node._dlog("[AUTH] ✅ 제어권 부여됨 (대시보드) — 이동 가능")
+    return jsonify(ok=True, granted=granted)
 
 @app.route("/wrist_forward", methods=["POST"])
 def wrist_forward():
@@ -1503,10 +1646,16 @@ class ElevatorTracker(Node):
     def _on_odom(self, msg):
         p_ = msg.pose.pose.position
         self._odom_xy = (p_.x, p_.y)
+        q_ = msg.pose.pose.orientation
+        # 쿼터니언 → yaw — 회전 스텝의 실회전량 피드백용 (시간 개루프 언더슛 해결)
+        self._odom_yaw = float(np.arctan2(2.0 * (q_.w * q_.z + q_.x * q_.y),
+                                          1.0 - 2.0 * (q_.y * q_.y + q_.z * q_.z)))
 
-    def _clearance(self, direction: float):
-        """이동 방향(+1 전진 / -1 후진) ±30° 섹터의 최소 장애물 거리(m).
-        로봇 자기 몸(SELF_HIT_MIN 미만)은 무시. 스캔 없으면 None."""
+    def _clearance(self, direction: float, half_ang: float = GUARD_HALF_ANG):
+        """이동 방향(+1 전진 / -1 후진) ±half_ang 섹터의 최소 장애물 거리(m).
+        로봇 자기 몸(SELF_HIT_MIN 미만)은 무시. 스캔 없으면 None.
+        기본 ±30°는 이동 가드용. 문 열림 감지는 ±10°로 좁혀 호출할 것 —
+        30°는 0.95m에서 좌우 55cm씩 퍼져 문 옆 벽을 계속 잡는다."""
         s = self._scan
         if s is None:
             return None
@@ -1515,7 +1664,7 @@ class ElevatorTracker(Node):
         base_ang = (ang + LASER_YAW_OFFSET + np.pi) % (2 * np.pi) - np.pi
         target = 0.0 if direction > 0 else np.pi
         diff = np.abs((base_ang - target + np.pi) % (2 * np.pi) - np.pi)
-        m = (diff < GUARD_HALF_ANG) & np.isfinite(r) & (r > SELF_HIT_MIN)
+        m = (diff < half_ang) & np.isfinite(r) & (r > SELF_HIT_MIN)
         return float(r[m].min()) if m.any() else 99.0
 
     def _set_align_note(self, msg):
@@ -1530,8 +1679,8 @@ class ElevatorTracker(Node):
         direction = 1.0 if move_m > 0 else -1.0
         with state_lock:
             guard_off = state["guard_off"]
-            if not state["base_align"]:
-                return False   # 몸체 이동 마스터 스위치 OFF — 바퀴 절대 금지
+            if not state["base_align"] or not state.get("authority", True):
+                return False   # 몸체이동 OFF 또는 제어권 없음 — 바퀴 절대 금지
         if not guard_off:
             c = self._clearance(direction)
             # 이동량 비례 가드: 이동 후에도 CLEAR_MARGIN 이격이 남으면 허용
@@ -1582,8 +1731,8 @@ class ElevatorTracker(Node):
         self._last_motion_ts = time.time()   # [A안] 이동 발생 기록
         with state_lock:
             guard_off = state["guard_off"]
-            if not state["base_align"]:
-                return False   # 몸체 이동 마스터 스위치 OFF — 회전도 금지
+            if not state["base_align"] or not state.get("authority", True):
+                return False   # 몸체이동 OFF 또는 제어권 없음 — 회전도 금지
         if not guard_off:
             s = self._scan
             if s is not None:
@@ -1613,6 +1762,9 @@ class ElevatorTracker(Node):
         가드는 낮춰 적용: 시작 여유 ≥ 이동량+5cm, 이동 중 26cm 침범 시 비상정지.
         (라이다가 25cm 미만 레이는 자기 몸으로 보고 버리므로 26cm이 측정 바닥.)
         guard_off(⇧2)면 생략. 결과는 [MOVE] 로그 + scene_acc 누적 = 티칭 기록."""
+        if not _authority_ok():
+            self._dlog("[MOVE] ⛔ 제어권 없음 — 대시보드에서 엘리베이터 제어권을 부여하세요")
+            return
         if getattr(self, "_step_busy", False):
             self._dlog("[MOVE] 이미 이동 중 — 무시 (멈추려면 Esc)")
             return
@@ -1639,6 +1791,8 @@ class ElevatorTracker(Node):
         direction = 1.0 if move_m > 0 else -1.0
         lbl  = "전진" if direction > 0 else "후진"
         side = "전방" if direction > 0 else "후방"
+        # 긴 직진(≥30cm, 탑승·하차 안무)은 증속 — 문에 걸리는 것 방지
+        spd = BOARD_SPEED if abs(move_m) >= 0.30 else MANUAL_SPEED
         c0 = self._clearance(direction)
         if not guard_off and (c0 is None or c0 < abs(move_m) + 0.05):
             self._dlog(f"[MOVE] {lbl} {abs(move_m)*100:.0f}cm 거부 — {side} 여유 "
@@ -1646,9 +1800,9 @@ class ElevatorTracker(Node):
             return
         self._last_motion_ts = time.time()
         start_xy = self._odom_xy
-        msg = Twist(); msg.linear.x = direction * MANUAL_SPEED
+        msg = Twist(); msg.linear.x = direction * spd
         t0 = time.time()
-        timeout = abs(move_m) / MANUAL_SPEED * 3.0 + 1.0
+        timeout = abs(move_m) / spd * 3.0 + 1.0
         stopped = None
         while time.time() - t0 < timeout:
             if getattr(self, "_step_abort", False):
@@ -1662,7 +1816,7 @@ class ElevatorTracker(Node):
                 dy_ = self._odom_xy[1] - start_xy[1]
                 if (dx_*dx_ + dy_*dy_) ** 0.5 >= abs(move_m):
                     break
-            elif time.time() - t0 > abs(move_m) / MANUAL_SPEED:
+            elif time.time() - t0 > abs(move_m) / spd:
                 break
             self._cmd_pub.publish(msg)
             time.sleep(1 / 15)
@@ -1702,18 +1856,45 @@ class ElevatorTracker(Node):
                                "장애물 (26cm 미만)")
                     return
         self._last_motion_ts = time.time()
-        wz  = MANUAL_ROT_SPEED if ang > 0 else -MANUAL_ROT_SPEED
-        dur = abs(ang) / MANUAL_ROT_SPEED
+        # 소각도(<15°)는 저속 회전 — 관성 오버슛을 줄여 미세 보정이 수렴하게
+        wz_mag = MANUAL_ROT_SPEED if abs(ang) >= 0.26 else 0.15
+        wz  = wz_mag if ang > 0 else -wz_mag
+        dur = abs(ang) / wz_mag
         msg = Twist(); msg.angular.z = wz
         t0 = time.time()
         stopped = None
-        while time.time() - t0 < dur:
+        # 오도메트리 yaw 피드백: 시간 개루프는 가감속 램프 때문에 항상 언더슛
+        # (2026-07-21 현장 실측: -90° 안무 후 -10° 수동 보정 필요했음).
+        # 전진(_manual_trans)이 odom 거리 피드백으로 정확했던 것과 같은 방식.
+        # odom 미수신이면 기존 시간 방식으로 폴백.
+        yaw_prev = getattr(self, "_odom_yaw", None)
+        use_odom = yaw_prev is not None
+        turned = 0.0
+        # 관성 리드: 정지 명령 후에도 ~0.2s분 더 돎 → 그만큼 일찍 명령을 끊고
+        # 관성이 나머지를 채우게 한다. 없으면 +5° 오버슛 ↔ 반대 보정의 무한
+        # 진동 (2026-07-21 ② 안무 -85°↔-95° 왕복 실측)
+        stop_lead = 0.23 * wz_mag
+        while time.time() - t0 < (dur * 3.0 + 1.0 if use_odom else dur):
             if getattr(self, "_step_abort", False):
                 stopped = "사용자 정지"; break
+            if use_odom:
+                cur = getattr(self, "_odom_yaw", None)
+                if cur is not None:
+                    turned += (cur - yaw_prev + np.pi) % (2 * np.pi) - np.pi
+                    yaw_prev = cur
+                    if abs(turned) >= abs(ang) - stop_lead:
+                        break   # 목표 직전 정지 → 관성이 잔여분을 채움
             self._cmd_pub.publish(msg)
             time.sleep(1 / 15)
         self._cmd_pub.publish(Twist())
-        done_deg = deg * (min(1.0, (time.time() - t0) / dur) if dur > 0 else 0.0)
+        if use_odom:
+            time.sleep(0.3)   # 관성 잔여 회전까지 실측에 포함
+            cur = getattr(self, "_odom_yaw", None)
+            if cur is not None:
+                turned += (cur - yaw_prev + np.pi) % (2 * np.pi) - np.pi
+            done_deg = float(np.degrees(turned))
+        else:
+            done_deg = deg * (min(1.0, (time.time() - t0) / dur) if dur > 0 else 0.0)
         with state_lock:
             acc = state.get("scene_acc") or {"fwd_cm": 0.0, "rot_deg": 0.0}
             acc["rot_deg"] = acc.get("rot_deg", 0.0) + done_deg
@@ -1729,6 +1910,9 @@ class ElevatorTracker(Node):
         잔여부터 이어감. 가드 거부/비상정지로 진행이 멈추면 남은 양을 로그로 알림."""
         moves = SCENE_MOVES.get(n)
         if not moves:
+            return
+        if not _authority_ok():
+            self._dlog("[AUTO] ⛔ 제어권 없음 — 자동 안무 생략 (대시보드에서 부여 필요)")
             return
         # 이전 자동 안무 스레드가 있으면 종료를 기다림 (중복 주행 방지)
         t0 = time.time()
@@ -1758,13 +1942,16 @@ class ElevatorTracker(Node):
                        + (f"{'전진' if remain > 0 else '후진'} {abs(remain):.0f}cm"
                           if kind == "fwd" else f"회전 {remain:+.0f}°")
                        + " 자동 실행 (Esc=중단)")
+            flips, last_sign = 0, (1 if remain > 0 else -1)
             while abs(remain) >= tol:
                 if getattr(self, "_step_abort", False):
                     self._dlog("[AUTO] 중단됨 — 패드 보정 후 같은 단계를 다시 누르면 "
                                f"잔여({abs(remain):.0f}{'cm' if kind == 'fwd' else '°'})부터 이어감")
                     return
                 if kind == "fwd":
-                    step = max(-25.0, min(25.0, remain))
+                    # 50cm 단위(클램프 최대) — 25cm 쪼개기는 정지·재출발 오버헤드만
+                    # 만들었음. 이동 중 26cm 비상정지 감시는 스텝 크기와 무관하게 연속.
+                    step = max(-50.0, min(50.0, remain))
                     self._manual_step(step, 0.0)
                 else:
                     step = max(-90.0, min(90.0, remain))
@@ -1778,12 +1965,24 @@ class ElevatorTracker(Node):
                     return
                 done = new_done
                 remain = target - done
+                # 진동 감지: 잔여 부호가 2번 뒤집히면 (오버슛↔보정 왕복) 그만 —
+                # 무한 왕복으로 시간·배터리를 태우는 것보다 ±수° 오차가 낫다
+                # (2026-07-21 ② 안무 -85°↔-95° 16회 왕복 실측)
+                s_ = 1 if remain > 0 else -1
+                if abs(remain) >= tol and s_ != last_sign:
+                    flips += 1
+                    if flips >= 2:
+                        self._dlog(f"[AUTO] 잔여 {remain:+.0f}"
+                                   f"{'cm' if kind == 'fwd' else '°'} — 진동 감지, "
+                                   "이 정도로 마침 (필요하면 패드로 미세 보정)")
+                        break
+                last_sign = s_
         self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓")
 
     def _maybe_base_nudge(self, ex: float, dist):
         """좌우 픽셀 오차 → 안전 확인 후 베이스 소폭 전/후진 (별도 스레드)."""
         with state_lock:
-            enabled  = state["base_align"]
+            enabled  = state["base_align"] and state.get("authority", True)
             pressing = state["pressing"]
             travel   = state["base_travel"]
         if not enabled or pressing or self._nudging:
@@ -2035,6 +2234,14 @@ class ElevatorTracker(Node):
                    if d.get("text", "").strip() in cell_of
                    and d.get("belief", 0) >= 0.45]
         if not anchors:
+            # ── 앵커 우선 규칙: 최근(15초)에 앵커 기반 정합이 커밋됐다면 모양
+            # 전용 정합은 개입 금지. 앵커는 급이 다른 증거인데, 앵커 판독 주기
+            # (5~7초 실측) 사이사이에 모양 셔플이 맵을 덮어써 타겟 예상 위치가
+            # 반 칸씩 점프 → 서보 무한 왕복을 만들던 것 차단
+            # (2026-07-24 실측: 아랫줄 '4' 1분51초 수렴 실패, lift 0.87↔0.92 왕복)
+            if time.time() - getattr(self, "_map_anchored_ts", 0.0) < 15.0:
+                self._map_streak = 0
+                return detections
             # ── 모양 전용 정합 (판독 가뭄 폴백) ──────────────────────────────
             # 글자가 하나도 안 읽혀도 박스 패턴이 배치와 "유일하게" 끼워 맞으면
             # 라벨 추론. 실측 동기: 차내에서 박스 5개가 배치 패턴 그대로 잡혔는데
@@ -2199,6 +2406,8 @@ class ElevatorTracker(Node):
             self._map_sig, self._map_streak = sig, 1
         if self._map_streak < 2:
             return detections
+        # 앵커 기반 정합 커밋 — 이후 15초간 모양 전용 정합의 맵 개입을 차단하는 기준
+        self._map_anchored_ts = time.time()
         # 맵 유도 탐색용: 모든 셀(가려진 버튼 포함)의 예상 화면 좌표 저장 —
         # 타겟이 안 보일 때 SEEK가 군집 중심 대신 이 좌표로 시야를 유도
         _axp, _ayp = _ctr(ad_best)
@@ -2451,29 +2660,10 @@ class ElevatorTracker(Node):
             if roi is not None:
                 # ── 원형 피팅: 확대 이미지에서 버튼 원 테두리를 찾아
                 #    박스 중심을 진짜 버튼 중심에 스냅 + 크기도 원에 맞춤 ──
-                def _refine_circle(img, bb):
-                    x1i, y1i = int(bb["x1"]), int(bb["y1"])
-                    x2i, y2i = int(bb["x2"]), int(bb["y2"])
-                    m = int(max(x2i - x1i, y2i - y1i) * 0.4) + 4
-                    xa, ya = max(0, x1i - m), max(0, y1i - m)
-                    crop = img[ya:min(IMAGE_H, y2i + m), xa:min(IMAGE_W, x2i + m)]
-                    if crop.size == 0:
-                        return None
-                    g = cv2.medianBlur(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), 5)
-                    rmin = max(6, int((x2i - x1i) * 0.35))
-                    rmax = max(rmin + 4, int(max(x2i - x1i, y2i - y1i)))
-                    cir = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1.2,
-                                           minDist=1000, param1=120, param2=30,
-                                           minRadius=rmin, maxRadius=rmax)
-                    if cir is None:
-                        return None
-                    cx, cy, r = cir[0][0]
-                    return (xa + float(cx), ya + float(cy), float(r))
-
                 for d in detections:
                     if d["text"] != tgt0:
                         continue
-                    ref = _refine_circle(ocr_input, d["box"])
+                    ref = self._refine_circle(ocr_input, d["box"])
                     if ref:
                         rcx, rcy, rr = ref
                         d["box"] = {"x1": rcx - rr, "y1": rcy - rr,
@@ -2582,6 +2772,27 @@ class ElevatorTracker(Node):
 
             # ── 버튼 맵: 차내에서 배치 사전지식으로 안 읽힌 버튼의 정체 확정 ──
             detections = self._apply_button_map(detections, raw_dets, place0)
+
+            # ── 타겟 원형 스냅 (출처 무관): 모양 정합·합성 박스는 1단계 탐지기의
+            # raw 박스라 점자·라벨까지 포함해 중심이 위로 치우침 — 실판독 타겟만
+            # ROI 경로에서 스냅되던 것을 최종 타겟에 항상 적용.
+            # (2026-07-21 실측: 모양 추론 '4' press가 버튼 살짝 위 빈 곳을 누름.
+            #  같은 세션 실판독 '5'는 정확 — 스냅 유무가 유일한 차이였음)
+            if tgt0:
+                for d in detections:
+                    if d.get("text") != tgt0 or d.get("suspect"):
+                        continue
+                    ref3 = self._refine_circle(frame, d["box"])
+                    if ref3:
+                        rcx3, rcy3, rr3 = ref3
+                        _oldcy = (d["box"]["y1"] + d["box"]["y2"]) / 2
+                        d["box"] = {"x1": rcx3 - rr3, "y1": rcy3 - rr3,
+                                    "x2": rcx3 + rr3, "y2": rcy3 + rr3}
+                        if d.get("shape") and abs(rcy3 - _oldcy) > 4 and \
+                                time.time() - getattr(self, "_snap_log_ts", 0) > 8.0:
+                            self._snap_log_ts = time.time()
+                            self._dlog(f"[SNAP] '{tgt0}' 합성 박스를 버튼 원 중심으로 "
+                                       f"교정 (y{rcy3 - _oldcy:+.0f}px)")
 
             if roi is None and tgt0 and any(d["text"] == tgt0 for d in detections):
                 self._roi_miss = 0   # 전체화면에서 재발견 → ROI 재개
@@ -2697,6 +2908,28 @@ class ElevatorTracker(Node):
             self.get_logger().error(str(e))
         finally:
             self._processing = False
+
+    @staticmethod
+    def _refine_circle(img, bb):
+        """버튼 원 테두리를 Hough로 찾아 박스를 원 중심·크기에 스냅.
+        img는 640x480 (표시 프레임 또는 확대 OCR 입력 — 둘 다 동일 크기)."""
+        x1i, y1i = int(bb["x1"]), int(bb["y1"])
+        x2i, y2i = int(bb["x2"]), int(bb["y2"])
+        m = int(max(x2i - x1i, y2i - y1i) * 0.4) + 4
+        xa, ya = max(0, x1i - m), max(0, y1i - m)
+        crop = img[ya:min(IMAGE_H, y2i + m), xa:min(IMAGE_W, x2i + m)]
+        if crop.size == 0:
+            return None
+        g = cv2.medianBlur(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), 5)
+        rmin = max(6, int((x2i - x1i) * 0.35))
+        rmax = max(rmin + 4, int(max(x2i - x1i, y2i - y1i)))
+        cir = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1.2,
+                               minDist=1000, param1=120, param2=30,
+                               minRadius=rmin, maxRadius=rmax)
+        if cir is None:
+            return None
+        cx, cy, r = cir[0][0]
+        return (xa + float(cx), ya + float(cy), float(r))
 
     def _annotate(self, frame, detections):
         vis = frame.copy()
@@ -2830,6 +3063,8 @@ class ElevatorTracker(Node):
                              daemon=True).start()
 
     def _servo_step(self, detections, lift):
+        if not _authority_ok():
+            return   # 제어권 없음 — 서보·스캔·자동접근 전부 침묵 (관찰만)
         with state_lock:
             target = state["target_text"]
             tdist  = state["target_dist"]
@@ -2924,6 +3159,12 @@ class ElevatorTracker(Node):
         if not usable:
             # 클릭 대기(누르기 활성) 중엔 인식이 끊겨도 SEEK/스캔으로 움직이지 않음 — 동결 유지
             if self._is_press_ready():
+                lk_fr = getattr(self, "_target_lock", None)
+                if lk_fr is not None:
+                    lk_fr["ts"] = time.time()   # 동결 중 잠금 수명 연장 —
+                    # 로봇 정지 = 버튼 위치 불변. 잠금이 만료되면 다음 모양 정합
+                    # 프레임이 엉뚱한 버튼에 새 잠금을 만들어 조준이 점프한다
+                    # (2026-07-21 ⑤ 실측: 잠금 재생성 반복 → READY 동결 반복 해제)
                 return
             # ── 판독 없는 접근 지속: CENTERED 래치 + 잠금 20초 이내면 남은 접근은
             # depth만으로 진행. 문 심볼처럼 판독이 드문(1분/회 실측) 타겟이
@@ -3006,7 +3247,11 @@ class ElevatorTracker(Node):
                     with state_lock:
                         _ba_m = state["base_align"]
                     if _ba_m:
-                        self._dlog(f"[SEEK] 맵 예상 위치로 전후 이동 ('{target}', x{sex_m:+.0f}px)")
+                        # 넛지가 거부돼도(이동 중 등) 로그만 반복되던 스팸 방지
+                        if time.time() - getattr(self, "_seekx_log_ts", 0) > 4.0:
+                            self._seekx_log_ts = time.time()
+                            self._dlog(f"[SEEK] 맵 예상 위치로 전후 이동 "
+                                       f"('{target}', x{sex_m:+.0f}px)")
                         self._maybe_base_nudge(sex_m, None)
                 return
 
@@ -3215,6 +3460,18 @@ class ElevatorTracker(Node):
                     if abs(ex) >= act:
                         self._maybe_base_nudge(ex, tdist)
             return
+        # READY 동결 중의 "큰" 오차 점프(3×dz 또는 40px+)는 정렬 이탈이 아니라
+        # 오인식 — 로봇이 정지해 있는데 버튼이 그만큼 움직일 수 없다 (라벨이
+        # 옆 버튼으로 점프한 것). 이 프레임은 무시하고 동결 유지.
+        # (2026-07-21 ⑤ 실측: 모양 정합 재배정 → READY↔재정렬 5회 반복, lift 꿈틀)
+        # 진짜 어긋난 경우엔 클릭 시 라이브 재검증이 press를 거부하므로 안전.
+        if self._is_press_ready() and \
+                (abs(ex) > max(3 * dz, 40) or abs(ey) > max(3 * dz, 40)):
+            if time.time() - getattr(self, "_jump_log_ts", 0) > 5.0:
+                self._jump_log_ts = time.time()
+                self._dlog(f"[READY] 라벨 점프 무시 (x{ex:+.0f} y{ey:+.0f}px) — "
+                           "동결 유지 (오인식으로 판단)")
+            return
         # CENTERED는 래치가 아님 — 히스테리시스(+4px) 넘게 벗어나면 해제 후 재정렬
         with state_lock:
             was_centered = state["centered"]
@@ -3269,6 +3526,8 @@ class ElevatorTracker(Node):
 
     def start_press(self) -> str | None:
         """누르기 시퀀스 시작. 문제 있으면 사유 문자열, 정상 시작이면 None."""
+        if not _authority_ok():
+            return "제어권 없음 — 대시보드(8080)에서 엘리베이터 제어권을 부여하세요"
         with state_lock:
             if state["pressing"]:
                 return "이미 누르기 진행 중"
@@ -3582,6 +3841,19 @@ def main():
     if not start_infer_server():
         print("추론 서버 시작 실패. 종료합니다.")
         return
+
+    # 제어권 초기값: 대시보드(8080)가 떠 있으면 False(부여 대기) — 주도권은
+    # 대시보드에 있다. 대시보드가 없으면 True(단독 개발 모드, 기존과 동일).
+    try:
+        import urllib.request
+        urllib.request.urlopen("http://localhost:8080/battery_status", timeout=1.0)
+        _dash_alive = True
+    except Exception:
+        _dash_alive = False
+    with state_lock:
+        state["authority"] = not _dash_alive
+    print(("제어권: 대시보드 감지 — 부여 대기 (8080에서 켜세요)" if _dash_alive
+           else "제어권: 단독 개발 모드 (보유)"), flush=True)
 
     threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False),

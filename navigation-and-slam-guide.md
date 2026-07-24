@@ -76,6 +76,10 @@ ros2 launch /home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blin
 ### 3.2 RViz2 실행 및 초기 위치 설정
 
 ```bash
+# 권장: 사전 구성된 설정으로 실행 (Map TL·RobotModel·LaserScan·도구 포함 — 수동 설정 불필요)
+rviz2 -d ~/robot_view.rviz
+
+# (맨 RViz로 열 경우 — 아래 수동 설정 필요)
 ros2 run rviz2 rviz2
 ```
 
@@ -89,6 +93,19 @@ RViz 설정:
 - Fixed Frame: `map`
 - Map: Durability `Transient Local`, Reliability `Reliable`
 - **2D Pose Estimate**로 실제 로봇 위치 지정 (필수 - AMCL 활성화)
+
+### 3.3 현재 로봇 위치(map 좌표) 확인
+
+```bash
+# AMCL 추정 좌표 1회 출력 — location.yaml의 x/y/w 값을 딸 때 사용
+# (pose.pose.position.x / .y + pose.pose.orientation.w)
+ros2 topic echo /amcl_pose --once
+
+# 대안: TF에서 직접 확인
+ros2 run tf2_ros tf2_echo map base_link
+```
+
+> 2D Pose Estimate로 초기 위치를 지정하기 전에는 /amcl_pose가 발행되지 않음.
 
 ---
 

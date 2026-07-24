@@ -52,14 +52,24 @@ _GRIP_RESET = 3158
 _DEBOUNCE   = 0.25
 
 # ── ROS2 cmd_vel ──────────────────────────────────────────────────────────────
+# FastDDS 공유메모리 비활성화(UDP 강제) — 어느 터미널에서 시작해도 적용되도록
+# 코드에서 직접 주입 (rclpy import 전이어야 함). 자식(launch·interface·vision)도 상속.
+# SHM 반복 고장(유령 참가자·데이터 채널 잠김) 방지 — 2026-07-24
+os.environ.setdefault("FASTRTPS_DEFAULT_PROFILES_FILE",
+                      os.path.expanduser("~/.ros/fastdds_no_shm.xml"))
 try:
     import rclpy
-    from geometry_msgs.msg import Twist
+    from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
     from sensor_msgs.msg import BatteryState
     from std_msgs.msg import String as ROSString
     _ROS_OK = True
+    try:
+        from nav2_msgs.srv import LoadMap   # 지도(층) 전환용 — 없어도 나머지는 동작
+    except ImportError:
+        LoadMap = None
 except ImportError:
     _ROS_OK = False
+    LoadMap = None
 
 # ── 로그 버퍼 ─────────────────────────────────────────────────────────────────
 _LOG_BUF: collections.deque = collections.deque(maxlen=800)
@@ -181,6 +191,39 @@ def _obstacle_decision_cb(msg):
     except Exception:
         pass
 
+# ── 지도(층) 전환 ─────────────────────────────────────────────────────────────
+# 같은 건물 = 같은 구조 = 같은 좌표계 (floor4.pgm은 all.pgm의 동일 사본, origin 동일)
+_FLOOR_MAPS = {
+    "5": str((THIS_DIR / "../maps/all.yaml").resolve()),
+    "4": str((THIS_DIR / "../maps/floor4.yaml").resolve()),
+    "3": str((THIS_DIR / "../maps/floor3.yaml").resolve()),
+}
+_current_floor = "5"   # 런치 기본 지도 = all.yaml(5층)
+_map_client = None     # /map_server/load_map 서비스 클라이언트
+_init_pub   = None     # /initialpose 퍼블리셔 (AMCL 재정위치용)
+
+def _load_exit_point():
+    """location.yaml의 '엘리베이터 하차지점' — 층 전환 직후 AMCL 초기 위치로 사용."""
+    try:
+        import yaml as _yaml
+        locs = _yaml.safe_load(open(THIS_DIR / "../config/location.yaml"))["locations"]
+        return locs.get("엘리베이터 하차지점")
+    except Exception:
+        return None
+
+# ── 현재 위치 (AMCL) ──────────────────────────────────────────────────────────
+_robot_pose = {"x": None, "y": None, "z": None, "w": None, "yaw_deg": None}
+
+def _amcl_pose_cb(msg):
+    import math
+    p = msg.pose.pose.position
+    q = msg.pose.pose.orientation
+    yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                     1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    _robot_pose.update(x=round(p.x, 3), y=round(p.y, 3),
+                       z=round(q.z, 4), w=round(q.w, 4),
+                       yaw_deg=round(math.degrees(yaw), 1))
+
 def _battery_callback(msg):
     pct = round(msg.percentage * 100) if msg.percentage <= 1.0 else round(msg.percentage)
     _battery["pct"]      = pct
@@ -199,7 +242,7 @@ def _cmdvel_callback(msg):
             _log("MAIN", "후진 감지 → TTS 안내")
 
 def init_ros():
-    global _cmd_node, _cmd_pub
+    global _cmd_node, _cmd_pub, _map_client, _init_pub
     if not _ROS_OK:
         return
     rclpy.init()
@@ -209,6 +252,21 @@ def init_ros():
     _cmd_node.create_subscription(BatteryState, "/battery",                   _battery_callback,      10)
     _cmd_node.create_subscription(ROSString,    "/obstacle_pusher/objects",   _obstacle_objects_cb,   10)
     _cmd_node.create_subscription(ROSString,    "/obstacle_pusher/decision",  _obstacle_decision_cb,  10)
+    # AMCL 위치 — QoS 이중 구독: 퍼블리셔가 transient_local(latched)이든
+    # volatile이든 어느 쪽이어도 수신되게. (TL 구독은 VOL 퍼블리셔와 매칭 자체가
+    # 안 됨 — 한쪽만 구독하면 Nav2 버전에 따라 영영 미수신이 될 수 있음)
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+    _pose_qos_tl = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                              durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    _cmd_node.create_subscription(PoseWithCovarianceStamped, "/amcl_pose",
+                                  _amcl_pose_cb, _pose_qos_tl)
+    _cmd_node.create_subscription(PoseWithCovarianceStamped, "/amcl_pose",
+                                  _amcl_pose_cb, 10)
+    # 지도(층) 전환: map_server load_map 클라이언트 + AMCL 재정위치 퍼블리셔
+    if LoadMap is not None:
+        _map_client = _cmd_node.create_client(LoadMap, "/map_server/load_map")
+    _init_pub = _cmd_node.create_publisher(PoseWithCovarianceStamped,
+                                           "/initialpose", 10)
     threading.Thread(target=rclpy.spin, args=(_cmd_node,), daemon=True).start()
     _log("MAIN", "ROS2 cmd_vel 퍼블리셔/구독자 시작")
 
@@ -278,6 +336,43 @@ def stop():
     publish_cmd(0.0, 0.0)
     return jsonify(ok=True)
 
+# ── 엘리베이터 제어권 (주도권은 대시보드가 소유, 5000에 부여/회수) ─────────────
+_elev_authority = False   # 우리가 아는 엘리베이터 앱의 제어권 보유 상태
+
+def _set_elev_authority(granted: bool, reason: str = ""):
+    """엘리베이터 앱에 이동 제어권 부여/회수. 회수 시 엘리베이터는 즉시 전면
+    정지(바퀴 정지·타겟 해제·안무 중단)하고 이후 모든 이동을 거부한다.
+    구버전 엘리베이터 앱(엔드포인트 없음)이면 /reset 폴백. 꺼져 있으면 무시."""
+    global _elev_authority
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "http://localhost:5000/authority",
+            data=json.dumps({"granted": granted}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(req, timeout=1)
+        _elev_authority = granted
+        _log("MAIN", f"엘리베이터 제어권 {'부여' if granted else '회수'}"
+                     + (f" ({reason})" if reason else ""))
+    except Exception:
+        if not granted:
+            try:   # 폴백: 구버전 앱이면 최소한 타겟 해제
+                import urllib.request
+                urllib.request.urlopen(urllib.request.Request(
+                    "http://localhost:5000/reset", method="POST"), timeout=1)
+                _log("MAIN", "엘리베이터 /authority 없음 → /reset 폴백")
+            except Exception:
+                pass
+
+@app.route("/elev_authority", methods=["GET", "POST"])
+def elev_authority_route():
+    if request.method == "POST":
+        granted = bool((request.json or {}).get("granted", False))
+        threading.Thread(target=_set_elev_authority,
+                         args=(granted, "UI 토글"), daemon=True).start()
+        return jsonify(ok=True, granted=granted)
+    return jsonify(granted=_elev_authority)
+
 @app.route("/mode", methods=["POST"])
 def set_mode():
     global _manual_mode, _manual_active
@@ -286,19 +381,10 @@ def set_mode():
     if _manual_mode:
         # 수동 전환 시: 진행 중인 목적지 취소 + LOCKED 상태로
         _write("iface", "/cancel")
-        # 인터락: 엘리베이터 앱 타겟 자동 해제 — 두 앱이 /stretch/cmd_vel을
-        # 동시에 지휘하면 수동 조작이 먹히지 않음 (Base bump 연발 실측).
-        # 엘리베이터 앱이 꺼져 있으면 조용히 무시.
-        def _silence_elevator():
-            try:
-                import urllib.request
-                urllib.request.urlopen(
-                    urllib.request.Request("http://localhost:5000/reset",
-                                           method="POST"), timeout=1)
-                _log("MAIN", "수동 전환 → 엘리베이터 타겟 자동 해제 (바퀴 지휘권 단일화)")
-            except Exception:
-                pass
-        threading.Thread(target=_silence_elevator, daemon=True).start()
+        # 주도권 단일화: 수동 = 사람이 바퀴 주인 → 엘리베이터 제어권 자동 회수
+        # (두 앱이 /stretch/cmd_vel을 동시에 지휘하면 수동 조작이 먹히지 않음)
+        threading.Thread(target=_set_elev_authority,
+                         args=(False, "수동 전환"), daemon=True).start()
     else:
         # 자동 전환 시: 수동 이동 정지 명령 한 번만 발행 후 Nav2에 제어권 넘김
         with _manual_lock:
@@ -320,6 +406,69 @@ def web_vision():
     _write("vision", "/vision")
     _log("WEB", "버튼2 시각 분석 (웹)")
     return jsonify(ok=True)
+
+@app.route("/switch_map", methods=["GET", "POST"])
+def switch_map():
+    """지도(층) 전환 — 재시작 없이 map_server에 load_map 서비스 호출.
+    init_exit=true면 전환 직후 AMCL 초기 위치를 '엘리베이터 하차지점'으로 설정
+    (두 층 지도가 동일 사본·동일 origin이라 좌표계가 같음 → 좌표 재사용 가능)."""
+    global _current_floor
+    if request.method == "GET":
+        return jsonify(floor=_current_floor)
+    data  = request.json or {}
+    floor = str(data.get("floor", ""))
+    path  = _FLOOR_MAPS.get(floor)
+    if path is None:
+        return jsonify(ok=False, error="알 수 없는 층"), 400
+    if _map_client is None:
+        return jsonify(ok=False, error="ROS/LoadMap 미초기화"), 503
+    if not _map_client.service_is_ready():
+        _log("MAP", "map_server 서비스 안 보임 — 런치가 떠 있는지 확인")
+        return jsonify(ok=False, error="map_server 서비스 없음")
+    req = LoadMap.Request()
+    req.map_url = path
+    fut = _map_client.call_async(req)     # 완료는 백그라운드 spin 스레드가 처리
+    t0 = time.monotonic()
+    while not fut.done() and time.monotonic() - t0 < 6.0:
+        time.sleep(0.1)
+    res = fut.result() if fut.done() else None
+    if res is None or res.result != 0:    # RESULT_SUCCESS = 0
+        code = getattr(res, "result", "timeout")
+        _log("MAP", f"지도 전환 실패 (result={code})")
+        return jsonify(ok=False, error=f"load_map 실패 ({code})")
+    _current_floor = floor
+    _log("MAP", f"🗺 지도 전환 완료 → {floor}층 ({os.path.basename(path)})")
+    if data.get("init_exit"):
+        p = _load_exit_point()
+        if p and _init_pub is not None:
+            msg = PoseWithCovarianceStamped()
+            msg.header.frame_id = "map"
+            msg.header.stamp = _cmd_node.get_clock().now().to_msg()
+            msg.pose.pose.position.x    = float(p["x"])
+            msg.pose.pose.position.y    = float(p["y"])
+            msg.pose.pose.orientation.z = float(p.get("z", 0.0))
+            msg.pose.pose.orientation.w = float(p.get("w", 1.0))
+            msg.pose.covariance[0]  = 0.25   # RViz 2D Pose Estimate와 동일 분산
+            msg.pose.covariance[7]  = 0.25
+            msg.pose.covariance[35] = 0.068
+            _init_pub.publish(msg)
+            _log("MAP", "AMCL 초기 위치 → 엘리베이터 하차지점 (RViz 클릭 불필요)")
+        else:
+            _log("MAP", "⚠ 하차지점 좌표를 못 읽음 — RViz 2D Pose Estimate로 지정 필요")
+    return jsonify(ok=True, floor=floor)
+
+@app.route("/robot_pose")
+def robot_pose():
+    """현재 로봇 위치(AMCL) 조회 — 값은 응답 + 대시보드 로그에 동시 기록.
+    location.yaml에 바로 붙여넣을 수 있는 x/y/z/w 형식 포함."""
+    if _robot_pose["x"] is None:
+        _log("POSE", "위치 미수신 — RViz 2D Pose Estimate로 AMCL을 먼저 초기화하세요")
+        return jsonify(ok=False, error="AMCL pose 미수신")
+    _log("POSE", f"📍 현재 위치 x={_robot_pose['x']} y={_robot_pose['y']} "
+                 f"방향 {_robot_pose['yaw_deg']:+.1f}°  |  location.yaml용 → "
+                 f"x: {_robot_pose['x']}  y: {_robot_pose['y']}  "
+                 f"z: {_robot_pose['z']}  w: {_robot_pose['w']}")
+    return jsonify(ok=True, **_robot_pose)
 
 @app.route("/battery_status")
 def battery_status():
@@ -424,17 +573,33 @@ _CONFIRMED_LOCATIONS = {
     "ITRC 114 UAM-eVTOL 융합 연구센터 (세종대)",
 }
 
+@app.route("/goto", methods=["POST"])
+def goto():
+    """장소 목록 클릭 → 즉시 출발 (2026-07-24 사용자 결정: 확인 절차 생략).
+    interface의 /goto 직행 통로 사용 — GPT·별칭 해석·마이크 전부 건너뜀.
+    (음성 흐름의 확인 절차는 별개로 유지 — 이건 클릭 전용 경로)"""
+    name = ((request.json or {}).get("name") or "").strip()
+    if not name:
+        return jsonify(ok=False, error="이름 없음"), 400
+    if _manual_mode:
+        return jsonify(ok=False, error="수동 모드에서는 불가 — 자동 모드로 전환하세요")
+    _write("iface", f"/goto {name}")
+    _log("MAIN", f"🖱 장소 클릭 → '{name}' 즉시 출발")
+    return jsonify(ok=True)
+
 @app.route("/locations")
 def get_locations():
     import yaml
     yaml_path = THIS_DIR / "../config/location.yaml"
     try:
         data = yaml.safe_load(yaml_path.read_text("utf-8")) or {}
-        names = list((data.get("locations") or {}).keys())
+        locs = data.get("locations") or {}
     except Exception:
-        names = []
+        locs = {}
     return jsonify(locations=[
-        {"name": n, "confirmed": n in _CONFIRMED_LOCATIONS} for n in names
+        {"name": n, "confirmed": n in _CONFIRMED_LOCATIONS,
+         "floor": (v or {}).get("floor")}   # 층 메타데이터 (없으면 null = 공용)
+        for n, v in locs.items()
     ])
 
 # ── 시스템 프로세스 관리 ──────────────────────────────────────────────────────────
@@ -461,7 +626,13 @@ _SYS_PROC_DEFS = {
     },
     "rviz": {
         "label": "RViz2",
-        "cmd": ["bash", "-c", _ROS_SOURCE + "exec ros2 run rviz2 rviz2"],
+        # 사전 구성 설정(-d)으로 실행: Map(Transient Local)·RobotModel·LaserScan·
+        # 2D Pose Estimate 도구 포함 — 맨 RViz의 "지도 안 뜸" 수동 설정 반복 제거.
+        # 설정 파일이 없으면 맨 RViz로 폴백.
+        "cmd": ["bash", "-c", _ROS_SOURCE +
+                "if [ -f /home/hello-robot/robot_view.rviz ]; then "
+                "exec ros2 run rviz2 rviz2 -- -d /home/hello-robot/robot_view.rviz; "
+                "else exec ros2 run rviz2 rviz2; fi"],
         "log_tag": "RVIZ",
     },
     "battery": {
@@ -618,31 +789,12 @@ def sys_proc_ctrl(name):
         threading.Thread(target=_do_kill, daemon=True).start()
         return jsonify(ok=True, running=False)
 
-    # [FastDDS 찌꺼기 예방] 컴퓨터 비정상 종료 후 /dev/shm에 남은 공유메모리 잔재는
-    # "기존 노드는 멀쩡한데 새로 시작하는 프로그램만 통신 실패"라는 괴상한 고장을 만든다
-    # (2026-07-15 두 차례 실측 — 앱이 'Action server not available'/'대기 중' 무한 반복).
-    # ROS 프로세스가 하나도 없을 때의 launch 시작 = 잔재가 전부 주인 없는 상태이므로
-    # 이때만 안전하게 전체 청소. (대시보드 자신의 세마포어는 unlink돼도 계속 유효)
-    if name == "launch":
-        try:
-            r = subprocess.run(["pgrep", "-f",
-                                "ros2 launch|stretch_driver|rplidar|realsense2|"
-                                "component_container|nav2|amcl|map_server"],
-                               capture_output=True, text=True)
-            if not r.stdout.strip():
-                import glob as _glob
-                stale = _glob.glob("/dev/shm/fastrtps_*") + \
-                        _glob.glob("/dev/shm/fast_datasharing*") + \
-                        _glob.glob("/dev/shm/sem.fastrtps*")
-                for f in stale:
-                    try:
-                        os.remove(f)
-                    except OSError:
-                        pass
-                if stale:
-                    _log("SYS", f"FastDDS 공유메모리 잔재 {len(stale)}개 청소 (비정상 종료 예방)")
-        except Exception:
-            pass   # 청소 실패가 launch 시작을 막으면 안 됨
+    # [FastDDS 찌꺼기 청소는 여기서 하면 안 됨 — 부팅 시(main, 노드 생성 전)로 이동]
+    # 여기서 청소하면 이미 살아있는 대시보드/interface 자신의 노드 세그먼트를 지워
+    # DDS 유령(발행·수신 전부 침묵)을 만든다. "대시보드 자신의 세마포어는 unlink돼도
+    # 계속 유효"라는 기존 가정은 틀림 — unlink된 세그먼트 파일은 이후 시작한
+    # 프로세스가 열 수 없어, 옛/새 프로세스가 서로 다른 섬으로 갈라진다
+    # (2026-07-21 실측: 수동 전진 버튼 무반응 + 새 CLI에서 드라이버 노드 실종 사건)
 
     try:
         proc = subprocess.Popen(
@@ -1066,6 +1218,35 @@ HTML = """<!DOCTYPE html>
             <span class="toggle-slider"></span>
           </label>
         </div>
+        <div class="toggle-row">
+          <span class="toggle-label">🛗 엘리베이터 제어권<span class="kbd">5</span></span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="elev-auth-toggle" onchange="toggleElevAuthority()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">🗺 지도(층)</span>
+          <span style="display:flex;gap:6px;align-items:center;">
+            <select id="floor-sel" style="background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:3px 6px;">
+              <option value="5" selected>5층</option>
+              <option value="4">4층</option>
+              <option value="3">3층</option>
+            </select>
+            <label style="font-size:0.68rem;color:#9ab;display:flex;align-items:center;gap:3px;cursor:pointer;"
+                   title="전환 직후 AMCL 위치를 엘리베이터 하차지점으로 자동 설정 — 엘리베이터로 층 이동한 직후에만 켜두세요">
+              <input type="checkbox" id="init-exit-chk" checked>하차지점 초기화
+            </label>
+            <button onclick="switchMap()" style="background:#345;color:#dee;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;">전환</button>
+          </span>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">📍 현재 위치</span>
+          <span id="pose-result" style="font-size:0.72rem;color:#8ac;margin:0 8px;
+                flex:1;text-align:right;user-select:all;"></span>
+          <button onclick="queryPose()" style="background:#345;color:#dee;border:none;
+                  border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;">조회</button>
+        </div>
       </div>
     </div>
 
@@ -1158,11 +1339,27 @@ function setMode(manual) {
 function loadLocations() {
   fetch('/locations').then(r => r.json()).then(d => {
     const el = document.getElementById('location-list');
-    el.innerHTML = d.locations.map(loc =>
-      loc.confirmed
-        ? `<div style="background:#14532d;border-radius:6px;padding:5px 10px;font-size:0.78rem;color:#86efac">✅ ${escHtml(loc.name)}</div>`
-        : `<div style="background:#1e293b;border-radius:6px;padding:5px 10px;font-size:0.78rem;color:#475569">⬜ ${escHtml(loc.name)}</div>`
-    ).join('');
+    const item = loc => loc.confirmed
+      ? `<div class="loc-item" data-name="${escHtml(loc.name)}" style="background:#14532d;border-radius:6px;padding:5px 10px;font-size:0.78rem;color:#86efac;cursor:pointer" title="클릭 = 즉시 출발 (개발용 임시방편 — 최종판은 확인 절차 복원 예정)">✅ ${escHtml(loc.name)}</div>`
+      : `<div class="loc-item" data-name="${escHtml(loc.name)}" style="background:#1e293b;border-radius:6px;padding:5px 10px;font-size:0.78rem;color:#475569;cursor:pointer" title="클릭 = 즉시 출발 (개발용 임시방편 — 최종판은 확인 절차 복원 예정)">⬜ ${escHtml(loc.name)}</div>`;
+    // 층별 그룹: 공용(엘리베이터 지점, floor 없음) → 5층 → 4층 → 3층
+    const groups = [[null, '🛗 공용'], [5, '5층'], [4, '4층'], [3, '3층']];
+    el.innerHTML = groups.map(([f, label]) => {
+      const items = d.locations.filter(l => (l.floor ?? null) === f);
+      if (!items.length) return '';
+      return `<div style="color:#89a;font-size:0.72rem;font-weight:700;margin:8px 0 2px;`
+           + `border-bottom:1px solid #26263a;padding-bottom:2px;position:sticky;top:0;`
+           + `background:#0f172a;">${label} (${items.length})</div>`
+           + items.map(item).join('');
+    }).join('');
+    // 클릭 = 즉시 출발 (오클릭 방지용 브라우저 확인 팝업만 거침)
+    el.querySelectorAll('.loc-item').forEach(div => div.onclick = () => {
+      const n = div.dataset.name;
+      if (!confirm(n + ' (으)로 즉시 출발합니다. 진행할까요?')) return;
+      fetch('/goto', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name: n})})
+        .then(r => r.json()).then(d => { if (!d.ok) alert(d.error); });
+    });
   }).catch(() => {});
 }
 loadLocations();
@@ -1264,6 +1461,33 @@ function toggleObstaclePush() {
   });
 }
 
+function switchMap() {
+  const f   = document.getElementById('floor-sel').value;
+  const ini = document.getElementById('init-exit-chk').checked;
+  if (!confirm(`${f}층 지도로 전환할까요?` + (ini ? ' (AMCL 위치가 엘리베이터 하차지점으로 초기화됩니다)' : ''))) return;
+  fetch('/switch_map', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({floor: f, init_exit: ini})})
+    .then(r => r.json())
+    .then(d => { if (!d.ok) alert('지도 전환 실패: ' + d.error); })
+    .catch(() => alert('지도 전환 요청 실패'));
+}
+
+function queryPose() {
+  fetch('/robot_pose').then(r => r.json()).then(d => {
+    const el = document.getElementById('pose-result');
+    if (!d.ok) { el.style.color = '#f66'; el.textContent = d.error; return; }
+    el.style.color = '#8ac';
+    // location.yaml에 그대로 붙여넣는 형식 (클릭하면 전체 선택됨)
+    el.textContent = `x: ${d.x}  y: ${d.y}  z: ${d.z}  w: ${d.w}  (${d.yaw_deg}°)`;
+  }).catch(() => {});
+}
+
+function toggleElevAuthority() {
+  const on = document.getElementById('elev-auth-toggle').checked;
+  fetch('/elev_authority', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({granted: on})});
+}
+
 let offlineMode = false;
 function toggleNetMode() {
   offlineMode = !document.getElementById('net-mode-toggle').checked;
@@ -1359,6 +1583,14 @@ setInterval(() => {
     }
   }).catch(() => {});
 }, 1000);
+
+// 엘리베이터 제어권 토글을 서버 상태와 동기화 (수동 전환 자동 회수 등 반영)
+setInterval(() => {
+  fetch('/elev_authority').then(r => r.json()).then(d => {
+    const t = document.getElementById('elev-auth-toggle');
+    if (t && document.activeElement !== t) t.checked = !!d.granted;
+  }).catch(() => {});
+}, 2000);
 
 // ── 시스템 프로세스 ──────────────────────────────────────────────────────────
 const SYS_NAMES = ['launch','rviz','battery','free','home'];
@@ -1478,9 +1710,41 @@ document.addEventListener('keydown', e => {
 </html>"""
 
 # ── 진입점 ────────────────────────────────────────────────────────────────────
+def _clean_stale_shm_at_boot():
+    """FastDDS 잔재 청소 — 반드시 '자기 ROS 노드를 만들기 전'에만 호출할 것.
+    ROS 프로세스가 하나도 없을 때만 안전 (잔재가 전부 주인 없는 상태).
+    비정상 종료 후 잔재는 "기존 노드는 멀쩡한데 새 프로그램만 통신 실패"를 만들고
+    (2026-07-15 실측), 노드 생성 후의 청소는 자기 자신을 유령으로 만든다
+    (2026-07-21 실측) — 그래서 위치가 '부팅 직후, init_ros() 이전' 딱 한 곳이다."""
+    try:
+        # 주의: ROS 노드를 가진 "우리 앱들"도 반드시 포함 — 빠지면 그 앱이
+        # 살아있는 채로 청소가 돌아 그 앱을 유령으로 만든다 (섬 분리 사고)
+        r = subprocess.run(["pgrep", "-f",
+                            "ros2 launch|stretch_driver|rplidar|realsense2|"
+                            "component_container|nav2|amcl|map_server|"
+                            "elevator_button_press|interface.py|vision_assistant.py|"
+                            "rviz2|mouse_teleop|obstacle|people_tracker"],
+                           capture_output=True, text=True)
+        if not r.stdout.strip():
+            import glob as _glob
+            stale = _glob.glob("/dev/shm/fastrtps_*") + \
+                    _glob.glob("/dev/shm/fast_datasharing*") + \
+                    _glob.glob("/dev/shm/sem.fastrtps*")
+            for f in stale:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+            if stale:
+                _log("SYS", f"FastDDS 잔재 {len(stale)}개 청소 (부팅 시, 노드 생성 전)")
+    except Exception:
+        pass   # 청소 실패가 대시보드 시작을 막으면 안 됨
+
+
 def main():
     Path("/tmp/social_nav_enabled").write_text("1")    # 시작 시 ON
     Path("/tmp/obstacle_push_enabled").write_text("1") # 시작 시 ON
+    _clean_stale_shm_at_boot()   # ← init_ros()보다 반드시 먼저
     init_ros()
     start_subprocesses()
 

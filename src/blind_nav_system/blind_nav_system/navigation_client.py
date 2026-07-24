@@ -85,9 +85,12 @@ class NavigationClient(Node):
         self._goal_x    = float(loc['x'])
         self._goal_y    = float(loc['y'])
         self._goal_w    = float(loc.get('w', 1.0))
+        # z: 도착 방향의 쿼터니언 z 성분 — w만으로는 방향이 표현되지 않음
+        # (yaw 쿼터니언은 z·w 쌍). yaml에 z가 없으면 0.0 = 기존 동작 유지.
+        self._goal_z    = float(loc.get('z', 0.0))
         self._navigating = True
         self.is_arrived  = False
-        Path("/tmp/navigation_active").write_text("1")
+        FilePath("/tmp/navigation_active").write_text("1")
 
         # 초기 전송
         waypoints = self._compute_waypoints_if_enabled()
@@ -281,7 +284,9 @@ class NavigationClient(Node):
                     ps.pose.position.x = wx
                     ps.pose.position.y = wy
                     # 마지막 포즈(최종 목표)만 원래 방향 유지
-                    ps.pose.orientation.w = self._goal_w if i == len(waypoints) - 1 else 1.0
+                    _last = (i == len(waypoints) - 1)
+                    ps.pose.orientation.w = self._goal_w if _last else 1.0
+                    ps.pose.orientation.z = self._goal_z if _last else 0.0
                     goal_msg.poses.append(ps)
                 print(f"[NAV] 경유지 {len(waypoints)-1}개 포함 경로 전송", flush=True)
                 self._publish_waypoint_markers(waypoints)
@@ -299,6 +304,7 @@ class NavigationClient(Node):
         goal_msg.pose.pose.position.x = self._goal_x
         goal_msg.pose.pose.position.y = self._goal_y
         goal_msg.pose.pose.orientation.w = self._goal_w
+        goal_msg.pose.pose.orientation.z = self._goal_z
         print("[NAV] 직행 경로 전송", flush=True)
         self._action_client.send_goal_async(goal_msg).add_done_callback(self.goal_response_callback)
         return True
@@ -316,7 +322,7 @@ class NavigationClient(Node):
             self.is_arrived  = True
             self._navigating = False
             self._stop_replan_timer()
-            Path("/tmp/navigation_active").write_text("0")
+            FilePath("/tmp/navigation_active").write_text("0")
 
     def vel_callback(self, msg):
         current_time = time.time()
@@ -338,7 +344,7 @@ class NavigationClient(Node):
     def cleanup(self):
         self._navigating = False
         self._stop_replan_timer()
-        Path("/tmp/navigation_active").write_text("0")
+        FilePath("/tmp/navigation_active").write_text("0")
         try:
             empty_path = Path()
             empty_path.header.frame_id = "map"
