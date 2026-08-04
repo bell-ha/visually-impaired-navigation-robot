@@ -18,6 +18,16 @@ os.environ.setdefault("FASTRTPS_DEFAULT_PROFILES_FILE",
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
+
+# ── 진단 로거 (간헐 버그 블랙박스) — 상위 패키지 폴더의 robot_diag.py 사용 ──
+import sys as _sys
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+try:
+    import robot_diag as _diag
+except Exception as _e:          # 로거 없어도 본체는 정상 동작해야 함
+    _diag = None
+    print(f"[경고] robot_diag 로드 실패: {_e}")
+_diaglog = None
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, JointState, LaserScan
 from geometry_msgs.msg import Twist
@@ -3842,16 +3852,32 @@ def main():
         print("추론 서버 시작 실패. 종료합니다.")
         return
 
+    # 진단 로거 시작 + 부팅 스냅샷 (제어권 판정 이전 상태를 먼저 남긴다)
+    global _diaglog
+    if _diag is not None:
+        _diaglog = _diag.DiagLogger("elevator")
+        _diaglog.boot_snapshot({"cwd": os.getcwd()})
+
     # 제어권 초기값: 대시보드(8080)가 떠 있으면 False(부여 대기) — 주도권은
     # 대시보드에 있다. 대시보드가 없으면 True(단독 개발 모드, 기존과 동일).
+    _probe_t0 = time.time()
+    _probe_err = None
     try:
         import urllib.request
         urllib.request.urlopen("http://localhost:8080/battery_status", timeout=1.0)
         _dash_alive = True
-    except Exception:
+    except Exception as _pe:
         _dash_alive = False
+        _probe_err = repr(_pe)
+    _probe_ms = (time.time() - _probe_t0) * 1000.0
     with state_lock:
         state["authority"] = not _dash_alive
+    # ★가설②: probe가 늦어 timeout되면 대시보드가 살아있어도 단독모드로 오판 →
+    #   Nav2와 cmd_vel 경합으로 이동이 막힐 수 있음. 소요시간/오류를 반드시 기록.
+    if _diaglog:
+        _diaglog.log("AUTH",
+                     f"8080 probe: dash_alive={_dash_alive} 소요={_probe_ms:.0f}ms "
+                     f"err={_probe_err} → authority={not _dash_alive}")
     print(("제어권: 대시보드 감지 — 부여 대기 (8080에서 켜세요)" if _dash_alive
            else "제어권: 단독 개발 모드 (보유)"), flush=True)
 
@@ -3867,14 +3893,40 @@ def main():
     rclpy.init()
     node = ElevatorTracker()
     _node_ref[0] = node
+
+    # 진단 계측 부착 (기존 노드에 진단용 구독/타이머만 덧붙임 — 로직 변경 없음)
+    if _diag is not None and _diaglog is not None:
+        _diag.attach(
+            node, _diaglog,
+            cameras={
+                "grip_rect":  "/camera/gripper_camera/color/image_rect_raw",
+                "grip_raw":   "/camera/gripper_camera/color/image_raw",
+                "grip_old1":  "/gripper_camera/color/image_raw",
+                "grip_old2":  "/gripper_camera/color/image_rect_raw",
+                "grip_depth": "/camera/gripper_camera/aligned_depth_to_color/image_raw",
+                "body":       "/camera/camera/color/image_raw",
+            },
+            cmd_vel_topic="/stretch/cmd_vel",
+            authority_getter=lambda: state.get("authority"),
+            phase_getter=lambda: state.get("phase"),
+            own_node_name="elevator_tracker",
+        )
+        # SIGTERM(VSCode 정지 등)으로 죽여도 finally 정리가 돌게 흘려보냄 →
+        # 잔재 감소 + "어떻게 죽었나" 기록
+        _diag.install_signal_logging(_diaglog, reraise=True)
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        if _diaglog:
+            _diaglog.log("EXIT", "spin 종료 → destroy_node 호출")
         node.destroy_node()
         try: rclpy.shutdown()
         except: pass
+        if _diaglog:
+            _diaglog.log("EXIT", "destroy_node/shutdown 완료 — 정상 정리")
 
 
 if __name__ == "__main__":

@@ -26,6 +26,15 @@ from flask import Flask, Response, jsonify, request
 
 # ── 경로 설정 ─────────────────────────────────────────────────────────────────
 THIS_DIR = Path(__file__).resolve().parent
+
+# ── 진단 로거 (간헐 버그 블랙박스) — 같은 폴더의 robot_diag.py 사용 ──
+sys.path.insert(0, str(THIS_DIR))
+try:
+    import robot_diag as _diag
+except Exception as _e:          # 로거 없어도 본체는 정상 동작해야 함
+    _diag = None
+    print(f"[경고] robot_diag 로드 실패: {_e}")
+_diaglog = None
 ENV_FILE = next(
     (p for p in [
         THIS_DIR / "../../.env",
@@ -267,6 +276,14 @@ def init_ros():
         _map_client = _cmd_node.create_client(LoadMap, "/map_server/load_map")
     _init_pub = _cmd_node.create_publisher(PoseWithCovarianceStamped,
                                            "/initialpose", 10)
+    # 진단 계측 부착 (cmd_vel 퍼블리셔 수·엘리베이터 노드 존재 추적)
+    if _diag is not None and _diaglog is not None:
+        _diag.attach(
+            _cmd_node, _diaglog,
+            cmd_vel_topic="/stretch/cmd_vel",
+            own_node_name="main_web_cmdvel",
+            expected_nodes=["elevator_tracker"],
+        )
     threading.Thread(target=rclpy.spin, args=(_cmd_node,), daemon=True).start()
     _log("MAIN", "ROS2 cmd_vel 퍼블리셔/구독자 시작")
 
@@ -996,6 +1013,9 @@ HTML = """<!DOCTYPE html>
   .src-MAIN     { color: #c084fc; }
   .src-WEB      { color: #fb7185; }
   .src-OBSTACLE { color: #fb923c; }
+  .src-MAP      { color: #22d3ee; }
+  .src-POSE     { color: #f0abfc; }
+  .src-ARM      { color: #fca5a5; }
 
   /* 의자 감지 상태 카드 */
   .chair-card { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 10px 14px; }
@@ -1130,6 +1150,9 @@ HTML = """<!DOCTYPE html>
       <button class="tab-btn"        id="tab-FREE"   onclick="setTab('FREE')">정리<span class="tab-badge" id="badge-FREE"   style="display:none"></span></button>
       <button class="tab-btn"        id="tab-HOME"   onclick="setTab('HOME')">홈위치<span class="tab-badge" id="badge-HOME"   style="display:none"></span></button>
       <button class="tab-btn"        id="tab-ARD"    onclick="setTab('ARD')">아두이노<span class="tab-badge" id="badge-ARD"    style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-MAP"      onclick="setTab('MAP')">지도<span class="tab-badge" id="badge-MAP"      style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-POSE"     onclick="setTab('POSE')">위치<span class="tab-badge" id="badge-POSE"     style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-OBSTACLE" onclick="setTab('OBSTACLE')">장애물<span class="tab-badge" id="badge-OBSTACLE" style="display:none"></span></button>
     </div>
     <div id="log-panel"></div>
   </div>
@@ -1495,7 +1518,7 @@ function setTtsSpeed(v) {
 const logPanel = document.getElementById('log-panel');
 let allLogs = [];
 let currentTab = 'ALL';
-const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD'];
+const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD','MAP','POSE','OBSTACLE'];
 const unread = Object.fromEntries(SOURCES.map(s => [s, 0]));
 
 function setTab(tab) {
@@ -1713,7 +1736,12 @@ def _clean_stale_shm_at_boot():
                             "elevator_button_press|interface.py|vision_assistant.py|"
                             "rviz2|mouse_teleop|obstacle|people_tracker"],
                            capture_output=True, text=True)
-        if not r.stdout.strip():
+        _alive = r.stdout.strip()
+        if _diaglog:
+            _n = len(_alive.splitlines()) if _alive else 0
+            _diaglog.log("SHM", f"부팅 청소 판단: 살아있는 ROS 프로세스 {_n}개 → "
+                                f"{'건너뜀(기존 프로세스 보호)' if _alive else '청소 진행'}")
+        if not _alive:
             import glob as _glob
             stale = _glob.glob("/dev/shm/fastrtps_*") + \
                     _glob.glob("/dev/shm/fast_datasharing*") + \
@@ -1730,6 +1758,10 @@ def _clean_stale_shm_at_boot():
 
 
 def main():
+    global _diaglog
+    if _diag is not None:
+        _diaglog = _diag.DiagLogger("system")
+        _diaglog.boot_snapshot()
     Path("/tmp/social_nav_enabled").write_text("1" if _social_nav_enabled else "0")
     Path("/tmp/obstacle_push_enabled").write_text("1" if _obstacle_push_enabled else "0")
     _clean_stale_shm_at_boot()   # ← init_ros()보다 반드시 먼저
@@ -1741,6 +1773,10 @@ def main():
 
     threading.Timer(1.5, lambda: webbrowser.open("http://localhost:8080")).start()
     _log("MAIN", "대시보드: http://localhost:8080")
+
+    # 종료 신호 로깅 (원래 동작은 그대로, 로그만 추가) — app.run 직전에 설치
+    if _diag is not None and _diaglog is not None:
+        _diag.install_signal_logging(_diaglog, reraise=False)
 
     app.run(host="0.0.0.0", port=8080, threaded=True)
 
