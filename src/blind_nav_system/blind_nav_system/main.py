@@ -357,11 +357,33 @@ def stop():
 # ── 엘리베이터 제어권 (주도권은 대시보드가 소유, 5000에 부여/회수) ─────────────
 _elev_authority = False   # 우리가 아는 엘리베이터 앱의 제어권 보유 상태
 
+def _stop_armleft_proc():
+    """armleft(팔 고정)를 확실히 종료 — 대시보드가 추적 못 하는 것(재시작 desync)도
+    이름으로 kill. graceful하게 SIGTERM(pkill 기본) 사용 → armleft가 깨끗이 정리."""
+    p = _procs.get("armleft")
+    if p and p.poll() is None:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    try:
+        subprocess.run(["pkill", "-f", "tools/armleft.py"], capture_output=True)
+    except Exception:
+        pass
+    _procs.pop("armleft", None)
+
 def _set_elev_authority(granted: bool, reason: str = ""):
     """엘리베이터 앱에 이동 제어권 부여/회수. 회수 시 엘리베이터는 즉시 전면
     정지(바퀴 정지·타겟 해제·안무 중단)하고 이후 모든 이동을 거부한다.
     구버전 엘리베이터 앱(엔드포인트 없음)이면 /reset 폴백. 꺼져 있으면 무시."""
     global _elev_authority
+    # 대시보드 의도를 항상 반영 — 엘리베이터 앱(5000)이 안 떠서 POST가 실패해도
+    # 토글이 되돌아오지 않게. (JS 폴링이 이 값으로 토글을 동기화하므로)
+    _elev_authority = granted
+    if granted:
+        # 엘리베이터가 팔(트래젝토리 액션)을 써야 함 → armleft를 반드시 종료(팔 넘겨줌)
+        _stop_armleft_proc()
+        _log("MAIN", "엘리베이터 제어권 부여 → armleft 자동 종료")
     try:
         import urllib.request
         req = urllib.request.Request(
@@ -369,7 +391,6 @@ def _set_elev_authority(granted: bool, reason: str = ""):
             data=json.dumps({"granted": granted}).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
         urllib.request.urlopen(req, timeout=1)
-        _elev_authority = granted
         _log("MAIN", f"엘리베이터 제어권 {'부여' if granted else '회수'}"
                      + (f" ({reason})" if reason else ""))
     except Exception:
@@ -559,17 +580,25 @@ def armleft():
     desired = data.get("running")  # True=켜기, False=끄기, None=토글
     p = _procs.get("armleft")
     currently_running = bool(p and p.poll() is None)
+    # 추적 못 하는 armleft 도 감지 (대시보드 재시작 desync 대비)
+    if not currently_running:
+        try:
+            currently_running = subprocess.run(
+                ["pgrep", "-f", "tools/armleft.py"],
+                capture_output=True).returncode == 0
+        except Exception:
+            pass
 
-    # 원하는 상태가 명시된 경우 현재 상태와 같으면 바로 반환
+    # 끄기(또는 토글인데 켜져 있음) → 추적 여부 무관하게 이름으로 확실히 종료
+    if desired is False or (desired is None and currently_running):
+        _stop_armleft_proc()
+        _log("MAIN", "armleft.py 종료 (pkill 확실 종료)")
+        return jsonify(ok=True, running=False)
+
+    # 이미 켜져 있으면 그대로
     if desired is True and currently_running:
         return jsonify(ok=True, running=True)
-    if desired is False and not currently_running:
-        return jsonify(ok=True, running=False)
 
-    if currently_running:
-        p.terminate()
-        _log("MAIN", "armleft.py 종료")
-        return jsonify(ok=True, running=False)
     proc = subprocess.Popen(
         [sys.executable, "-u", str(THIS_DIR / "tools/armleft.py")],
         stdout=subprocess.PIPE,

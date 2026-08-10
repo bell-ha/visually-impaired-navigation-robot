@@ -1600,8 +1600,10 @@ class ElevatorTracker(Node):
             self, FollowJointTrajectory,
             "/stretch_controller/follow_joint_trajectory"
         )
-        # 시작 3초 후 wrist 초기 자세 자동 설정 (액션 서버 준비 대기)
-        self.create_timer(3.0, self._init_wrist_once)
+        # (비활성화) 시작 시 손목 자동 전방 회전 안 함 — 실행 즉시 아무것도 안 움직이게.
+        # armleft가 손목 잡고 있을 때 main 켜면 손목이 확 도는 문제 방지. 손목 자세는
+        # 사용자가 수동으로(손목 전방 버튼 / /wrist_forward) 지정.
+        # self.create_timer(3.0, self._init_wrist_once)   # ← 되살리려면 주석 해제
         self._wrist_initialized = False
 
         # 두 카메라 동시 구독 (전환 없음)
@@ -1623,14 +1625,14 @@ class ElevatorTracker(Node):
             self._dlog("드라이버 액션 서버 대기 중… (3초 후 재시도)")
             return
         self._wrist_initialized = True
-        # 인식 모드 자세: 손목 전방 + 그리퍼 열기(카메라 시야 확보).
-        # 반드시 한 goal로 묶어 전송 — 따로 보내면 단일-goal 서버가 앞의 것을 선점·유실
+        # 손목만 전방으로. 그리퍼는 여기서 안 건드림 — armleft가 닫아둔 상태를 유지하고,
+        # 시작 시 자동으로 열면 손목 회전과 겹쳐 충돌·과부하 위험. 그리퍼는 사용자가 수동으로.
         self._send_goal(
-            ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll", GRIPPER_JOINT],
-            [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, 0.0, GRIPPER_OPEN_M])
+            ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll"],
+            [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, 0.0])
         self._dlog(
             f"Wrist initialized: pitch={WRIST_PITCH_DEFAULT}, yaw={WRIST_YAW_DEFAULT}, "
-            "roll=0, gripper open"
+            "roll=0 (그리퍼는 수동)"
         )
 
     def _on_image_body(self, msg):
