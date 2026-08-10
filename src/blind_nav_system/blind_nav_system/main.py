@@ -283,6 +283,7 @@ def init_ros():
             cmd_vel_topic="/stretch/cmd_vel",
             own_node_name="main_web_cmdvel",
             expected_nodes=["elevator_tracker"],
+            rosout=True,   # nav2가 왜 복구를 부르는지(/rosout) 파일에 기록
         )
     threading.Thread(target=rclpy.spin, args=(_cmd_node,), daemon=True).start()
     _log("MAIN", "ROS2 cmd_vel 퍼블리셔/구독자 시작")

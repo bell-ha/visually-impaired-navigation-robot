@@ -36,6 +36,22 @@ except Exception:
     qos_profile_sensor_data = None
     _RCLPY_OK = False
 
+# nav2 로그(/rosout) 캡처용 — 왜 복구를 부르는지(진행실패/제어실패 등) 기록
+try:
+    from rcl_interfaces.msg import Log as _RosLog
+except Exception:
+    _RosLog = None
+
+# /rosout 에서 잡을 대상: 이 노드들의 메시지 또는 아래 키워드 포함 메시지
+_NAV_NODES = ("controller_server", "behavior_server", "bt_navigator",
+              "planner_server", "smoother_server", "velocity_smoother",
+              "collision_monitor", "local_costmap", "global_costmap",
+              "controller", "planner", "amcl")
+_NAV_KW = ("progress", "recovery", "backup", "spin", "no valid", "collision",
+           "abort", "fail", "invalid", "oscillat", "stuck", "clearing",
+           "costmap", "unable", "blocked", "no path", "goal")
+_LVL_NAME = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "FATAL"}
+
 LOG_DIR = os.path.expanduser("~/.ros/robot_diag")
 _SHM_GLOBS = ["/dev/shm/fastrtps_*",
               "/dev/shm/fast_datasharing*",
@@ -130,7 +146,7 @@ class DiagLogger:
 
 def attach(node, logger, cameras=None, cmd_vel_topic=None,
            authority_getter=None, phase_getter=None,
-           own_node_name=None, expected_nodes=None,
+           own_node_name=None, expected_nodes=None, rosout=False,
            hb_period=2.0, snap_period=10.0, dead_after=2.5):
     """node에 진단 전용 구독/타이머를 붙인다. 기존 로직은 건드리지 않는다.
 
@@ -161,7 +177,35 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
     elif cameras:
         logger.log("WARN", "sensor_msgs/Image 불가 — 카메라 프레시니스 워치 생략")
 
+    # nav2 /rosout 캡처 — 왜 복구를 부르는지(진행실패/제어실패/복구실행)를 파일에 남김
+    if rosout and _RosLog is not None:
+        rstate = {"last": None}
+        def _rosout_cb(msg):
+            try:
+                lvl = int(msg.level)
+                name = getattr(msg, "name", "") or ""
+                text = getattr(msg, "msg", "") or ""
+                navish = any(k in name for k in _NAV_NODES)
+                kw = any(k in text.lower() for k in _NAV_KW)
+                # WARN 이상은 전부, 또는 nav 노드의 키워드 매치(INFO 레벨 복구 안내 포함)
+                if lvl >= 30 or (navish and kw):
+                    key = (name, text)
+                    if key == rstate["last"]:
+                        return   # 동일 메시지 연속 폭주 방지
+                    rstate["last"] = key
+                    logger.log("NAV2", f"[{_LVL_NAME.get(lvl, lvl)}][{name}] {text}")
+            except Exception:
+                pass
+        try:
+            node.create_subscription(_RosLog, "/rosout", _rosout_cb, 100)
+            logger.log("BOOT", "nav2 /rosout 캡처 시작 (WARN+ 및 복구/진행 키워드)")
+        except Exception as e:
+            logger.log("WARN", f"/rosout 구독 실패: {e}")
+    elif rosout:
+        logger.log("WARN", "rcl_interfaces/Log 불가 — /rosout 캡처 생략")
+
     def _hb():
+      try:
         t = now()
         # ① 카메라 alive/dead 전이 이벤트
         for label in cameras:
@@ -229,6 +273,12 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
                        f"authority={_safe_call(authority_getter)} "
                        f"phase={_safe_call(phase_getter)}{extra} "
                        f"nodes={len(nodes)}{missing}")
+      except Exception as _e:
+        # HB 콜백이 어떤 이유로든 예외를 내도 executor(spin)를 죽이면 안 됨
+        try:
+            logger.log("WARN", f"HB 콜백 예외(무시, 타이머 유지): {_e}")
+        except Exception:
+            pass
 
     try:
         node.create_timer(hb_period, _hb)
