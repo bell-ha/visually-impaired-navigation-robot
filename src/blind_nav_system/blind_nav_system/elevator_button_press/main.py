@@ -1382,6 +1382,13 @@ def scene_set():
                 state["door_base"]   = None
                 state["door_open"]   = False
                 state["door_streak"] = 0
+    # 자동 안무 진행 중(_auto_busy)에 "같은 버튼"을 다시 누름 = 정지 토글.
+    # → 안무만 중단하고 자세변경·재실행은 생략 (Esc와 별개로 버튼으로도 멈춤).
+    #   이후 같은 버튼을 또 누르면 아래 일반 경로로 잔여부터 재개(기존 이어하기 유지).
+    if node and prev == n and getattr(node, "_auto_busy", False):
+        node._step_abort = True
+        node._dlog(f"[SCENE] {SCENES[n]} — 같은 버튼 재클릭 → 자동 동작 정지 (다시 누르면 재개)")
+        return jsonify(ok=True, scene=n, stopped=True)
     if node:
         if prev is not None and prev != n and (abs(acc.get("fwd_cm", 0)) > 0.5
                                                or abs(acc.get("rot_deg", 0)) > 1):
@@ -1403,11 +1410,14 @@ def scene_set():
         _set_place("hall" if n == 0 else "cab", send_lift=False)
         if node and _auth:
             prior = LIFT_PRIOR_CALL if n == 0 else LIFT_PRIOR_PANEL
-            node._dlog("[SCENE] 인식 자세 — 그리퍼 전방·열기, lift 규정 높이")
-            node._send_goal(
-                ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll",
-                 GRIPPER_JOINT, "joint_lift"],
-                [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, 0.0, GRIPPER_OPEN_M, prior])
+            node._dlog("[SCENE] 인식 자세 — 그리퍼 닫고→손목 전방→그리퍼 열기 (충돌·과부하 방지)")
+            # #1 과부하 방지: 손목 회전은 반드시 그리퍼 닫힌 채로. 몸통 근처에서 그리퍼가
+            # 열린 채 회전하면 손가락이 몸통에 닿아 과부하 → 닫기→회전→열기로 순서 분리.
+            node._move_joint_wait(GRIPPER_JOINT, GRIPPER_CLOSE_M, 1, 4.0)         # 1) 닫기 보장
+            node._move_joint_wait("joint_wrist_yaw", WRIST_YAW_DEFAULT, 2, 8.0)   # 2) 손목 전방(닫힌 채)
+            node._send_goal(                                                       # 3) 그리퍼 열기 + lift
+                ["joint_wrist_pitch", "joint_wrist_roll", GRIPPER_JOINT, "joint_lift"],
+                [WRIST_PITCH_DEFAULT, 0.0, GRIPPER_OPEN_M, prior])
     else:
         # 이동 단계(②③④⑥): 타겟 강제 해제 — press 실패 경로는 타겟을 유지하므로,
         # 그 상태로 주행에 들어가면 서보/자동접근(phase TRACK 잔존)이 주행 중
@@ -1423,11 +1433,13 @@ def scene_set():
                                       f"[SCENE] 이동 단계 진입 — 타겟 자동 해제 (추적 종료)")
         # 이동 단계(②③④⑥): 팔 수납 + 그리퍼 안쪽 + 닫기 — 문틀·벽 충돌 방지
         if node and _auth:
-            node._dlog("[SCENE] 이동 자세 — 팔 수납·그리퍼 안쪽·닫기")
+            node._dlog("[SCENE] 이동 자세 — 그리퍼 먼저 닫고→팔 수납·손목 안쪽 (충돌·과부하 방지)")
+            # #1 과부하 방지: 손목을 안쪽(WRIST_YAW_IN)으로 돌리기 전에 그리퍼를 먼저 닫는다.
+            # 열린 채 안쪽으로 돌면 손가락이 몸통에 닿아 wrist_yaw 서보 과부하.
+            node._move_joint_wait(GRIPPER_JOINT, GRIPPER_CLOSE_M, 1, 4.0)
             node._send_goal(
-                ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll",
-                 ARM_JOINT, GRIPPER_JOINT],
-                [WRIST_PITCH_DEFAULT, WRIST_YAW_IN, 0.0, ARM_EXT_MIN, GRIPPER_CLOSE_M])
+                ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll", ARM_JOINT],
+                [WRIST_PITCH_DEFAULT, WRIST_YAW_IN, 0.0, ARM_EXT_MIN])
     # 단계 전환 = 진행 중이던 자동 안무·수동 스텝 즉시 취소 (새 의도가 우선)
     if node:
         node._step_abort = True

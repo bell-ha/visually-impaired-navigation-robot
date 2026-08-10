@@ -144,11 +144,23 @@ def start_subprocesses():
         stderr=subprocess.STDOUT,
         text=True, bufsize=1,
     )
+    # nav2 블랙박스 — 독립 프로세스로 spawn (대시보드 spin이 섬 현상으로 마비돼도
+    # 얘는 자체 participant/spin이라 계속 기록 → 주행 멈춤/드롭을 확실히 파일로 남김).
+    # 자동 실행이라 사용자는 따로 켤 필요 없음(interface·vision과 동일).
+    diagnav = subprocess.Popen(
+        [sys.executable, "-u", str(THIS_DIR / "robot_diag_nav.py")],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
     _procs["iface"] = iface
     _procs["vision"] = vision
+    _procs["diagnav"] = diagnav
     threading.Thread(target=_capture, args=(iface, "IFACE"), daemon=True).start()
     threading.Thread(target=_capture, args=(vision, "VISION"), daemon=True).start()
-    _log("MAIN", f"interface.py PID={iface.pid}, vision_assistant.py PID={vision.pid}")
+    threading.Thread(target=_capture, args=(diagnav, "NAV2"), daemon=True).start()
+    _log("MAIN", f"interface.py PID={iface.pid}, vision_assistant.py PID={vision.pid}, "
+                 f"nav-blackbox PID={diagnav.pid}")
 
 # ── ROS2 cmd_vel 퍼블리셔 ─────────────────────────────────────────────────────
 _cmd_node = None
@@ -224,31 +236,48 @@ def _load_exit_point():
 _robot_pose = {"x": None, "y": None, "z": None, "w": None, "yaw_deg": None}
 
 def _amcl_pose_cb(msg):
-    import math
-    p = msg.pose.pose.position
-    q = msg.pose.pose.orientation
-    yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                     1.0 - 2.0 * (q.y * q.y + q.z * q.z))
-    _robot_pose.update(x=round(p.x, 3), y=round(p.y, 3),
-                       z=round(q.z, 4), w=round(q.w, 4),
-                       yaw_deg=round(math.degrees(yaw), 1))
+    try:
+        import math
+        p = msg.pose.pose.position
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        _robot_pose.update(x=round(p.x, 3), y=round(p.y, 3),
+                           z=round(q.z, 4), w=round(q.w, 4),
+                           yaw_deg=round(math.degrees(yaw), 1))
+    except Exception:
+        pass   # 콜백 예외가 절대 rclpy.spin 스레드를 죽이지 않게
 
 def _battery_callback(msg):
-    pct = round(msg.percentage * 100) if msg.percentage <= 1.0 else round(msg.percentage)
-    _battery["pct"]      = pct
-    _battery["voltage"]  = round(msg.voltage, 1)
-    _battery["charging"] = msg.power_supply_status == 1  # CHARGING=1
+    # ⚠️ Stretch 드라이버는 percentage를 NaN으로 발행(전압만 유효). 과거엔 round(NaN)이
+    # ValueError를 내고, 이 콜백에 try/except가 없어 rclpy.spin 스레드를 통째로 죽였다
+    # → 대시보드 ROS 절반(pose·battery·load_map)이 부팅 몇 초 뒤 먹통 (2026-08-10 규명).
+    try:
+        import math
+        p = msg.percentage
+        if p is None or math.isnan(p) or math.isinf(p):
+            _battery["pct"] = None                          # 알 수 없음 → 전압만 사용
+        else:
+            _battery["pct"] = round(p * 100) if p <= 1.0 else round(p)
+        v = msg.voltage
+        _battery["voltage"]  = round(v, 1) if (v is not None and not math.isnan(v)) else None
+        _battery["charging"] = msg.power_supply_status == 1  # CHARGING=1
+    except Exception:
+        pass
 
 def _cmdvel_callback(msg):
     global _backup_warn_until
-    if _manual_mode:
-        return   # 수동 모드에서는 안내 생략
-    if msg.linear.x < -0.01:
-        now = time.monotonic()
-        if now > _backup_warn_until:
-            _backup_warn_until = now + 10.0
-            _write("iface", "/backup")
-            _log("MAIN", "후진 감지 → TTS 안내")
+    try:
+        if _manual_mode:
+            return   # 수동 모드에서는 안내 생략
+        if msg.linear.x < -0.01:
+            now = time.monotonic()
+            if now > _backup_warn_until:
+                _backup_warn_until = now + 10.0
+                _write("iface", "/backup")
+                _log("MAIN", "후진 감지 → TTS 안내")
+    except Exception:
+        pass
 
 def init_ros():
     global _cmd_node, _cmd_pub, _map_client, _init_pub
@@ -283,9 +312,20 @@ def init_ros():
             cmd_vel_topic="/stretch/cmd_vel",
             own_node_name="main_web_cmdvel",
             expected_nodes=["elevator_tracker"],
-            rosout=True,   # nav2가 왜 복구를 부르는지(/rosout) 파일에 기록
         )
-    threading.Thread(target=rclpy.spin, args=(_cmd_node,), daemon=True).start()
+    def _spin_resilient():
+        # 콜백 예외로 스핀이 죽어도 되살려 ROS 절반(pose·battery·load_map·initialpose)이
+        # 계속 살게 한다. (과거: 보호 없던 콜백 예외 하나에 이 스레드가 영구 사망)
+        while rclpy.ok():
+            try:
+                rclpy.spin(_cmd_node)
+            except Exception as e:
+                try:
+                    _log("MAIN", f"ROS 스핀 예외 → 재개: {e!r}")
+                except Exception:
+                    pass
+                time.sleep(0.3)
+    threading.Thread(target=_spin_resilient, daemon=True).start()
     _log("MAIN", "ROS2 cmd_vel 퍼블리셔/구독자 시작")
 
 def publish_cmd(lx: float, az: float):
@@ -608,6 +648,87 @@ def armleft():
     _procs["armleft"] = proc
     threading.Thread(target=_capture, args=(proc, "ARM"), daemon=True).start()
     _log("MAIN", f"armleft.py 시작 PID={proc.pid}")
+    return jsonify(ok=True, running=True)
+
+# ── 엘리베이터 앱 on-demand 실행 (nav과 동시 구동 = 과부하 → 순차 운영) ──────────────
+#   근거(2026-08-10 규명): nav + 엘베앱(OCR 서버·그리퍼 카메라)을 동시에 돌리면
+#   컴퓨터가 과부하 → 센서/TF 타이밍 붕괴 → costmap이 센서를 버림 → 주행이 5초/30초
+#   멈춤. 엘베앱을 끄고 주행하면 완전히 깨끗함(838드롭→0). 그래서 "한 번에 하나씩":
+#   승차지점까지 주행(엘베앱 OFF) → 도착 후 엘베앱 ON(제어권 자동) → 버튼 → OFF → nav 복귀.
+#   [시작] 엘베앱 spawn → 5000 뜨면 제어권 자동 부여(+armleft 자동 종료)
+#   [종료] 제어권 회수(엘베 즉시 정지) → SIGTERM(엘베앱 finally 정리로 서보·바퀴 깨끗이)
+def _elev_app_running() -> bool:
+    p = _procs.get("elevator")
+    if p and p.poll() is None:
+        return True
+    try:   # 대시보드가 추적 못 하는 것(재시작 desync)도 이름으로 감지
+        return subprocess.run(["pgrep", "-f", "elevator_button_press/main.py"],
+                              capture_output=True).returncode == 0
+    except Exception:
+        return False
+
+def _wait_and_grant_authority(timeout: float = 20.0):
+    """엘베앱 5000 서버가 응답할 때까지 기다렸다가 제어권 부여. 막 spawn한 직후엔
+    5000이 안 떠서 grant POST가 유실되므로, 뜬 뒤에 부여해야 확실히 닿는다.
+    (엘베앱은 시작 시 8080이 살아있으면 authority=False로 대기 → 여기서 켜줌)"""
+    import urllib.request
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        try:
+            urllib.request.urlopen("http://localhost:5000/authority", timeout=0.5)
+            break            # 응답 = 5000 떴음
+        except Exception:
+            time.sleep(0.4)
+    _set_elev_authority(True, "엘리베이터 앱 시작")
+
+@app.route("/elevator_app_status")
+def elevator_app_status():
+    return jsonify(running=_elev_app_running(), authority=_elev_authority)
+
+@app.route("/elevator_app", methods=["POST"])
+def elevator_app():
+    data    = request.json or {}
+    desired = data.get("running")     # True=시작, False=종료, None=토글
+    running = _elev_app_running()
+
+    # 종료 (또는 토글인데 켜져 있음)
+    if desired is False or (desired is None and running):
+        # 1) 제어권 먼저 회수 → 엘베가 즉시 정지·타겟 해제 (프로세스 살아있을 때 받게)
+        _set_elev_authority(False, "엘리베이터 앱 종료")
+        time.sleep(0.3)
+        # 2) 프로세스 종료 (SIGTERM → 엘베앱 finally 정리로 서보·바퀴 깨끗이)
+        p = _procs.get("elevator")
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        try:
+            subprocess.run(["pkill", "-f", "elevator_button_press/main.py"],
+                           capture_output=True)
+        except Exception:
+            pass
+        _procs.pop("elevator", None)
+        _log("MAIN", "엘리베이터 앱 종료 + 제어권 회수 → 주행(nav) 복귀")
+        return jsonify(ok=True, running=False)
+
+    # 이미 켜져 있음 → 제어권만 재확인
+    if desired is True and running:
+        threading.Thread(target=_wait_and_grant_authority, daemon=True).start()
+        return jsonify(ok=True, running=True)
+
+    # 시작 (경로는 __file__ 기준이라 cwd 무관, 부모 env(ROS·FastDDS) 상속)
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(THIS_DIR / "elevator_button_press/main.py")],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    _procs["elevator"] = proc
+    threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
+    # 5000 뜨면 자동으로 제어권 부여(+armleft 자동 종료는 _set_elev_authority가 처리)
+    threading.Thread(target=_wait_and_grant_authority, daemon=True).start()
+    _log("MAIN", f"엘리베이터 앱 시작 PID={proc.pid} → 5000 뜨면 제어권 자동 부여")
     return jsonify(ok=True, running=True)
 
 _CONFIRMED_LOCATIONS = {
@@ -1173,6 +1294,8 @@ HTML = """<!DOCTYPE html>
       <button class="tab-btn"        id="tab-MAIN"   onclick="setTab('MAIN')">메인<span class="tab-badge" id="badge-MAIN"   style="display:none"></span></button>
       <button class="tab-btn"        id="tab-WEB"    onclick="setTab('WEB')">웹<span class="tab-badge" id="badge-WEB"    style="display:none"></span></button>
       <button class="tab-btn"        id="tab-ARM"    onclick="setTab('ARM')">팔고정<span class="tab-badge" id="badge-ARM"    style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-ELEV"   onclick="setTab('ELEV')">엘베<span class="tab-badge" id="badge-ELEV"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-NAV2"   onclick="setTab('NAV2')">주행<span class="tab-badge" id="badge-NAV2"   style="display:none"></span></button>
       <button class="tab-btn"        id="tab-SYS"    onclick="setTab('SYS')">시스템<span class="tab-badge" id="badge-SYS"    style="display:none"></span></button>
       <button class="tab-btn"        id="tab-ROS2"   onclick="setTab('ROS2')">ROS2<span class="tab-badge" id="badge-ROS2"   style="display:none"></span></button>
       <button class="tab-btn"        id="tab-RVIZ"   onclick="setTab('RVIZ')">RViz<span class="tab-badge" id="badge-RVIZ"   style="display:none"></span></button>
@@ -1266,9 +1389,9 @@ HTML = """<!DOCTYPE html>
           </label>
         </div>
         <div class="toggle-row">
-          <span class="toggle-label">🛗 엘리베이터 제어권<span class="kbd">5</span></span>
+          <span class="toggle-label">🛗 엘리베이터 앱 실행<span class="kbd">5</span></span>
           <label class="toggle-switch">
-            <input type="checkbox" id="elev-auth-toggle" onchange="toggleElevAuthority()">
+            <input type="checkbox" id="elev-app-toggle" onchange="toggleElevatorApp()">
             <span class="toggle-slider"></span>
           </label>
         </div>
@@ -1523,11 +1646,29 @@ function queryPose() {
   }).catch(() => {});
 }
 
-function toggleElevAuthority() {
-  const on = document.getElementById('elev-auth-toggle').checked;
-  fetch('/elev_authority', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({granted: on})});
+// 엘리베이터 앱 on-demand 실행 (켜면 앱 시작+제어권 자동 부여, 끄면 종료+제어권 회수)
+let elevAppRunning = false;
+function toggleElevatorApp() {
+  const desired = document.getElementById('elev-app-toggle').checked;
+  fetch('/elevator_app', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({running: desired})
+  }).then(r => r.json()).then(d => {
+    elevAppRunning = d.running;
+    document.getElementById('elev-app-toggle').checked = elevAppRunning;
+  }).catch(() => {
+    document.getElementById('elev-app-toggle').checked = elevAppRunning;
+  });
 }
+// 실제 서버 상태와 주기 동기화 (크래시·외부 종료 반영)
+function _syncElevApp() {
+  fetch('/elevator_app_status').then(r => r.json()).then(d => {
+    elevAppRunning = d.running;
+    const t = document.getElementById('elev-app-toggle');
+    if (t && document.activeElement !== t) t.checked = elevAppRunning;
+  }).catch(() => {});
+}
+_syncElevApp();
+setInterval(_syncElevApp, 3000);
 
 let offlineMode = false;
 function toggleNetMode() {
@@ -1548,7 +1689,7 @@ function setTtsSpeed(v) {
 const logPanel = document.getElementById('log-panel');
 let allLogs = [];
 let currentTab = 'ALL';
-const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD','MAP','POSE','OBSTACLE'];
+const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM','ELEV','NAV2','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD','MAP','POSE','OBSTACLE'];
 const unread = Object.fromEntries(SOURCES.map(s => [s, 0]));
 
 function setTab(tab) {
@@ -1625,14 +1766,6 @@ setInterval(() => {
   }).catch(() => {});
 }, 1000);
 
-// 엘리베이터 제어권 토글을 서버 상태와 동기화 (수동 전환 자동 회수 등 반영)
-setInterval(() => {
-  fetch('/elev_authority').then(r => r.json()).then(d => {
-    const t = document.getElementById('elev-auth-toggle');
-    if (t && document.activeElement !== t) t.checked = !!d.granted;
-  }).catch(() => {});
-}, 2000);
-
 // ── 시스템 프로세스 ──────────────────────────────────────────────────────────
 const SYS_NAMES = ['launch','rviz','battery','free','home'];
 const sysState = Object.fromEntries(SYS_NAMES.map(n => [n, false]));
@@ -1695,7 +1828,7 @@ function killAllRobot() {
 const keyToDir = {'ArrowUp':['fwd',1,0],'ArrowDown':['bwd',-0.5,0],
                   'ArrowLeft':['left',0,1],'ArrowRight':['right',0,-1]};
 const FEATURE_KEYS = {1:'armleft-toggle', 2:'social-nav-toggle',
-                      4:'net-mode-toggle'};   // 3(장애물 밀기) 제거 (2026-07-24)
+                      4:'net-mode-toggle', 5:'elev-app-toggle'};   // 3(장애물 밀기) 제거 (2026-07-24)
 const SYS_KEYS   = {1:'launch', 2:'rviz', 3:'battery', 4:'free', 5:'home'};
 const SYS_LABELS = {launch:'ROS2 Launch', rviz:'RViz2', battery:'배터리 확인',
                     free:'프로세스 정리', home:'홈 위치'};
