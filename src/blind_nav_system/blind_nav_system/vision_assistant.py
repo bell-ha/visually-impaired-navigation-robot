@@ -87,10 +87,22 @@ class CameraCapture(Node if _ROS_AVAILABLE else object):
                 self._cb,
                 10,
             )
-        self._latest: bytes | None = None
+        self._latest_msg = None   # 최신 원본 프레임(ROS msg)만 보관 — 인코딩은 요청 시에만
         self._lock = threading.Lock()
 
     def _cb(self, msg: "ROSImage"):
+        # 매 프레임 JPEG+base64 인코딩하면 쓰지도 않을 프레임을 초당 15~30번 압축해
+        # idle에도 CPU를 크게 먹는다(실측 43%, 주행 중 AMCL/컨트롤러와 CPU 경쟁 → 멈춤 유발).
+        # 여기선 최신 원본만 보관하고, 실제 인코딩은 get_frame_b64() 호출(분석 요청) 때만 한다.
+        with self._lock:
+            self._latest_msg = msg
+
+    def get_frame_b64(self) -> str | None:
+        # 요청 시에만 최신 원본을 JPEG+base64로 인코딩 (idle CPU 절약)
+        with self._lock:
+            msg = self._latest_msg
+        if msg is None:
+            return None
         try:
             # encoding: bgr8 or rgb8
             arr = np.frombuffer(msg.data, dtype=np.uint8).reshape(
@@ -98,18 +110,13 @@ class CameraCapture(Node if _ROS_AVAILABLE else object):
             )
             if msg.encoding in ("bgr8",):
                 arr = arr[:, :, ::-1]  # BGR → RGB
-            # JPEG 압축 후 base64
             import cv2
             ok, buf = cv2.imencode(".jpg", arr[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
-                with self._lock:
-                    self._latest = base64.b64encode(buf.tobytes()).decode()
+                return base64.b64encode(buf.tobytes()).decode()
         except Exception as e:
-            print(f"[카메라] 프레임 처리 오류: {e}")
-
-    def get_frame_b64(self) -> str | None:
-        with self._lock:
-            return self._latest
+            print(f"[카메라] 프레임 인코딩 오류: {e}")
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
