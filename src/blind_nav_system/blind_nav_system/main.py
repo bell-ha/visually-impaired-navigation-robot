@@ -218,6 +218,8 @@ _FLOOR_MAPS = {
     "5": str((THIS_DIR / "../maps/all.yaml").resolve()),
     "4": str((THIS_DIR / "../maps/floor4.yaml").resolve()),
     "3": str((THIS_DIR / "../maps/floor3.yaml").resolve()),
+    "2": str((THIS_DIR / "../maps/floor2.yaml").resolve()),
+    "1": str((THIS_DIR / "../maps/floor1.yaml").resolve()),
 }
 _current_floor = "5"   # 런치 기본 지도 = all.yaml(5층)
 _map_client = None     # /map_server/load_map 서비스 클라이언트
@@ -730,6 +732,222 @@ def elevator_app():
     threading.Thread(target=_wait_and_grant_authority, daemon=True).start()
     _log("MAIN", f"엘리베이터 앱 시작 PID={proc.pid} → 5000 뜨면 제어권 자동 부여")
     return jsonify(ok=True, running=True)
+
+# ── 반자동 엘리베이터 여정 오케스트레이터 ──────────────────────────────────────────
+# 목적지(예: '504호(연구실)')를 받아 [승차지점 주행 → 엘베 호출/탑승/층선택/하차 →
+# 지도전환 → 목적지 주행]을 자동 진행. 블로커 단계(호출 press, 탑승 등)에서는 멈춰
+# 사용자 '다음 확인'을 기다린다(반자동). 도착 감지는 로봇위치 vs 목표좌표 거리로 판단.
+import math as _math_auto
+
+def _loc(name):
+    """location.yaml에서 한 지점의 dict(x/y/floor 등) 반환 (없으면 None)."""
+    try:
+        import yaml as _yaml
+        locs = _yaml.safe_load(open(THIS_DIR / "../config/location.yaml"))["locations"]
+        return locs.get(name)
+    except Exception:
+        return None
+
+def _dist_to(x, y):
+    """현재 로봇 위치에서 (x,y)까지 거리(m). 위치 미수신/좌표없음이면 None."""
+    if _robot_pose["x"] is None or x is None or y is None:
+        return None
+    return _math_auto.hypot(_robot_pose["x"] - float(x), _robot_pose["y"] - float(y))
+
+_AUTO = {"active": False, "dest": "", "step": "", "msg": "",
+         "waiting": False, "cancel": False}
+_auto_lock = threading.Lock()
+
+def _auto_set(step, msg, wait=False):
+    with _auto_lock:
+        _AUTO["step"] = step; _AUTO["msg"] = msg; _AUTO["waiting"] = wait
+    _log("AUTO", f"[{step}] {msg}" + ("  — 확인 대기" if wait else ""))
+
+def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
+    """name 지점 '정밀 도착'까지 대기. nav이 5cm로 서므로, 여기선 목표 tol(기본 10cm)
+    이내에서 로봇이 settle초간 '멈춰있으면'(=nav 완료 = 정밀 도착) True.
+    - 단순히 tol 이내를 지나가는 중인 것과 구분하려고 '정지'까지 확인 (jitter 여유로 10cm).
+    - nav 정밀도(5cm)와 일관: 로봇은 ≤5cm에 서고, 오케스트레이터는 그 정지를 감지해 진행.
+    cancel/timeout이면 False."""
+    p = _loc(name)
+    if not p:
+        return False
+    tx, ty = p.get("x"), p.get("y")
+    t0 = time.monotonic()
+    stable_since = None
+    last = None
+    while time.monotonic() - t0 < timeout:
+        if _AUTO["cancel"]:
+            return False
+        rx, ry = _robot_pose["x"], _robot_pose["y"]
+        d = _dist_to(tx, ty)
+        near    = (d is not None and d <= tol)
+        stopped = (last is not None and rx is not None
+                   and _math_auto.hypot(rx - last[0], ry - last[1]) < 0.02)  # 폴링 간 2cm 미만 = 정지
+        if near and stopped:
+            if stable_since is None:
+                stable_since = time.monotonic()
+            elif time.monotonic() - stable_since >= settle:
+                return True      # 목표 이내 + settle초 정지 = 정밀 도착 확정
+        else:
+            stable_since = None
+        if rx is not None:
+            last = (rx, ry)
+        time.sleep(0.3)
+    return False
+
+def _auto_wait_confirm(timeout=900):
+    """블로커 단계 — 사용자 '다음 확인' 대기. /auto_confirm이 waiting=False로 풀어줌."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if _AUTO["cancel"]:
+            return False
+        with _auto_lock:
+            if not _AUTO["waiting"]:
+                return True
+        time.sleep(0.2)
+    return False
+
+def _elev_scene(n):
+    """엘베앱에 씬 n 트리거 (HTTP POST 5000/scene)."""
+    try:
+        import urllib.request
+        urllib.request.urlopen(urllib.request.Request(
+            "http://localhost:5000/scene",
+            data=json.dumps({"n": int(n)}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST"), timeout=3)
+        return True
+    except Exception as e:
+        _log("AUTO", f"씬 {n} 호출 실패: {e}")
+        return False
+
+def _http_self(path, payload):
+    """대시보드 자기 자신(8080)의 라우트를 호출 (지도전환 등 재사용)."""
+    try:
+        import urllib.request
+        urllib.request.urlopen(urllib.request.Request(
+            f"http://localhost:8080{path}",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"}, method="POST"), timeout=10)
+        return True
+    except Exception as e:
+        _log("AUTO", f"{path} 호출 실패: {e}")
+        return False
+
+def _auto_run(dest):
+    """반자동 여정 상태머신 (백그라운드 스레드)."""
+    try:
+        with _auto_lock:
+            _AUTO.update(active=True, dest=dest, cancel=False)
+        d = _loc(dest)
+        if not d:
+            _auto_set("오류", f"'{dest}' 좌표를 location.yaml에서 못 찾음"); return
+        dest_floor = str(d.get("floor") or _current_floor)
+
+        # 같은 층이면 엘베 없이 바로
+        if dest_floor == _current_floor:
+            _auto_set("주행", f"{dest} 바로 이동 (같은 층)")
+            _write("iface", f"/goto {dest}")
+            _auto_set("완료", f"{dest} 도착 ✅" if _auto_wait_arrival(dest) else "도착 실패")
+            return
+
+        up = int(dest_floor) > int(_current_floor)
+        dir_txt = "▲ 상행" if up else "▼ 하행"
+        _auto_set("시작", f"{dest}={dest_floor}층 / 현재 {_current_floor}층 → 엘베 {dir_txt}")
+
+        # 1) 승차지점 주행 (자동)
+        _auto_set("주행", "엘리베이터 탑승지점으로 이동 중...")
+        _write("iface", "/goto 엘리베이터 탑승지점")
+        if not _auto_wait_arrival("엘리베이터 탑승지점"):
+            _auto_set("오류", "승차지점 도착 실패(취소/시간초과)"); return
+        _auto_set("도착", "승차지점 도착 ✅")
+
+        # 2) 엘베앱 ON (제어권/armleft 자동)
+        _auto_set("엘베시작", "엘리베이터 앱 시작 + 제어권 부여...")
+        if not _elev_app_running():
+            proc = subprocess.Popen(
+                [sys.executable, "-u", str(THIS_DIR / "elevator_button_press/main.py")],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            _procs["elevator"] = proc
+            threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
+        threading.Thread(target=_wait_and_grant_authority, daemon=True).start()
+        time.sleep(6)  # 5000 + 제어권 부여 대기
+
+        # 3) ① 호출 press (블로커 → 멈춤)
+        _elev_scene(0)
+        _auto_set("호출", f"호출 버튼 {dir_txt} press — 눌렸으면 '다음 확인' 누르세요", wait=True)
+        if not _auto_wait_confirm(): _auto_set("취소", "여정 취소됨"); return
+
+        # 4) ③ 문 열림 대기 (자동 트리거) + ④ 탑승 (블로커 → 멈춤)
+        _elev_scene(2)
+        time.sleep(2)
+        _elev_scene(3)
+        _auto_set("탑승", "탑승(전진) — 다 탔으면 '다음 확인' 누르세요", wait=True)
+        if not _auto_wait_confirm(): _auto_set("취소", "여정 취소됨"); return
+
+        # 5) ⑤ 층 버튼 press (블로커 → 멈춤)
+        _elev_scene(4)
+        _auto_set("층선택", f"{dest_floor}층 버튼 press — 눌렸으면 '다음 확인'", wait=True)
+        if not _auto_wait_confirm(): _auto_set("취소", "여정 취소됨"); return
+
+        # 6) 도착 대기 → ⑥ 하차 (블로커 → 멈춤)
+        _auto_set("이동중", f"{dest_floor}층 이동 중 — 도착·하차 준비되면 '다음 확인'", wait=True)
+        if not _auto_wait_confirm(): _auto_set("취소", "여정 취소됨"); return
+        _elev_scene(5)
+        _auto_set("하차", "하차(후진) 중...")
+        time.sleep(3)
+
+        # 7) 지도 전환 + 하차지점 초기화 (자동)
+        _auto_set("지도전환", f"{dest_floor}층 지도 전환 + 하차지점 초기화")
+        _http_self("/switch_map", {"floor": dest_floor, "init_exit": True})
+        time.sleep(2)
+
+        # 8) 엘베앱 OFF (제어권 회수 + 종료)
+        _auto_set("엘베종료", "엘리베이터 앱 종료 + 제어권 회수")
+        _http_self("/elevator_app", {"running": False})
+        time.sleep(1)
+
+        # 9) 목적지 주행 (자동)
+        _auto_set("주행", f"{dest}로 이동 중...")
+        _write("iface", f"/goto {dest}")
+        _auto_set("완료", f"🎉 {dest} 도착! 여정 완료" if _auto_wait_arrival(dest)
+                  else "목적지 도착 실패")
+    except Exception as e:
+        _auto_set("오류", f"여정 예외: {e!r}")
+    finally:
+        with _auto_lock:
+            _AUTO["active"] = False; _AUTO["waiting"] = False
+
+@app.route("/auto_goto", methods=["POST"])
+def auto_goto():
+    if _AUTO["active"]:
+        return jsonify(ok=False, error="이미 여정 진행 중")
+    dest = ((request.json or {}).get("dest") or "").strip()
+    if not dest:
+        return jsonify(ok=False, error="목적지 없음"), 400
+    if _manual_mode:
+        return jsonify(ok=False, error="수동 모드 — 자동 모드로 전환하세요")
+    threading.Thread(target=_auto_run, args=(dest,), daemon=True).start()
+    return jsonify(ok=True, dest=dest)
+
+@app.route("/auto_confirm", methods=["POST"])
+def auto_confirm():
+    """블로커 단계 '다음 확인' — 대기 해제."""
+    with _auto_lock:
+        _AUTO["waiting"] = False
+    return jsonify(ok=True)
+
+@app.route("/auto_cancel", methods=["POST"])
+def auto_cancel():
+    with _auto_lock:
+        _AUTO["cancel"] = True; _AUTO["waiting"] = False
+    _write("iface", "/cancel")
+    return jsonify(ok=True)
+
+@app.route("/auto_status")
+def auto_status():
+    with _auto_lock:
+        return jsonify(**{k: _AUTO[k] for k in ("active", "dest", "step", "msg", "waiting")})
 
 _CONFIRMED_LOCATIONS = {
     "인공지능 플랫폼",
@@ -1402,6 +1620,8 @@ HTML = """<!DOCTYPE html>
               <option value="5" selected>5층</option>
               <option value="4">4층</option>
               <option value="3">3층</option>
+              <option value="2">2층</option>
+              <option value="1">1층</option>
             </select>
             <label style="font-size:0.68rem;color:#9ab;display:flex;align-items:center;gap:3px;cursor:pointer;"
                    title="전환 직후 AMCL 위치를 엘리베이터 하차지점으로 자동 설정 — 엘리베이터로 층 이동한 직후에만 켜두세요">
@@ -1416,6 +1636,21 @@ HTML = """<!DOCTYPE html>
                 flex:1;text-align:right;user-select:all;"></span>
           <button onclick="queryPose()" style="background:#345;color:#dee;border:none;
                   border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;">조회</button>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <h2>🤖 자동 여정 (엘베 포함)</h2>
+      <div style="margin-top:6px">
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+          <select id="auto-dest" style="flex:1;background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:4px 6px;font-size:0.82rem;"></select>
+          <button id="auto-go-btn" onclick="autoGoto()" style="background:#264;color:#cfd;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:700;font-size:0.82rem;white-space:nowrap;">🚀 출발</button>
+        </div>
+        <div id="auto-status" style="font-size:0.78rem;color:#9ab;min-height:1.3em;padding:5px 6px;background:#1a1d27;border-radius:5px;">대기 중 — 목적지 선택 후 출발</div>
+        <div style="display:flex;gap:6px;margin-top:5px">
+          <button id="auto-confirm-btn" onclick="autoConfirm()" disabled style="flex:1;background:#333;color:#888;border:none;border-radius:6px;padding:7px;cursor:pointer;font-weight:700;font-size:0.86rem;">✅ 다음 확인</button>
+          <button id="auto-cancel-btn" onclick="autoCancel()" style="background:#533;color:#fcc;border:none;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:0.82rem;">✖ 취소</button>
         </div>
       </div>
     </div>
@@ -1669,6 +1904,56 @@ function _syncElevApp() {
 }
 _syncElevApp();
 setInterval(_syncElevApp, 3000);
+
+// ── 자동 여정 (반자동 엘베 오케스트레이터) ──────────────────────────────────
+// 목적지 드롭다운 채우기 (엘베 탑승/하차 지점은 제외)
+fetch('/locations').then(r => r.json()).then(d => {
+  const sel = document.getElementById('auto-dest');
+  if (!sel) return;
+  (d.locations || []).forEach(loc => {
+    if (loc.name.includes('탑승지점') || loc.name.includes('하차지점')) return;
+    const o = document.createElement('option');
+    o.value = loc.name;
+    o.textContent = loc.name + (loc.floor ? ` (${loc.floor}층)` : '');
+    sel.appendChild(o);
+  });
+}).catch(() => {});
+
+function autoGoto() {
+  const dest = document.getElementById('auto-dest').value;
+  if (!dest) { alert('목적지를 선택하세요'); return; }
+  if (!confirm(`'${dest}'로 자동 출발할까요?\n(승차지점 주행 → 엘베 → 목적지까지 자동, 블로커 단계는 '다음 확인' 필요)`)) return;
+  fetch('/auto_goto', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dest})}).then(r => r.json()).then(d => {
+    if (!d.ok) alert('출발 실패: ' + (d.error || ''));
+  }).catch(() => {});
+}
+function autoConfirm() { fetch('/auto_confirm', {method:'POST'}).catch(() => {}); }
+function autoCancel() {
+  if (confirm('자동 여정을 취소할까요?')) fetch('/auto_cancel', {method:'POST'}).catch(() => {});
+}
+
+// 상태 폴링 (1초) — 단계/메시지 표시 + '다음 확인' 버튼 활성/강조
+setInterval(() => {
+  fetch('/auto_status').then(r => r.json()).then(d => {
+    const st = document.getElementById('auto-status');
+    const cb = document.getElementById('auto-confirm-btn');
+    const gb = document.getElementById('auto-go-btn');
+    if (!st || !cb || !gb) return;
+    if (d.active) {
+      st.textContent = `[${d.step}] ${d.msg}`;
+      st.style.color = d.waiting ? '#fd6' : '#8c8';
+      gb.disabled = true; gb.style.opacity = '0.5';
+      if (d.waiting) { cb.disabled = false; cb.style.background = '#7a3'; cb.style.color = '#fff'; }
+      else { cb.disabled = true; cb.style.background = '#333'; cb.style.color = '#888'; }
+    } else {
+      st.textContent = d.msg ? `[${d.step}] ${d.msg}` : '대기 중 — 목적지 선택 후 출발';
+      st.style.color = '#9ab';
+      gb.disabled = false; gb.style.opacity = '1';
+      cb.disabled = true; cb.style.background = '#333'; cb.style.color = '#888';
+    }
+  }).catch(() => {});
+}, 1000);
 
 let offlineMode = false;
 function toggleNetMode() {
