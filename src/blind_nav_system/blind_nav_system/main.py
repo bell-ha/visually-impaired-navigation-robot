@@ -71,6 +71,9 @@ try:
     from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
     from sensor_msgs.msg import BatteryState
     from std_msgs.msg import String as ROSString
+    from control_msgs.action import FollowJointTrajectory   # 팔 수납(트래젝토리) 트리거용
+    from trajectory_msgs.msg import JointTrajectoryPoint
+    from rclpy.action import ActionClient
     _ROS_OK = True
     try:
         from nav2_msgs.srv import LoadMap   # 지도(층) 전환용 — 없어도 나머지는 동작
@@ -165,6 +168,7 @@ def start_subprocesses():
 # ── ROS2 cmd_vel 퍼블리셔 ─────────────────────────────────────────────────────
 _cmd_node = None
 _cmd_pub  = None
+_arm_client = None   # 팔 수납 트래젝토리 액션 클라이언트 (init_ros에서 생성)
 _manual_mode = False
 _manual_lock = threading.Lock()
 
@@ -282,7 +286,7 @@ def _cmdvel_callback(msg):
         pass
 
 def init_ros():
-    global _cmd_node, _cmd_pub, _map_client, _init_pub
+    global _cmd_node, _cmd_pub, _map_client, _init_pub, _arm_client
     if not _ROS_OK:
         return
     rclpy.init()
@@ -307,6 +311,9 @@ def init_ros():
         _map_client = _cmd_node.create_client(LoadMap, "/map_server/load_map")
     _init_pub = _cmd_node.create_publisher(PoseWithCovarianceStamped,
                                            "/initialpose", 10)
+    # 팔 수납(armleft 대체) — 트래젝토리 액션 클라이언트 (엘베와 동일 서버)
+    _arm_client = ActionClient(_cmd_node, FollowJointTrajectory,
+                               "/stretch_controller/follow_joint_trajectory")
     # 진단 계측 부착 (cmd_vel 퍼블리셔 수·엘리베이터 노드 존재 추적)
     if _diag is not None and _diaglog is not None:
         _diag.attach(
@@ -329,6 +336,49 @@ def init_ros():
                 time.sleep(0.3)
     threading.Thread(target=_spin_resilient, daemon=True).start()
     _log("MAIN", "ROS2 cmd_vel 퍼블리셔/구독자 시작")
+
+# ── 팔 수납 (armleft 프로세스 대체 — 대시보드가 직접 one-shot 트리거) ────────────────
+# 엘베 이동-씬의 수납 로직을 그대로 복제: 그리퍼 먼저 닫고(과부하 방지: 열린 채 손목
+# 돌리면 손가락이 몸통에 닿음) → 손목 안쪽 + 팔 완전 수축. 엘베 앱 없이도 동작하고,
+# one-shot이라 armleft처럼 계속 재전송하며 팔을 두고 다투는 일이 없다.
+def _stow_arm():
+    if _arm_client is None:
+        _log("MAIN", "팔 수납 실패 — 액션클라 미초기화(ROS 없음)")
+        return
+    def _send(joint_names, positions, sec, wait_timeout=0.0):
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory.joint_names = list(joint_names)
+        pt = JointTrajectoryPoint()
+        pt.positions = [float(p) for p in positions]
+        pt.time_from_start.sec = int(sec)
+        goal.trajectory.points = [pt]
+        if wait_timeout > 0:                       # 완료까지 블로킹 (엘베 _move_joint_wait 복제)
+            done = threading.Event()
+            def _on_res(_): done.set()
+            def _on_resp(fut):
+                h = fut.result()
+                if h and h.accepted:
+                    h.get_result_async().add_done_callback(_on_res)
+                else:
+                    done.set()
+            _arm_client.send_goal_async(goal).add_done_callback(_on_resp)
+            done.wait(timeout=wait_timeout)
+        else:                                      # 비블로킹 (엘베 _send_goal 복제)
+            _arm_client.send_goal_async(goal)
+    def _run():
+        try:
+            if not _arm_client.wait_for_server(timeout_sec=2.0):
+                _log("MAIN", "팔 수납 실패 — 트래젝토리 서버 없음 (런치 떴나?)")
+                return
+            _send(["gripper_aperture"], [0.00], sec=2, wait_timeout=5.0)   # 1) 그리퍼 닫기(대기)
+            # 2) 손목 안쪽 + 팔 수축 + lift 올림(0.90 = armleft와 동일한 올린 높이)
+            _send(["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll",
+                   "wrist_extension", "joint_lift"],
+                  [-0.02, 3.4, 0.0, 0.0, 0.90], sec=2)
+            _log("MAIN", "팔 수납 완료 (닫기→손목 안쪽→팔 수축→lift 0.90)")
+        except Exception as e:
+            _log("MAIN", f"팔 수납 예외: {e!r}")
+    threading.Thread(target=_run, daemon=True).start()
 
 def publish_cmd(lx: float, az: float):
     if not _cmd_pub:
@@ -616,6 +666,12 @@ def armleft_status():
     running = bool(p and p.poll() is None)
     return jsonify(running=running)
 
+@app.route("/stow_arm", methods=["POST"])
+def stow_arm():
+    _stow_arm()
+    _log("WEB", "팔 수납 (웹 트리거)")
+    return jsonify(ok=True)
+
 @app.route("/armleft", methods=["POST"])
 def armleft():
     data = request.json or {}
@@ -755,12 +811,16 @@ def _dist_to(x, y):
     return _math_auto.hypot(_robot_pose["x"] - float(x), _robot_pose["y"] - float(y))
 
 _AUTO = {"active": False, "dest": "", "step": "", "msg": "",
-         "waiting": False, "cancel": False}
+         "waiting": False, "cancel": False,
+         "phase": "", "dest_floor": "", "mode": ""}
 _auto_lock = threading.Lock()
 
-def _auto_set(step, msg, wait=False):
+def _auto_set(step, msg, wait=False, phase=None):
+    """단계 상태 갱신. phase=전체 흐름 트래커에서 하이라이트할 단계 id(없으면 유지)."""
     with _auto_lock:
         _AUTO["step"] = step; _AUTO["msg"] = msg; _AUTO["waiting"] = wait
+        if phase is not None:
+            _AUTO["phase"] = phase
     _log("AUTO", f"[{step}] {msg}" + ("  — 확인 대기" if wait else ""))
 
 def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
@@ -808,18 +868,74 @@ def _auto_wait_confirm(timeout=900):
         time.sleep(0.2)
     return False
 
-def _elev_scene(n):
-    """엘베앱에 씬 n 트리거 (HTTP POST 5000/scene)."""
+def _elev_post(path, payload=None, timeout=20):
+    """엘베앱(5000) POST — 응답 JSON(dict) 또는 None."""
     try:
         import urllib.request
-        urllib.request.urlopen(urllib.request.Request(
-            "http://localhost:5000/scene",
-            data=json.dumps({"n": int(n)}).encode(),
-            headers={"Content-Type": "application/json"}, method="POST"), timeout=3)
-        return True
+        r = urllib.request.urlopen(urllib.request.Request(
+            f"http://localhost:5000{path}",
+            data=json.dumps(payload or {}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST"), timeout=timeout)
+        return json.loads(r.read().decode() or "{}")
     except Exception as e:
-        _log("AUTO", f"씬 {n} 호출 실패: {e}")
-        return False
+        _log("AUTO", f"엘베 {path} 실패: {e}")
+        return None
+
+def _elev_status():
+    """엘베앱 상태(/status) 조회 — dict 또는 None. ready=정렬완료, door_open 등 포함."""
+    try:
+        import urllib.request
+        r = urllib.request.urlopen("http://localhost:5000/status", timeout=3)
+        return json.loads(r.read().decode() or "{}")
+    except Exception:
+        return None
+
+def _elev_scene(n):
+    """엘베앱 씬 n 트리거(자세 전환·자동안무). 자세 전송이 블로킹(~10s)이라 여유 타임아웃."""
+    return _elev_post("/scene", {"n": int(n)}, timeout=20) is not None
+
+def _elev_select(text):
+    """버튼 자동 선택(POST /select). 호출=^(상)/s(하), 층=번호. 성공 시 True."""
+    r = _elev_post("/select", {"text": str(text)}, timeout=5)
+    return bool(r and r.get("ok", True))
+
+def _elev_press():
+    """누르기 실행(POST /press). 성공 시 True."""
+    r = _elev_post("/press", {}, timeout=15)
+    return bool(r and r.get("ok"))
+
+def _elev_wait_ready(timeout=45):
+    """정렬 완료(centered && press_ready) 대기 — 취소 존중. 성공 True / 타임아웃·취소 False."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        with _auto_lock:
+            if _AUTO.get("cancel"):
+                return False
+        st = _elev_status()
+        if st and st.get("ready"):
+            return True
+        time.sleep(0.3)
+    return False
+
+def _elev_wait_press_done(timeout=30):
+    """누르기 완료 대기 — press 씬(0/4)의 scene_next_ok(press_ok_ts>scene_ts) True까지.
+    이게 True면 '버튼 눌림 + 팔 복귀 + 그리퍼 열기'까지 끝난 상태라 이동해도 안전.
+    취소 존중. 완료 True / 타임아웃·취소 False(그래도 흐름은 계속)."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        with _auto_lock:
+            if _AUTO.get("cancel"):
+                return False
+        st = _elev_status()
+        if st and st.get("scene_next_ok"):
+            return True
+        time.sleep(0.3)
+    return False
+
+def _auto_abort_elev():
+    """여정 취소 시 안전 정리: 엘베앱 종료(→제어권 회수→가드 복구)."""
+    _auto_set("취소", "여정 취소됨 — 엘베앱 종료·제어권 회수")
+    _http_self("/elevator_app", {"running": False})
 
 def _http_self(path, payload):
     """대시보드 자기 자신(8080)의 라우트를 호출 (지도전환 등 재사용)."""
@@ -838,32 +954,40 @@ def _auto_run(dest):
     """반자동 여정 상태머신 (백그라운드 스레드)."""
     try:
         with _auto_lock:
-            _AUTO.update(active=True, dest=dest, cancel=False)
+            _AUTO.update(active=True, dest=dest, cancel=False, phase="", mode="")
         d = _loc(dest)
         if not d:
             _auto_set("오류", f"'{dest}' 좌표를 location.yaml에서 못 찾음"); return
         dest_floor = str(d.get("floor") or _current_floor)
+        with _auto_lock:
+            _AUTO["dest_floor"] = dest_floor
 
         # 같은 층이면 엘베 없이 바로
         if dest_floor == _current_floor:
-            _auto_set("주행", f"{dest} 바로 이동 (같은 층)")
+            with _auto_lock:
+                _AUTO["mode"] = "same"
+            _auto_set("주행", f"{dest} 바로 이동 (같은 층)", phase="drive")
             _write("iface", f"/goto {dest}")
-            _auto_set("완료", f"{dest} 도착 ✅" if _auto_wait_arrival(dest) else "도착 실패")
+            _auto_set("완료", f"{dest} 도착 ✅" if _auto_wait_arrival(dest) else "도착 실패",
+                      phase="done")
             return
 
+        with _auto_lock:
+            _AUTO["mode"] = "elevator"
         up = int(dest_floor) > int(_current_floor)
         dir_txt = "▲ 상행" if up else "▼ 하행"
-        _auto_set("시작", f"{dest}={dest_floor}층 / 현재 {_current_floor}층 → 엘베 {dir_txt}")
+        _auto_set("시작", f"{dest}={dest_floor}층 / 현재 {_current_floor}층 → 엘베 {dir_txt}",
+                  phase="board")
 
         # 1) 승차지점 주행 (자동)
-        _auto_set("주행", "엘리베이터 탑승지점으로 이동 중...")
+        _auto_set("주행", "엘리베이터 탑승지점으로 이동 중...", phase="board")
         _write("iface", "/goto 엘리베이터 탑승지점")
         if not _auto_wait_arrival("엘리베이터 탑승지점"):
             _auto_set("오류", "승차지점 도착 실패(취소/시간초과)"); return
-        _auto_set("도착", "승차지점 도착 ✅")
+        _auto_set("도착", "승차지점 도착 ✅", phase="board")
 
         # 2) 엘베앱 ON (제어권/armleft 자동)
-        _auto_set("엘베시작", "엘리베이터 앱 시작 + 제어권 부여...")
+        _auto_set("엘베시작", "엘리베이터 앱 시작 + 제어권 부여...", phase="app")
         if not _elev_app_running():
             proc = subprocess.Popen(
                 [sys.executable, "-u", str(THIS_DIR / "elevator_button_press/main.py")],
@@ -873,45 +997,76 @@ def _auto_run(dest):
         threading.Thread(target=_wait_and_grant_authority, daemon=True).start()
         time.sleep(6)  # 5000 + 제어권 부여 대기
 
-        # 3) ① 호출 press (블로커 → 멈춤)
-        _elev_scene(0)
-        _auto_set("호출", f"호출 버튼 {dir_txt} press — 눌렸으면 '다음 확인' 누르세요", wait=True)
-        if not _auto_wait_confirm(): _auto_set("취소", "여정 취소됨"); return
+        # ── 엘리베이터 6 시나리오 ──────────────────────────────────────────
+        #   버튼 선택(상/하행·층)·정렬 = 자동 / 누르기(press) = '다음'에 포함.
+        #   씬: 0=①호출 1=②문앞 2=③문열림 3=④탑승 4=⑤층 5=⑥하차 (SCENES와 1:1)
 
-        # 4) ③ 문 열림 대기 (자동 트리거) + ④ 탑승 (블로커 → 멈춤)
+        # ① 호출 press: 인식자세 → 호출버튼(상/하행) 자동선택 → 정렬 → '다음'에 누르기
+        _auto_set("① 호출", f"인식 자세 + {dir_txt} 버튼 자동 선택·정렬 중...", phase="call")
+        _elev_scene(0)                          # place=hall + 인식자세(블로킹)
+        _elev_select("^" if up else "s")        # 호출버튼 자동 선택 (^=상행 s=하행)
+        if _elev_wait_ready():
+            _auto_set("① 호출", f"정렬 완료 ✅ — '다음' 누르면 호출({dir_txt}) 누름", wait=True)
+        else:
+            _auto_set("① 호출", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
+        if not _auto_wait_confirm(): _auto_abort_elev(); return
+        _elev_press()                           # 다음 → 호출버튼 누르기
+        _auto_set("① 호출", "호출 버튼 누르는 중... (팔 복귀까지 대기)")
+        _elev_wait_press_done()                 # 눌림+팔복귀 완료까지 대기(이동 안전)
+
+        # ② 문앞 정렬: 전진 56.5 + 우회전 90° (자동 안무)
+        _auto_set("② 문앞정렬", "문 앞으로 정렬 중(전진·회전)... 완료되면 '다음'",
+                  wait=True, phase="front")
+        _elev_scene(1)
+        if not _auto_wait_confirm(): _auto_abort_elev(); return
+
+        # ③ 문 열림 대기 (자동 감지)
+        _auto_set("③ 문열림", "문 열림 대기 중... 문 열리면 '다음'", wait=True, phase="door")
         _elev_scene(2)
-        time.sleep(2)
+        if not _auto_wait_confirm(): _auto_abort_elev(); return
+
+        # ④ 탑승: 전진 185 (자동 안무)
+        _auto_set("④ 탑승", "탑승(전진) 중... 다 탔으면 '다음'", wait=True, phase="ride")
         _elev_scene(3)
-        _auto_set("탑승", "탑승(전진) — 다 탔으면 '다음 확인' 누르세요", wait=True)
-        if not _auto_wait_confirm(): _auto_set("취소", "여정 취소됨"); return
+        if not _auto_wait_confirm(): _auto_abort_elev(); return
 
-        # 5) ⑤ 층 버튼 press (블로커 → 멈춤)
-        _elev_scene(4)
-        _auto_set("층선택", f"{dest_floor}층 버튼 press — 눌렸으면 '다음 확인'", wait=True)
-        if not _auto_wait_confirm(): _auto_set("취소", "여정 취소됨"); return
+        # ⑤ 층 press: 인식자세 → 목적층 자동선택 → 정렬 → '다음'에 누르기
+        _auto_set("⑤ 층선택", f"인식 자세 + {dest_floor}층 버튼 자동 선택·정렬 중...",
+                  phase="floor")
+        _elev_scene(4)                          # place=cab + 인식자세
+        _elev_select(dest_floor)                # 층버튼 자동 선택
+        if _elev_wait_ready():
+            _auto_set("⑤ 층선택", f"정렬 완료 ✅ — '다음' 누르면 {dest_floor}층 누름", wait=True)
+        else:
+            _auto_set("⑤ 층선택", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
+        if not _auto_wait_confirm(): _auto_abort_elev(); return
+        _elev_press()                           # 다음 → 층버튼 누르기
+        _auto_set("⑤ 층선택", f"{dest_floor}층 버튼 누르는 중... (팔 복귀까지 대기)")
+        _elev_wait_press_done()                 # 눌림+팔복귀 완료까지 대기
 
-        # 6) 도착 대기 → ⑥ 하차 (블로커 → 멈춤)
-        _auto_set("이동중", f"{dest_floor}층 이동 중 — 도착·하차 준비되면 '다음 확인'", wait=True)
-        if not _auto_wait_confirm(): _auto_set("취소", "여정 취소됨"); return
+        # 엘베 이동 대기 → ⑥ 하차: 후진 186 (자동 안무)
+        _auto_set("이동중", f"{dest_floor}층 이동 중 — 도착·하차 준비되면 '다음'",
+                  wait=True, phase="moving")
+        if not _auto_wait_confirm(): _auto_abort_elev(); return
+        _auto_set("⑥ 하차", "하차(후진) 중...", phase="exit")
         _elev_scene(5)
-        _auto_set("하차", "하차(후진) 중...")
         time.sleep(3)
 
         # 7) 지도 전환 + 하차지점 초기화 (자동)
-        _auto_set("지도전환", f"{dest_floor}층 지도 전환 + 하차지점 초기화")
+        _auto_set("지도전환", f"{dest_floor}층 지도 전환 + 하차지점 초기화", phase="exit")
         _http_self("/switch_map", {"floor": dest_floor, "init_exit": True})
         time.sleep(2)
 
         # 8) 엘베앱 OFF (제어권 회수 + 종료)
-        _auto_set("엘베종료", "엘리베이터 앱 종료 + 제어권 회수")
+        _auto_set("엘베종료", "엘리베이터 앱 종료 + 제어권 회수", phase="exit")
         _http_self("/elevator_app", {"running": False})
         time.sleep(1)
 
         # 9) 목적지 주행 (자동)
-        _auto_set("주행", f"{dest}로 이동 중...")
+        _auto_set("주행", f"{dest}로 이동 중...", phase="drive")
         _write("iface", f"/goto {dest}")
         _auto_set("완료", f"🎉 {dest} 도착! 여정 완료" if _auto_wait_arrival(dest)
-                  else "목적지 도착 실패")
+                  else "목적지 도착 실패", phase="done")
     except Exception as e:
         _auto_set("오류", f"여정 예외: {e!r}")
     finally:
@@ -947,7 +1102,9 @@ def auto_cancel():
 @app.route("/auto_status")
 def auto_status():
     with _auto_lock:
-        return jsonify(**{k: _AUTO[k] for k in ("active", "dest", "step", "msg", "waiting")})
+        return jsonify(**{k: _AUTO[k] for k in
+                          ("active", "dest", "step", "msg", "waiting",
+                           "phase", "dest_floor", "mode")})
 
 _CONFIRMED_LOCATIONS = {
     "인공지능 플랫폼",
@@ -1585,11 +1742,8 @@ HTML = """<!DOCTYPE html>
       <h2>기능 설정</h2>
       <div style="margin-top:4px">
         <div class="toggle-row">
-          <span class="toggle-label">팔 위치 고정<span class="kbd">1</span></span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="armleft-toggle" onchange="toggleArmleft()">
-            <span class="toggle-slider"></span>
-          </label>
+          <span class="toggle-label">🦾 팔 수납<span class="kbd">1</span></span>
+          <button id="stow-btn" onclick="stowArm()" style="background:#345;color:#dee;border:none;border-radius:6px;padding:5px 16px;cursor:pointer;font-size:0.82rem;">수납</button>
         </div>
         <div class="toggle-row">
           <span class="toggle-label">사회적 회피<span class="kbd">2</span></span>
@@ -1648,6 +1802,7 @@ HTML = """<!DOCTYPE html>
           <button id="auto-go-btn" onclick="autoGoto()" style="background:#264;color:#cfd;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:700;font-size:0.82rem;white-space:nowrap;">🚀 출발</button>
         </div>
         <div id="auto-status" style="font-size:0.78rem;color:#9ab;min-height:1.3em;padding:5px 6px;background:#1a1d27;border-radius:5px;">대기 중 — 목적지 선택 후 출발</div>
+        <div id="auto-track" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>
         <div style="display:flex;gap:6px;margin-top:5px">
           <button id="auto-confirm-btn" onclick="autoConfirm()" disabled style="flex:1;background:#333;color:#888;border:none;border-radius:6px;padding:7px;cursor:pointer;font-weight:700;font-size:0.86rem;">✅ 다음 확인</button>
           <button id="auto-cancel-btn" onclick="autoCancel()" style="background:#533;color:#fcc;border:none;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:0.82rem;">✖ 취소</button>
@@ -1832,23 +1987,12 @@ function sendButton() { fetch('/button', {method:'POST'}); }
 function sendVision() { fetch('/vision', {method:'POST'}); }
 function sendPull()   { fetch('/pull',   {method:'POST'}); }
 
-let armleftRunning = false;
-function toggleArmleft() {
-  const desired = document.getElementById('armleft-toggle').checked;
-  fetch('/armleft', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({running: desired})
-  }).then(r => r.json()).then(d => {
-    armleftRunning = d.running;
-    document.getElementById('armleft-toggle').checked = armleftRunning;
-  }).catch(() => {
-    document.getElementById('armleft-toggle').checked = armleftRunning;
-  });
+// 팔 수납 (armleft 프로세스 대체 — one-shot 트리거)
+function stowArm() {
+  const b = document.getElementById('stow-btn');
+  if (b) { b.textContent = '수납 중…'; setTimeout(() => { b.textContent = '수납'; }, 3000); }
+  fetch('/stow_arm', {method:'POST'}).catch(() => {});
 }
-// 페이지 로드 시 실제 서버 상태로 초기화
-fetch('/armleft_status').then(r => r.json()).then(d => {
-  armleftRunning = d.running;
-  document.getElementById('armleft-toggle').checked = armleftRunning;
-});
 
 let socialNavOn = false;   // 기본 비활성 (서버 디폴트와 일치)
 function toggleSocialNav() {
@@ -1933,6 +2077,42 @@ function autoCancel() {
   if (confirm('자동 여정을 취소할까요?')) fetch('/auto_cancel', {method:'POST'}).catch(() => {});
 }
 
+// 전체 흐름 트래커 — 엘베 포함 여정 vs 같은 층. 현재 단계만 하이라이트.
+const AUTO_FLOW_ELEV = [
+  ['board','🚶 승차지점'], ['app','🛗 엘베 시작'],
+  ['call','① 호출'], ['front','② 문앞 정렬'], ['door','③ 문 열림'],
+  ['ride','④ 탑승'], ['floor','⑤ 층 선택'], ['moving','🔼 이동중'],
+  ['exit','⑥ 하차·지도'], ['drive','🎯 목적지'], ['done','✅ 완료']
+];
+const AUTO_FLOW_SAME = [ ['drive','🎯 목적지 주행'], ['done','✅ 완료'] ];
+function renderAutoTrack(d) {
+  const box = document.getElementById('auto-track');
+  if (!box) return;
+  const flow = (d.mode === 'same') ? AUTO_FLOW_SAME : AUTO_FLOW_ELEV;
+  const active = flow.findIndex(p => p[0] === d.phase);
+  let header = '';
+  if (d.active && d.dest) {
+    header = `<div style="width:100%;font-size:0.74rem;color:#9be;margin-bottom:1px;">`
+           + `🎯 ${d.dest}${d.dest_floor ? ` · ${d.dest_floor}층` : ''}</div>`;
+  }
+  let chips = '';
+  flow.forEach((p, i) => {
+    let bg='#20232c', fg='#5a6172', bd='#2c313c', mark='', bold='';
+    if (active >= 0) {
+      if (i < active) { bg='#16321f'; fg='#7ed99a'; bd='#265c37'; mark='✓ '; }
+      else if (i === active) {
+        bold='font-weight:700;';
+        if (d.waiting) { bg='#4a3a10'; fg='#ffd85a'; bd='#b88500'; mark='▶ '; } // 확인 대기
+        else           { bg='#0e3648'; fg='#5fd0ff'; bd='#0a86b8'; mark='● '; } // 진행 중
+      }
+    }
+    chips += `<span style="font-size:0.72rem;padding:3px 7px;border-radius:10px;`
+           + `background:${bg};color:${fg};border:1px solid ${bd};${bold}white-space:nowrap;">`
+           + `${mark}${p[1]}</span>`;
+  });
+  box.innerHTML = header + chips;
+}
+
 // 상태 폴링 (1초) — 단계/메시지 표시 + '다음 확인' 버튼 활성/강조
 setInterval(() => {
   fetch('/auto_status').then(r => r.json()).then(d => {
@@ -1952,6 +2132,7 @@ setInterval(() => {
       gb.disabled = false; gb.style.opacity = '1';
       cb.disabled = true; cb.style.background = '#333'; cb.style.color = '#888';
     }
+    renderAutoTrack(d);   // 전체 흐름 트래커 갱신 (현재 단계 하이라이트)
   }).catch(() => {});
 }, 1000);
 
@@ -2112,7 +2293,7 @@ function killAllRobot() {
 //   Shift+1~5   : 시스템 프로세스                  [항상, 종료 시 confirm]
 const keyToDir = {'ArrowUp':['fwd',1,0],'ArrowDown':['bwd',-0.5,0],
                   'ArrowLeft':['left',0,1],'ArrowRight':['right',0,-1]};
-const FEATURE_KEYS = {1:'armleft-toggle', 2:'social-nav-toggle',
+const FEATURE_KEYS = {1:'stow-btn', 2:'social-nav-toggle',
                       4:'net-mode-toggle', 5:'elev-app-toggle'};   // 3(장애물 밀기) 제거 (2026-07-24)
 const SYS_KEYS   = {1:'launch', 2:'rviz', 3:'battery', 4:'free', 5:'home'};
 const SYS_LABELS = {launch:'ROS2 Launch', rviz:'RViz2', battery:'배터리 확인',

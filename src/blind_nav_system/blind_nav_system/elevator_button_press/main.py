@@ -1529,12 +1529,18 @@ def authority_route():
     with state_lock:
         prev = bool(state.get("authority", True))
         state["authority"] = granted
-        if not granted:
-            # 회수 = 즉시 전면 정지: 타겟 해제 + 진행 중 스텝/안무 중단
+        if granted:
+            # 엘베 모드 진입: 좁은 엘베에서 베이스 전후 이동이 필요하고, 라이다 가드가
+            # 켜져있으면 벽/문을 장애물로 보고 이동을 막음 → 몸체이동 ON + 가드 OFF 자동.
+            state["base_align"] = True
+            state["guard_off"]  = True
+        else:
+            # 회수 = 즉시 전면 정지 + 안전 복구: 타겟 해제 + 진행 중 스텝/안무 중단 + 가드 ON
             state["target_text"] = None
             state["phase"]       = "SELECT"
             state["centered"]    = False
             state["press_ready"] = False
+            state["guard_off"]   = False   # 엘베 밖 = 충돌 보호 가드 다시 ON
     if node and prev != granted:
         if not granted:
             node._step_abort = True                # 수동 스텝·자동 안무 즉시 탈출
@@ -1544,7 +1550,7 @@ def authority_route():
                 pass
             node._dlog("[AUTH] ⛔ 제어권 회수됨 (대시보드) — 모든 이동 중단·차단, 관찰만 가능")
         else:
-            node._dlog("[AUTH] ✅ 제어권 부여됨 (대시보드) — 이동 가능")
+            node._dlog("[AUTH] ✅ 제어권 부여됨 — 이동 가능 (몸체이동 ON + 가드 OFF 자동)")
     return jsonify(ok=True, granted=granted)
 
 @app.route("/wrist_forward", methods=["POST"])
