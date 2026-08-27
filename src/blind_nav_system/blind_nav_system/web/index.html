@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>로봇 대시보드</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; }
+  header { background: #1e293b; padding: 12px 20px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #334155; }
+  header h1 { font-size: 1.1rem; color: #94a3b8; flex: 1; }
+  .battery { font-size: 0.85rem; font-weight: 600; color: #94a3b8; white-space: nowrap; }
+  .battery.ok   { color: #6ee7b7; }
+  .battery.low  { color: #fbbf24; }
+  .battery.crit { color: #f87171; }
+  .battery.charging { color: #60a5fa; }
+  .badge { padding: 4px 12px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; }
+  .badge-auto   { background: #065f46; color: #6ee7b7; }
+  .badge-manual { background: #7c2d12; color: #fdba74; }
+  .layout { display: grid; grid-template-columns: 1fr auto; flex: 1; overflow: hidden; }
+
+  /* 로그 패널 */
+  #log-panel { padding: 12px; overflow-y: auto; font-family: monospace; font-size: 0.8rem; background: #0f172a; }
+  .log-entry { padding: 2px 0; border-bottom: 1px solid #1e293b; white-space: pre-wrap; word-break: break-all; }
+  .src-IFACE    { color: #7dd3fc; }
+  .src-VISION   { color: #86efac; }
+  .src-HW       { color: #fbbf24; }
+  .src-MAIN     { color: #c084fc; }
+  .src-WEB      { color: #fb7185; }
+  .src-OBSTACLE { color: #fb923c; }
+  .src-MAP      { color: #22d3ee; }
+  .src-POSE     { color: #f0abfc; }
+  .src-ARM      { color: #fca5a5; }
+
+  /* 의자 감지 상태 카드 */
+  .chair-card { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 10px 14px; }
+  .chair-card.detected { border-color: #fb923c; }
+  .chair-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #475569; margin-right: 6px; vertical-align: middle; }
+  .chair-dot.on { background: #fb923c; box-shadow: 0 0 6px #fb923c; }
+  .chair-status { font-size: 0.82rem; color: #e2e8f0; font-weight: 600; }
+  .chair-detail { font-size: 0.75rem; color: #94a3b8; margin-top: 4px; }
+  .ts { color: #475569; margin-right: 6px; }
+
+  /* 컨트롤 패널 */
+  .ctrl-panel { background: #1e293b; border-left: 1px solid #334155; padding: 16px; width: 320px; overflow-y: auto; }
+  .ctrl-col > div { padding: 14px 0; border-bottom: 1px solid #1e293b; }
+  .ctrl-col:first-child > div:first-child { padding-top: 0; }
+  .ctrl-col:last-child > div:last-child  { border-bottom: none; padding-bottom: 0; }
+  .ctrl-panel h2 { font-size: 0.68rem; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+
+
+  /* 버튼 통일 시스템 */
+  .btn { display: block; width: 100%; border: none; border-radius: 6px; padding: 9px 14px; font-size: 0.82rem; font-weight: 600; cursor: pointer; text-align: center; color: #fff; transition: opacity .15s; }
+  .btn:hover  { opacity: 0.85; }
+  .btn:active { opacity: 0.70; }
+  .btn-sm  { padding: 5px 12px; font-size: 0.78rem; width: auto; display: inline-block; }
+  .btn-primary { background: #2563eb; }
+  .btn-danger  { background: #dc2626; }
+  .btn-neutral { background: #334155; }
+  .mode-btns { display: flex; gap: 8px; }
+
+  /* 방향 패드 */
+  .dpad { display: grid; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 6px; justify-content: center; }
+  .dpad-btn { background: #334155; border: none; border-radius: 10px; color: #e2e8f0; font-size: 1.4rem; cursor: pointer; user-select: none; transition: background .1s; }
+  .dpad-btn.pressed { background: #2563eb; box-shadow: 0 0 0 3px #3b82f6; }
+  .dpad-center { background: #1e293b; cursor: default; }
+  .speed-wrap { display: flex; align-items: center; gap: 8px; }
+  .speed-wrap label { font-size: 0.75rem; color: #94a3b8; white-space: nowrap; }
+  input[type=range] { flex: 1; accent-color: #3b82f6; }
+  .speed-val { font-size: 0.75rem; color: #94a3b8; width: 32px; text-align: right; }
+
+  /* 토글 스위치 */
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #1e293b; }
+  .toggle-row:last-child { border-bottom: none; }
+  .toggle-label { font-size: 0.82rem; color: #e2e8f0; }
+  .kbd { display:inline-block; background:#334155; color:#cbd5e1; border-radius:4px;
+         padding:0 5px; font-size:0.65rem; font-family:monospace; margin-left:6px; vertical-align:1px; }
+  .toggle-switch { position: relative; width: 44px; height: 24px; flex-shrink: 0; }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; inset: 0; background: #475569; border-radius: 24px; cursor: pointer; transition: background .2s; }
+  .toggle-slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .2s; }
+  .toggle-switch input:checked + .toggle-slider { background: #2563eb; }
+  .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); }
+
+  /* 로그 탭 */
+  .log-container { display: flex; flex-direction: column; overflow: hidden; }
+  .tab-bar { display: flex; gap: 4px; padding: 8px 12px; background: #1e293b; border-bottom: 1px solid #334155; flex-wrap: wrap; }
+  .tab-btn { background: #334155; border: none; border-radius: 6px; color: #94a3b8; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; cursor: pointer; transition: background .15s; }
+  .tab-btn.active { background: #2563eb; color: #fff; }
+  .tab-btn:hover:not(.active) { background: #475569; }
+  .tab-badge { background: #ef4444; color: #fff; border-radius: 10px; font-size: 0.65rem; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
+  .src-ARD  { color: #4ade80; }
+  .src-SYS  { color: #a78bfa; }
+  .src-ROS2 { color: #38bdf8; }
+  .src-RVIZ { color: #34d399; }
+  .src-BATT { color: #fbbf24; }
+  .src-FREE { color: #f87171; }
+  .src-HOME { color: #fb923c; }
+  .sys-proc-row { display:flex; align-items:center; gap:8px; padding:5px 0; border-bottom:1px solid #1e293b; }
+  .sys-proc-row:last-child { border-bottom:none; }
+  .sys-proc-label { flex:1; font-size:0.82rem; color:#cbd5e1; }
+  .sys-dot { width:8px; height:8px; border-radius:50%; background:#374151; flex-shrink:0; }
+  .sys-dot.on { background:#22c55e; box-shadow:0 0 4px #22c55e; }
+  /* tab 배지 — 숫자 없이 점(dot)만 */
+  .tab-badge { display:inline-block; width:6px; height:6px; border-radius:50%; background:#ef4444; margin-left:4px; vertical-align:middle; }
+
+  /* ── 반응형: 반드시 스타일시트 맨 끝에 위치 (동일 특이도 규칙을 덮어쓰기 위해) ── */
+  /* 화면 높이가 낮으면 패널을 2열로 펼쳐 스크롤 없이 모두 보이게 */
+  @media (max-height: 1300px) and (min-width: 1100px) {
+    .ctrl-panel { width: 660px; display: flex; align-items: flex-start; }
+    .ctrl-col { flex: 1; min-width: 0; }
+    .ctrl-col + .ctrl-col { border-left: 1px solid #334155; padding-left: 26px; margin-left: 26px; }
+    .ctrl-col > div:first-child { padding-top: 0; }
+    .ctrl-col > div:last-child  { border-bottom: none; }
+  }
+  /* 더 낮으면 컴팩트 모드: 여백/버튼/패드 축소 */
+  @media (max-height: 780px) {
+    .ctrl-panel { padding: 8px 14px; }
+    .ctrl-col > div, .ctrl-col:first-child > div:first-child { padding: 6px 0; }
+    .ctrl-panel h2 { margin-bottom: 4px; }
+    .btn { padding: 5px 10px; font-size: 0.78rem; }
+    .btn-sm { padding: 3px 10px; font-size: 0.74rem; }
+    .dpad { grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); gap: 4px; }
+    .dpad-btn { font-size: 1.05rem; border-radius: 8px; }
+    .sys-proc-row { padding: 2px 0; }
+    header { padding: 6px 20px; }
+    #kbd-help { font-size: 0.66rem !important; line-height: 1.5 !important;
+                padding: 5px 8px !important; margin-top: 6px !important; }
+    #manual-section .speed-wrap { margin-bottom: 6px !important; }
+    #manual-section .btn-danger { margin-top: 6px !important; font-size: 0.8rem !important; }
+    #sys-proc-list > div:last-child { margin-top: 6px !important; padding-top: 6px !important; }
+    .chair-card { padding: 6px 12px; }
+    .toggle-row { padding: 2px 0; }
+    .toggle-switch { width: 38px; height: 20px; }
+    .toggle-slider::before { width: 14px; height: 14px; }
+    .toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
+    #speed-settings { gap: 4px !important; margin-top: 0 !important; }
+  }
+  /* 좁은 화면에서는 1열로 복귀 (로그 영역 확보) */
+  @media (max-width: 1099px) {
+    .ctrl-panel { width: 320px; display: block; }
+    .ctrl-col + .ctrl-col { border-left: none; padding-left: 0; margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>시각장애인 안내 로봇 대시보드</h1>
+  <span class="badge badge-auto" id="mode-badge">자동 모드</span>
+</header>
+<div class="layout">
+  <div class="log-container">
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tab-ALL"    onclick="setTab('ALL')">전체</button>
+      <button class="tab-btn"        id="tab-IFACE"  onclick="setTab('IFACE')">인터페이스<span class="tab-badge" id="badge-IFACE"  style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-VISION" onclick="setTab('VISION')">비전<span class="tab-badge" id="badge-VISION" style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-HW"     onclick="setTab('HW')">하드웨어<span class="tab-badge" id="badge-HW"     style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-MAIN"   onclick="setTab('MAIN')">메인<span class="tab-badge" id="badge-MAIN"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-WEB"    onclick="setTab('WEB')">웹<span class="tab-badge" id="badge-WEB"    style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-ARM"    onclick="setTab('ARM')">팔고정<span class="tab-badge" id="badge-ARM"    style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-ELEV"   onclick="setTab('ELEV')">엘베<span class="tab-badge" id="badge-ELEV"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-NAV2"   onclick="setTab('NAV2')">주행<span class="tab-badge" id="badge-NAV2"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-SYS"    onclick="setTab('SYS')">시스템<span class="tab-badge" id="badge-SYS"    style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-ROS2"   onclick="setTab('ROS2')">ROS2<span class="tab-badge" id="badge-ROS2"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-RVIZ"   onclick="setTab('RVIZ')">RViz<span class="tab-badge" id="badge-RVIZ"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-BATT"   onclick="setTab('BATT')">배터리<span class="tab-badge" id="badge-BATT"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-FREE"   onclick="setTab('FREE')">정리<span class="tab-badge" id="badge-FREE"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-HOME"   onclick="setTab('HOME')">홈위치<span class="tab-badge" id="badge-HOME"   style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-ARD"    onclick="setTab('ARD')">아두이노<span class="tab-badge" id="badge-ARD"    style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-MAP"      onclick="setTab('MAP')">지도<span class="tab-badge" id="badge-MAP"      style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-POSE"     onclick="setTab('POSE')">위치<span class="tab-badge" id="badge-POSE"     style="display:none"></span></button>
+      <button class="tab-btn"        id="tab-OBSTACLE" onclick="setTab('OBSTACLE')">장애물<span class="tab-badge" id="badge-OBSTACLE" style="display:none"></span></button>
+    </div>
+    <div id="log-panel"></div>
+  </div>
+  <div class="ctrl-panel">
+   <div class="ctrl-col">
+    <div>
+      <h2>모드 전환</h2>
+      <div class="mode-btns">
+        <button class="btn btn-primary btn-sm" id="btn-mode-auto"   onclick="setMode(false)">자동</button>
+        <button class="btn btn-neutral btn-sm" id="btn-mode-manual" onclick="setMode(true)">수동</button>
+      </div>
+    </div>
+
+    <div id="location-section">
+      <h2>장소 목록</h2>
+      <div id="location-list" style="display:flex;flex-direction:column;gap:4px;margin-top:6px;max-height:320px;overflow-y:auto"></div>
+    </div>
+
+    <div id="manual-section" style="display:none">
+      <h2>수동 조작</h2>
+      <div class="speed-wrap" style="margin-bottom:10px">
+        <label>속도</label>
+        <input type="range" id="speed" min="5" max="40" value="15"
+               oninput="setSpeed(parseInt(this.value))">
+        <span class="speed-val" id="spv">15</span>
+      </div>
+      <div class="dpad">
+        <div></div>
+        <button class="dpad-btn" id="btn-fwd"   onclick="toggleCmd('fwd',   1,    0)">↑</button>
+        <div></div>
+        <button class="dpad-btn" id="btn-left"  onclick="toggleCmd('left',  0,    1)">←</button>
+        <div class="dpad-btn dpad-center"></div>
+        <button class="dpad-btn" id="btn-right" onclick="toggleCmd('right', 0,   -1)">→</button>
+        <div></div>
+        <button class="dpad-btn" id="btn-bwd"   onclick="toggleCmd('bwd',  -0.5,  0)">↓</button>
+        <div></div>
+      </div>
+      <button class="btn btn-danger" style="margin-top:10px;font-size:0.9rem" onclick="emergencyStop()">■ 비상 정지</button>
+      <div id="kbd-help" style="margin-top:10px;background:#1e293b;border-radius:6px;padding:8px 10px;font-size:0.72rem;color:#94a3b8;line-height:1.7">
+        ⌨️ <b style="color:#cbd5e1">키보드 단축키</b><br>
+        방향키 ↑↓←→ : 이동 토글 (같은 키 다시 누르면 정지)<br>
+        키패드 + / − : 속도 조절 (±5)<br>
+        숫자 1~4 : 기능 설정 토글 · Shift+1~5 : 시스템 프로세스
+      </div>
+    </div>
+
+    <div>
+      <h2>빠른 액션</h2>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button class="btn btn-primary" onclick="sendButton()">목적지 입력 (버튼1)</button>
+        <button class="btn btn-primary" onclick="sendVision()">시각 분석 (버튼2)</button>
+        <button class="btn btn-neutral" onclick="sendPull()">당김 트리거</button>
+      </div>
+    </div>
+   </div>
+
+   <div class="ctrl-col">
+    <div>
+      <h2>기능 설정</h2>
+      <div style="margin-top:4px">
+        <div class="toggle-row">
+          <span class="toggle-label">🦾 팔 수납<span class="kbd">1</span></span>
+          <button id="stow-btn" onclick="stowArm()" style="background:#345;color:#dee;border:none;border-radius:6px;padding:5px 16px;cursor:pointer;font-size:0.82rem;">수납</button>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">사회적 회피<span class="kbd">2</span></span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="social-nav-toggle" onchange="toggleSocialNav()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <!-- 장애물 밀기 토글 제거 (2026-07-24 사용자 결정) — 백엔드 코드는 휴면 상태로 보존 -->
+        <div class="toggle-row">
+          <span class="toggle-label">온라인 모드<span class="kbd">4</span></span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="net-mode-toggle" checked onchange="toggleNetMode()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">🛗 엘리베이터 앱 실행<span class="kbd">5</span></span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="elev-app-toggle" onchange="toggleElevatorApp()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">🗺 지도(층)</span>
+          <span style="display:flex;gap:6px;align-items:center;">
+            <select id="floor-sel" style="background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:3px 6px;">
+              <option value="5" selected>5층</option>
+              <option value="4">4층</option>
+              <option value="3">3층</option>
+              <option value="2">2층</option>
+              <option value="1">1층</option>
+            </select>
+            <label style="font-size:0.68rem;color:#9ab;display:flex;align-items:center;gap:3px;cursor:pointer;"
+                   title="전환 직후 AMCL 위치를 엘리베이터 하차지점으로 자동 설정 — 엘리베이터로 층 이동한 직후에만 켜두세요">
+              <input type="checkbox" id="init-exit-chk" checked>하차지점 초기화
+            </label>
+            <button onclick="switchMap()" style="background:#345;color:#dee;border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;">전환</button>
+          </span>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label">📍 현재 위치</span>
+          <span id="pose-result" style="font-size:0.72rem;color:#8ac;margin:0 8px;
+                flex:1;text-align:right;user-select:all;"></span>
+          <button onclick="queryPose()" style="background:#345;color:#dee;border:none;
+                  border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;">조회</button>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <h2>🤖 자동 여정 (엘베 포함)</h2>
+      <div style="margin-top:6px">
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+          <select id="auto-dest" style="flex:1;background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:4px 6px;font-size:0.82rem;"></select>
+          <button id="auto-go-btn" onclick="autoGoto()" style="background:#264;color:#cfd;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:700;font-size:0.82rem;white-space:nowrap;">🚀 출발</button>
+        </div>
+        <div id="auto-status" style="font-size:0.78rem;color:#9ab;min-height:1.3em;padding:5px 6px;background:#1a1d27;border-radius:5px;">대기 중 — 목적지 선택 후 출발</div>
+        <div id="auto-track" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>
+        <div style="display:flex;gap:6px;margin-top:5px">
+          <button id="auto-confirm-btn" onclick="autoConfirm()" disabled style="flex:1;background:#333;color:#888;border:none;border-radius:6px;padding:7px;cursor:pointer;font-weight:700;font-size:0.86rem;">✅ 다음 확인</button>
+          <button id="auto-cancel-btn" onclick="autoCancel()" style="background:#533;color:#fcc;border:none;border-radius:6px;padding:7px 14px;cursor:pointer;font-size:0.82rem;">✖ 취소</button>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <h2>의자 감지</h2>
+      <div class="chair-card" id="chair-card">
+        <div>
+          <span class="chair-dot" id="chair-dot"></span>
+          <span class="chair-status" id="chair-status">감지 없음</span>
+        </div>
+        <div class="chair-detail" id="chair-detail"></div>
+      </div>
+    </div>
+
+    <div>
+      <h2>시스템 프로세스</h2>
+      <div id="sys-proc-list" style="margin-top:6px">
+        <div class="sys-proc-row" id="sysrow-launch">
+          <span class="sys-dot" id="sysdot-launch"></span>
+          <span class="sys-proc-label">ROS2 Launch<span class="kbd">⇧1</span></span>
+          <button class="btn btn-primary btn-sm" id="sysbtn-launch" onclick="toggleSysProc('launch')">시작</button>
+        </div>
+        <div class="sys-proc-row" id="sysrow-rviz">
+          <span class="sys-dot" id="sysdot-rviz"></span>
+          <span class="sys-proc-label">RViz2<span class="kbd">⇧2</span></span>
+          <button class="btn btn-primary btn-sm" id="sysbtn-rviz" onclick="toggleSysProc('rviz')">시작</button>
+        </div>
+        <div class="sys-proc-row" id="sysrow-battery">
+          <span class="sys-dot" id="sysdot-battery"></span>
+          <span class="sys-proc-label">배터리 확인<span class="kbd">⇧3</span></span>
+          <button class="btn btn-neutral btn-sm" id="sysbtn-battery" onclick="toggleSysProc('battery')">실행</button>
+        </div>
+        <div class="sys-proc-row" id="sysrow-free">
+          <span class="sys-dot" id="sysdot-free"></span>
+          <span class="sys-proc-label">프로세스 정리<span class="kbd">⇧4</span></span>
+          <button class="btn btn-neutral btn-sm" id="sysbtn-free" onclick="toggleSysProc('free')">실행</button>
+        </div>
+        <div class="sys-proc-row" id="sysrow-home">
+          <span class="sys-dot" id="sysdot-home"></span>
+          <span class="sys-proc-label">홈 위치<span class="kbd">⇧5</span></span>
+          <button class="btn btn-neutral btn-sm" id="sysbtn-home" onclick="toggleSysProc('home')">실행</button>
+        </div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid #1e293b">
+          <button id="killall-btn" class="btn btn-danger" onclick="killAllRobot()">
+            전체 로봇 프로세스 강제 종료
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <h2>속도 설정</h2>
+      <div id="speed-settings" style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
+        <div>
+          <label style="color:#94a3b8;font-size:0.8rem">로봇 속도: <span id="robot-speed-val">0.26</span> m/s</label>
+          <input type="range" min="0.10" max="0.50" step="0.02" value="0.26" style="width:100%"
+                 oninput="setRobotSpeed(this.value)">
+        </div>
+        <div>
+          <label style="color:#94a3b8;font-size:0.8rem">TTS 속도: <span id="tts-speed-val">1.5</span>x</label>
+          <input type="range" min="0.5" max="2.0" step="0.1" value="1.5" style="width:100%"
+                 oninput="setTtsSpeed(this.value)">
+        </div>
+      </div>
+    </div>
+   </div>
+  </div>
+</div>
+
+<script>
+let manualMode = false;
+let activeDir = null;   // 현재 눌린 방향 ('fwd'|'bwd'|'left'|'right'|null)
+let cmdInterval = null;
+let currentLx = 0, currentAz = 0;
+
+function setMode(manual) {
+  manualMode = manual;
+  fetch('/mode', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({manual})});
+  document.getElementById('mode-badge').textContent = manual ? '수동 모드' : '자동 모드';
+  document.getElementById('mode-badge').className = 'badge ' + (manual ? 'badge-manual' : 'badge-auto');
+  document.getElementById('manual-section').style.display = manual ? 'block' : 'none';
+  document.getElementById('location-section').style.display = manual ? 'none' : 'block';
+  // 활성 모드 버튼 강조
+  document.getElementById('btn-mode-auto').className   = manual ? 'btn btn-neutral btn-sm' : 'btn btn-primary btn-sm';
+  document.getElementById('btn-mode-manual').className = manual ? 'btn btn-primary btn-sm' : 'btn btn-neutral btn-sm';
+  if (!manual) { _stopMove(); loadLocations(); }
+}
+
+function loadLocations() {
+  fetch('/locations').then(r => r.json()).then(d => {
+    const el = document.getElementById('location-list');
+    const item = loc => loc.confirmed
+      ? `<div class="loc-item" data-name="${escHtml(loc.name)}" style="background:#14532d;border-radius:6px;padding:5px 10px;font-size:0.78rem;color:#86efac;cursor:pointer" title="클릭 = 즉시 출발 (개발용 임시방편 — 최종판은 확인 절차 복원 예정)">✅ ${escHtml(loc.name)}</div>`
+      : `<div class="loc-item" data-name="${escHtml(loc.name)}" style="background:#1e293b;border-radius:6px;padding:5px 10px;font-size:0.78rem;color:#475569;cursor:pointer" title="클릭 = 즉시 출발 (개발용 임시방편 — 최종판은 확인 절차 복원 예정)">⬜ ${escHtml(loc.name)}</div>`;
+    // 층별 그룹: 공용(엘리베이터 지점, floor 없음) → 5층 → 4층 → 3층
+    const groups = [[null, '🛗 공용'], [5, '5층'], [4, '4층'], [3, '3층']];
+    el.innerHTML = groups.map(([f, label]) => {
+      const items = d.locations.filter(l => (l.floor ?? null) === f);
+      if (!items.length) return '';
+      return `<div style="color:#89a;font-size:0.72rem;font-weight:700;margin:8px 0 2px;`
+           + `border-bottom:1px solid #26263a;padding-bottom:2px;position:sticky;top:0;`
+           + `background:#0f172a;">${label} (${items.length})</div>`
+           + items.map(item).join('');
+    }).join('');
+    // 클릭 = 즉시 출발 (오클릭 방지용 브라우저 확인 팝업만 거침)
+    el.querySelectorAll('.loc-item').forEach(div => div.onclick = () => {
+      const n = div.dataset.name;
+      if (!confirm(n + ' (으)로 즉시 출발합니다. 진행할까요?')) return;
+      fetch('/goto', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({name: n})})
+        .then(r => r.json()).then(d => { if (!d.ok) alert(d.error); });
+    });
+  }).catch(() => {});
+}
+loadLocations();
+
+function getSpeed() { return parseInt(document.getElementById('speed').value) / 100; }
+
+const DIR_MUL = {fwd:[1,0], bwd:[-0.5,0], left:[0,1], right:[0,-1]};
+
+function setSpeed(v) {
+  v = Math.max(5, Math.min(40, v));
+  document.getElementById('speed').value = v;
+  document.getElementById('spv').textContent = v;
+  // 주행 중이면 새 속도 즉시 반영
+  if (activeDir) {
+    const [lxMul, azMul] = DIR_MUL[activeDir];
+    currentLx = lxMul * v / 100;
+    currentAz = azMul * v / 100 * 2;
+  }
+}
+
+// 토글: 같은 버튼 재클릭 → 정지 / 다른 버튼 클릭 → 방향 전환
+function toggleCmd(dir, lxMul, azMul) {
+  if (!manualMode) return;
+  if (activeDir === dir) {
+    _stopMove();
+  } else {
+    clearInterval(cmdInterval);
+    activeDir = dir;
+    const spd = getSpeed();
+    currentLx = lxMul * spd;
+    currentAz = azMul * spd * 2;
+    _sendCmd(true);
+    cmdInterval = setInterval(() => _sendCmd(true), 100);
+    _updateDpad();
+  }
+}
+
+function _stopMove() {
+  clearInterval(cmdInterval);
+  cmdInterval = null;
+  activeDir = null;
+  currentLx = 0; currentAz = 0;
+  _sendCmd(false);
+  _updateDpad();
+}
+
+function _sendCmd(active) {
+  fetch('/cmd', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({lx: currentLx, az: currentAz, active})});
+}
+
+function _updateDpad() {
+  ['fwd','bwd','left','right'].forEach(d => {
+    const btn = document.getElementById('btn-' + d);
+    if (btn) btn.classList.toggle('pressed', d === activeDir);
+  });
+}
+
+function emergencyStop() {
+  _stopMove();
+  fetch('/stop', {method:'POST'});
+}
+
+function sendButton() { fetch('/button', {method:'POST'}); }
+function sendVision() { fetch('/vision', {method:'POST'}); }
+function sendPull()   { fetch('/pull',   {method:'POST'}); }
+
+// 팔 수납 (armleft 프로세스 대체 — one-shot 트리거)
+function stowArm() {
+  const b = document.getElementById('stow-btn');
+  if (b) { b.textContent = '수납 중…'; setTimeout(() => { b.textContent = '수납'; }, 3000); }
+  fetch('/stow_arm', {method:'POST'}).catch(() => {});
+}
+
+let socialNavOn = false;   // 기본 비활성 (서버 디폴트와 일치)
+function toggleSocialNav() {
+  fetch('/toggle_social_nav', {method:'POST'}).then(r => r.json()).then(d => {
+    socialNavOn = d.enabled;
+    const t = document.getElementById('social-nav-toggle');
+    if (t) t.checked = socialNavOn;
+  });
+}
+// toggleObstaclePush 제거 (2026-07-24) — UI 토글 삭제됨
+
+function switchMap() {
+  const f   = document.getElementById('floor-sel').value;
+  const ini = document.getElementById('init-exit-chk').checked;
+  if (!confirm(`${f}층 지도로 전환할까요?` + (ini ? ' (AMCL 위치가 엘리베이터 하차지점으로 초기화됩니다)' : ''))) return;
+  fetch('/switch_map', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({floor: f, init_exit: ini})})
+    .then(r => r.json())
+    .then(d => { if (!d.ok) alert('지도 전환 실패: ' + d.error); })
+    .catch(() => alert('지도 전환 요청 실패'));
+}
+
+function queryPose() {
+  fetch('/robot_pose').then(r => r.json()).then(d => {
+    const el = document.getElementById('pose-result');
+    if (!d.ok) { el.style.color = '#f66'; el.textContent = d.error; return; }
+    el.style.color = '#8ac';
+    // location.yaml에 그대로 붙여넣는 형식 (클릭하면 전체 선택됨)
+    el.textContent = `x: ${d.x}  y: ${d.y}  z: ${d.z}  w: ${d.w}  (${d.yaw_deg}°)`;
+  }).catch(() => {});
+}
+
+// 엘리베이터 앱 on-demand 실행 (켜면 앱 시작+제어권 자동 부여, 끄면 종료+제어권 회수)
+let elevAppRunning = false;
+function toggleElevatorApp() {
+  const desired = document.getElementById('elev-app-toggle').checked;
+  fetch('/elevator_app', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({running: desired})
+  }).then(r => r.json()).then(d => {
+    elevAppRunning = d.running;
+    document.getElementById('elev-app-toggle').checked = elevAppRunning;
+  }).catch(() => {
+    document.getElementById('elev-app-toggle').checked = elevAppRunning;
+  });
+}
+// 실제 서버 상태와 주기 동기화 (크래시·외부 종료 반영)
+function _syncElevApp() {
+  fetch('/elevator_app_status').then(r => r.json()).then(d => {
+    elevAppRunning = d.running;
+    const t = document.getElementById('elev-app-toggle');
+    if (t && document.activeElement !== t) t.checked = elevAppRunning;
+  }).catch(() => {});
+}
+_syncElevApp();
+setInterval(_syncElevApp, 3000);
+
+// ── 자동 여정 (반자동 엘베 오케스트레이터) ──────────────────────────────────
+// 목적지 드롭다운 채우기 (엘베 탑승/하차 지점은 제외)
+fetch('/locations').then(r => r.json()).then(d => {
+  const sel = document.getElementById('auto-dest');
+  if (!sel) return;
+  (d.locations || []).forEach(loc => {
+    if (loc.name.includes('탑승지점') || loc.name.includes('하차지점')) return;
+    const o = document.createElement('option');
+    o.value = loc.name;
+    o.textContent = loc.name + (loc.floor ? ` (${loc.floor}층)` : '');
+    sel.appendChild(o);
+  });
+}).catch(() => {});
+
+function autoGoto() {
+  const dest = document.getElementById('auto-dest').value;
+  if (!dest) { alert('목적지를 선택하세요'); return; }
+  if (!confirm(`'${dest}'로 자동 출발할까요?
+(승차지점 주행 → 엘베 → 목적지까지 자동, 블로커 단계는 '다음 확인' 필요)`)) return;
+  fetch('/auto_goto', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({dest})}).then(r => r.json()).then(d => {
+    if (!d.ok) alert('출발 실패: ' + (d.error || ''));
+  }).catch(() => {});
+}
+function autoConfirm() { fetch('/auto_confirm', {method:'POST'}).catch(() => {}); }
+function autoCancel() {
+  if (confirm('자동 여정을 취소할까요?')) fetch('/auto_cancel', {method:'POST'}).catch(() => {});
+}
+
+// 전체 흐름 트래커 — 엘베 포함 여정 vs 같은 층. 현재 단계만 하이라이트.
+const AUTO_FLOW_ELEV = [
+  ['board','🚶 승차지점'], ['app','🛗 엘베 시작'],
+  ['call','① 호출'], ['front','② 문앞 정렬'], ['door','③ 문 열림'],
+  ['ride','④ 탑승'], ['floor','⑤ 층 선택'], ['moving','🔼 이동중'],
+  ['exit','⑥ 하차·지도'], ['drive','🎯 목적지'], ['done','✅ 완료']
+];
+const AUTO_FLOW_SAME = [ ['drive','🎯 목적지 주행'], ['done','✅ 완료'] ];
+function renderAutoTrack(d) {
+  const box = document.getElementById('auto-track');
+  if (!box) return;
+  const flow = (d.mode === 'same') ? AUTO_FLOW_SAME : AUTO_FLOW_ELEV;
+  const active = flow.findIndex(p => p[0] === d.phase);
+  let header = '';
+  if (d.active && d.dest) {
+    header = `<div style="width:100%;font-size:0.74rem;color:#9be;margin-bottom:1px;">`
+           + `🎯 ${d.dest}${d.dest_floor ? ` · ${d.dest_floor}층` : ''}</div>`;
+  }
+  let chips = '';
+  flow.forEach((p, i) => {
+    let bg='#20232c', fg='#5a6172', bd='#2c313c', mark='', bold='';
+    if (active >= 0) {
+      if (i < active) { bg='#16321f'; fg='#7ed99a'; bd='#265c37'; mark='✓ '; }
+      else if (i === active) {
+        bold='font-weight:700;';
+        if (d.waiting) { bg='#4a3a10'; fg='#ffd85a'; bd='#b88500'; mark='▶ '; } // 확인 대기
+        else           { bg='#0e3648'; fg='#5fd0ff'; bd='#0a86b8'; mark='● '; } // 진행 중
+      }
+    }
+    chips += `<span style="font-size:0.72rem;padding:3px 7px;border-radius:10px;`
+           + `background:${bg};color:${fg};border:1px solid ${bd};${bold}white-space:nowrap;">`
+           + `${mark}${p[1]}</span>`;
+  });
+  box.innerHTML = header + chips;
+}
+
+// 상태 폴링 (1초) — 단계/메시지 표시 + '다음 확인' 버튼 활성/강조
+setInterval(() => {
+  fetch('/auto_status').then(r => r.json()).then(d => {
+    const st = document.getElementById('auto-status');
+    const cb = document.getElementById('auto-confirm-btn');
+    const gb = document.getElementById('auto-go-btn');
+    if (!st || !cb || !gb) return;
+    if (d.active) {
+      st.textContent = `[${d.step}] ${d.msg}`;
+      st.style.color = d.waiting ? '#fd6' : '#8c8';
+      gb.disabled = true; gb.style.opacity = '0.5';
+      if (d.waiting) { cb.disabled = false; cb.style.background = '#7a3'; cb.style.color = '#fff'; }
+      else { cb.disabled = true; cb.style.background = '#333'; cb.style.color = '#888'; }
+    } else {
+      st.textContent = d.msg ? `[${d.step}] ${d.msg}` : '대기 중 — 목적지 선택 후 출발';
+      st.style.color = '#9ab';
+      gb.disabled = false; gb.style.opacity = '1';
+      cb.disabled = true; cb.style.background = '#333'; cb.style.color = '#888';
+    }
+    renderAutoTrack(d);   // 전체 흐름 트래커 갱신 (현재 단계 하이라이트)
+  }).catch(() => {});
+}, 1000);
+
+let offlineMode = false;
+function toggleNetMode() {
+  offlineMode = !document.getElementById('net-mode-toggle').checked;
+  fetch('/net_mode', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({offline: offlineMode})});
+}
+function setRobotSpeed(v) {
+  document.getElementById('robot-speed-val').textContent = parseFloat(v).toFixed(2);
+  fetch('/robot_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
+}
+function setTtsSpeed(v) {
+  document.getElementById('tts-speed-val').textContent = parseFloat(v).toFixed(1);
+  fetch('/tts_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
+}
+
+// 로그 SSE + 탭 필터
+const logPanel = document.getElementById('log-panel');
+let allLogs = [];
+let currentTab = 'ALL';
+const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM','ELEV','NAV2','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD','MAP','POSE','OBSTACLE'];
+const unread = Object.fromEntries(SOURCES.map(s => [s, 0]));
+
+function setTab(tab) {
+  currentTab = tab;
+  if (tab === 'ALL') SOURCES.forEach(s => { unread[s] = 0; });
+  else unread[tab] = 0;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + tab).classList.add('active');
+  renderLogs();
+  updateBadges();
+}
+
+function renderLogs() {
+  const filtered = currentTab === 'ALL' ? allLogs : allLogs.filter(d => d.src === currentTab);
+  logPanel.innerHTML = '';
+  filtered.forEach(appendLogEntry);
+  logPanel.scrollTop = logPanel.scrollHeight;
+}
+
+function appendLogEntry(d) {
+  const div = document.createElement('div');
+  div.className = 'log-entry';
+  div.innerHTML = `<span class="ts">${d.t}</span><span class="src-${d.src}">[${d.src}]</span> ${escHtml(d.msg)}`;
+  logPanel.appendChild(div);
+}
+
+function updateBadges() {
+  SOURCES.forEach(s => {
+    const b = document.getElementById('badge-' + s);
+    if (!b) return;
+    // 숫자 없이 점(dot)만 표시 — 읽지 않은 메시지 있을 때만
+    b.style.display = unread[s] > 0 ? 'inline-block' : 'none';
+  });
+}
+
+const es = new EventSource('/logs');
+es.onmessage = e => {
+  const d = JSON.parse(e.data);
+  allLogs.push(d);
+  if (currentTab === 'ALL' || d.src === currentTab) {
+    appendLogEntry(d);
+    logPanel.scrollTop = logPanel.scrollHeight;
+  } else {
+    unread[d.src] = (unread[d.src] || 0) + 1;
+    updateBadges();
+  }
+};
+
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// 의자 감지 상태 폴링
+const DECISION_LABEL = {push:'밀기', detour:'우회', probing:'탐침 중'};
+setInterval(() => {
+  fetch('/obstacle_status').then(r => r.json()).then(d => {
+    const card   = document.getElementById('chair-card');
+    const dot    = document.getElementById('chair-dot');
+    const status = document.getElementById('chair-status');
+    const detail = document.getElementById('chair-detail');
+    if (d.detected) {
+      card.classList.add('detected');
+      dot.classList.add('on');
+      status.textContent = `의자 감지 (${d.dist ?? '?'} m)`;
+      const dec = d.decision ? DECISION_LABEL[d.decision] || d.decision : '판단 대기';
+      detail.textContent = `결정: ${dec}`;
+    } else {
+      card.classList.remove('detected');
+      dot.classList.remove('on');
+      status.textContent = '감지 없음';
+      detail.textContent = '';
+    }
+  }).catch(() => {});
+}, 1000);
+
+// ── 시스템 프로세스 ──────────────────────────────────────────────────────────
+const SYS_NAMES = ['launch','rviz','battery','free','home'];
+const sysState = Object.fromEntries(SYS_NAMES.map(n => [n, false]));
+
+function toggleSysProc(name) {
+  const running = sysState[name];
+  fetch(`/sys_proc/${name}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'toggle'})
+  }).then(r => r.json()).then(d => updateSysProcUI(name, d.running));
+}
+
+function updateSysProcUI(name, running) {
+  sysState[name] = running;
+  const dot = document.getElementById('sysdot-' + name);
+  const btn = document.getElementById('sysbtn-' + name);
+  if (!dot || !btn) return;
+  const oneShot = ['battery','free','home'].includes(name);
+  if (running) {
+    dot.classList.add('on');
+    btn.textContent = '종료';
+    btn.className = 'btn btn-danger btn-sm';
+  } else {
+    dot.classList.remove('on');
+    btn.className = oneShot ? 'btn btn-neutral btn-sm' : 'btn btn-primary btn-sm';
+    btn.textContent = oneShot ? '실행' : '시작';
+  }
+}
+
+function pollSysProcStatus() {
+  fetch('/sys_proc_status').then(r => r.json()).then(d => {
+    SYS_NAMES.forEach(name => updateSysProcUI(name, d[name] || false));
+  }).catch(() => {});
+}
+pollSysProcStatus();
+setInterval(pollSysProcStatus, 2000);
+
+function killAllRobot() {
+  const btn = document.getElementById('killall-btn');
+  if (!confirm('터미널 포함 모든 로봇 프로세스를 종료합니다. 계속할까요?')) return;
+  btn.disabled = true;
+  btn.textContent = '정리 중...';
+  fetch('/killall_robot', {method:'POST'})
+    .then(r => r.json())
+    .then(() => {
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = '전체 로봇 프로세스 강제 종료';
+        pollSysProcStatus();
+      }, 5000);
+    });
+}
+
+// 키보드 지원
+//   방향키      : 이동 토글 (같은 키 다시 = 정지)  [수동 모드]
+//   키패드 +,-  : 속도 조절                        [수동 모드]
+//   1~4         : 기능 설정 토글                   [항상]
+//   Shift+1~5   : 시스템 프로세스                  [항상, 종료 시 confirm]
+const keyToDir = {'ArrowUp':['fwd',1,0],'ArrowDown':['bwd',-0.5,0],
+                  'ArrowLeft':['left',0,1],'ArrowRight':['right',0,-1]};
+const FEATURE_KEYS = {1:'stow-btn', 2:'social-nav-toggle',
+                      4:'net-mode-toggle', 5:'elev-app-toggle'};   // 3(장애물 밀기) 제거 (2026-07-24)
+const SYS_KEYS   = {1:'launch', 2:'rviz', 3:'battery', 4:'free', 5:'home'};
+const SYS_LABELS = {launch:'ROS2 Launch', rviz:'RViz2', battery:'배터리 확인',
+                    free:'프로세스 정리', home:'홈 위치'};
+
+// e.code 기반이라 한/영 상태와 무관하게 동작 (Digit1/Numpad1 → '1')
+function digitOf(e) {
+  const m = e.code.match(/^(?:Digit|Numpad)([1-9])$/);
+  return m ? m[1] : null;
+}
+
+document.addEventListener('keydown', e => {
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && e.target.type !== 'range'
+      && e.target.type !== 'checkbox') return;
+
+  const digit = digitOf(e);
+
+  // Shift+숫자 : 시스템 프로세스
+  if (e.shiftKey && digit && SYS_KEYS[digit]) {
+    if (e.repeat) return;
+    const name = SYS_KEYS[digit];
+    if (sysState[name] && !confirm(`${SYS_LABELS[name]}을(를) 종료할까요?`)) return;
+    toggleSysProc(name);
+    e.preventDefault();
+    return;
+  }
+
+  // 숫자 : 기능 설정 토글
+  if (!e.shiftKey && digit && FEATURE_KEYS[digit]) {
+    if (e.repeat) return;
+    const cb = document.getElementById(FEATURE_KEYS[digit]);
+    if (cb) cb.click();  // checked 토글 + onchange 핸들러 실행
+    e.preventDefault();
+    return;
+  }
+
+  // 이하 수동 모드 전용
+  if (!manualMode) return;
+  if (keyToDir[e.key]) {
+    if (e.repeat) return;  // 키를 꾹 눌러도 토글이 반복되지 않게
+    const [dir, lx, az] = keyToDir[e.key];
+    toggleCmd(dir, lx, az);
+    e.preventDefault();
+  } else if (e.key === '+') {
+    setSpeed(parseInt(document.getElementById('speed').value) + 5);
+    e.preventDefault();
+  } else if (e.key === '-') {
+    setSpeed(parseInt(document.getElementById('speed').value) - 5);
+    e.preventDefault();
+  }
+});
+</script>
+</body>
+</html>
