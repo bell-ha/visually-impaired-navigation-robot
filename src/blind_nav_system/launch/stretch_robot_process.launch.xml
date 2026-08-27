@@ -68,7 +68,7 @@
     [중요] include(d405_basic.launch.py) 방식은 인자가 노드까지 전달되지 않아
     그리퍼 노드가 body 카메라(D435if)를 잡아버리는 사고가 있었음 (실측 확인).
     → body와 동일한 직접 <node> 방식 + 시리얼 번호 고정으로 변경.
-    [프로파일] Hello Robot multi_camera.launch.py 검증값 (depth 480x270 / color 424x240)
+    [프로파일] 미지정 — 드라이버 기본협상에 맡긴다. 아래 노드 안 주석 참조.
     [확인] ros2 param get /gripper_camera serial_no → 130322271074 여야 정상
   -->
   <node pkg="realsense2_camera" exec="realsense2_camera_node" name="gripper_camera" output="screen">
@@ -78,19 +78,10 @@
     <param name="enable_color" value="true"/>
     <param name="enable_depth" value="true"/>
     <param name="align_depth.enable" value="true"/>
-    <!-- [주의] 이 드라이버 버전의 depth 프로파일 파라미터 이름은
-         depth_module.depth_profile (구명칭 depth_module.profile은 무시됨 — 실측).
-         이름이 틀리면 depth가 기본값(고해상도)으로 시작하려다 USB2 대역폭 초과로
-         Frames Timeout 사망. D405는 이 로봇에서 USB2(2.1)로 연결돼 있음. -->
-    <param name="depth_module.depth_profile" value="480x270x6"/>
-    <param name="depth_module.profile" value="480x270x6"/>
-    <!-- color 1280x720x6: ROI 집중 추적이 원본에서 잘라 쓰므로 고해상도가 실제 이득이 됨
-         (타겟 숫자의 진짜 픽셀 2배). USB2 대역폭 때문에 fps는 6으로 낮춤 —
-         화면은 약간 끊겨 보여도 OCR(~1Hz)과 서보에는 영향 없음.
-         [만약 재시작 후 color가 Frames Timeout으로 죽으면 이 3줄을 640x480x15로 되돌릴 것] -->
-    <param name="depth_module.color_profile" value="1280x720x6"/>
-    <param name="rgb_camera.profile" value="1280x720x6"/>
-    <param name="rgb_camera.color_profile" value="1280x720x6"/>
+    <!-- [프로파일] 지정하지 않는다 — 드라이버 기본협상에 맡긴다.
+         2026-08 확인: x6은 D405 미지원 프로파일(color 15/10/5, depth 60/30/15/5).
+         7/09 이후 1280 개통 0건 — OCR은 계속 848로 동작해왔다.
+         검증된 동작구성 = 848x480@10 기본값, 71런 무사고. 프로파일 파라미터 미지정. -->
     <!-- 안 쓰는 스트림 꺼서 USB/CPU 부하 절감 -->
     <param name="pointcloud.enable" value="false"/>
     <param name="enable_gyro" value="false"/>
