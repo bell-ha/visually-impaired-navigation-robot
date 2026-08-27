@@ -50,6 +50,11 @@ class NavigationClient(Node):
         self._goal_y            = 0.0
         self._goal_w            = 1.0
         self._navigating        = False
+        # 1-B: Nav2 abort 감지·안내용 상태
+        self.nav_failed         = False   # interface _watch가 폴링하는 실패 플래그
+        self._failed_announced  = False   # 재진입 방어 (start_navigation에서 리셋)
+        self._goal_gen          = 0       # goal 세대번호 (취소 후 낡은 콜백 필터)
+        self._nav_fail_status   = 0
         self._last_had_wp       = False   # 이전 주기에 경유지 있었는지
         self._replan_timer      = None
         self._obstacle_push_wp: tuple[float, float] | None = None  # 박스 side-waypoint
@@ -90,7 +95,16 @@ class NavigationClient(Node):
         self._goal_z    = float(loc.get('z', 0.0))
         self._navigating = True
         self.is_arrived  = False
+        # 1-B: 새 주행 = 실패 상태·재진입 플래그 리셋 (새 goal = 새 안내 자격)
+        self.nav_failed        = False
+        self._failed_announced = False
         FilePath("/tmp/navigation_active").write_text("1")
+
+        # 1-B: 서버 대기는 여기서 1회만 블로킹. 콜백(_replan_check·_obstacle_cb)에서
+        # blocking wait를 부르면 단일스레드 executor가 최대 10초 멈춰 실패 안내까지
+        # 지연되므로, 대기를 여기로 분리하고 _send_to_nav2는 논블로킹 검사만 한다.
+        self._action_client.wait_for_server(timeout_sec=10.0)
+        self._through_poses_client.wait_for_server(timeout_sec=2.0)
 
         # 초기 전송
         waypoints = self._compute_waypoints_if_enabled()
@@ -142,7 +156,11 @@ class NavigationClient(Node):
         # 내비게이션 중이면 즉시 재계획
         if self._navigating and not self.is_arrived:
             waypoints = self._compute_waypoints_if_enabled()
-            self._send_to_nav2(waypoints)
+            if not self._send_to_nav2(waypoints):
+                if self.goal_handle is None:      # 살아있는 goal 없음 = 진짜 막다른 길
+                    self._nav_failed(-1, "resend_failed")
+                else:                             # 기존 goal 유효 → 경로 갱신만 실패, 계속 주행
+                    print("[NAV] 재전송 실패 — 기존 goal 유지, 계속 주행", flush=True)
 
     def _box_side_waypoint(self, box_x: float, box_y: float) -> tuple[float, float]:
         """
@@ -198,7 +216,8 @@ class NavigationClient(Node):
             self.goal_handle.cancel_goal_async()
             self.goal_handle = None
 
-        self._send_to_nav2(waypoints)
+        if not self._send_to_nav2(waypoints):
+            self._nav_failed(-1, "resend_failed")
 
     # ── 헬퍼 ──────────────────────────────────────────────────────────────────
 
@@ -271,7 +290,7 @@ class NavigationClient(Node):
 
         if len(waypoints) > 1:
             # 경유지 포함 → NavigateThroughPoses
-            if not self._through_poses_client.wait_for_server(timeout_sec=5.0):
+            if not self._through_poses_client.server_is_ready():
                 print("[NAV] navigate_through_poses 서버 없음 — NavigateToPose 폴백", flush=True)
                 waypoints = [(self._goal_x, self._goal_y)]
             else:
@@ -290,12 +309,14 @@ class NavigationClient(Node):
                     goal_msg.poses.append(ps)
                 print(f"[NAV] 경유지 {len(waypoints)-1}개 포함 경로 전송", flush=True)
                 self._publish_waypoint_markers(waypoints)
+                self._goal_gen += 1
+                _gen = self._goal_gen
                 self._through_poses_client.send_goal_async(goal_msg).add_done_callback(
-                    self.goal_response_callback)
+                    lambda f, g=_gen: self.goal_response_callback(f, g))
                 return True
 
         # 경유지 없음 → NavigateToPose
-        if not self._action_client.wait_for_server(timeout_sec=10.0):
+        if not self._action_client.server_is_ready():
             print("[NAV] navigate_to_pose 서버 응답 없음", flush=True)
             return False
         goal_msg = NavigateToPose.Goal()
@@ -306,23 +327,72 @@ class NavigationClient(Node):
         goal_msg.pose.pose.orientation.w = self._goal_w
         goal_msg.pose.pose.orientation.z = self._goal_z
         print("[NAV] 직행 경로 전송", flush=True)
-        self._action_client.send_goal_async(goal_msg).add_done_callback(self.goal_response_callback)
+        self._goal_gen += 1
+        _gen = self._goal_gen
+        self._action_client.send_goal_async(goal_msg).add_done_callback(
+            lambda f, g=_gen: self.goal_response_callback(f, g))
         return True
 
     # ── 콜백 ──────────────────────────────────────────────────────────────────
 
-    def goal_response_callback(self, future):
-        self.goal_handle = future.result()
-        if self.goal_handle.accepted:
-            self.goal_handle.get_result_async().add_done_callback(self.get_result_callback)
+    def goal_response_callback(self, future, gen=0):
+        # 낡은(취소된) goal의 응답이 뒤늦게 오면 무시 — 새 주행 오염 방지
+        if gen != self._goal_gen:
+            return
+        try:
+            gh = future.result()
+        except Exception as e:   # rejected가 아니라 통신 실패 경로
+            print(f"[NAV] goal 응답 예외: {type(e).__name__}: {e}", flush=True)
+            self._nav_failed(-1, "goal_response_exception")
+            return
+        if gh is None or not gh.accepted:
+            print("[NAV] goal 거절됨", flush=True)
+            self._nav_failed(-1, "rejected")
+            return
+        self.goal_handle = gh
+        self.goal_handle.get_result_async().add_done_callback(
+            lambda f, g=gen: self.get_result_callback(f, g))
 
-    def get_result_callback(self, future):
-        status = future.result().status
+    def get_result_callback(self, future, gen=0):
+        # 취소 후 재전송 경합: 낡은 goal의 결과는 무시
+        if gen != self._goal_gen:
+            return
+        try:
+            status = future.result().status
+        except Exception as e:
+            print(f"[NAV] 결과 수신 예외: {type(e).__name__}: {e}", flush=True)
+            self._nav_failed(-1, "result_exception")
+            return
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.is_arrived  = True
             self._navigating = False
             self._stop_replan_timer()
             FilePath("/tmp/navigation_active").write_text("0")
+        elif status == GoalStatus.STATUS_CANCELED:
+            # 재계획·장애물 회피가 일부러 취소한 것 → 실패 아님, 조용히 무시
+            return
+        else:
+            # ABORTED(6) 등 진짜 실패 → 사용자에게 안내
+            self._nav_failed(status, "aborted")
+
+    def _nav_failed(self, status, reason):
+        # 재진입 방어: 같은 주행에서 여러 경로(응답예외+결과ABORTED)로 2번 들어와도 1회만
+        if self._failed_announced:
+            return
+        self._failed_announced = True
+        self._nav_fail_status  = status
+        self._navigating       = False
+        self._stop_replan_timer()
+        try:
+            FilePath("/tmp/navigation_active").write_text("0")
+        except Exception:
+            pass
+        # status 정수 그대로 로그 → robot_diag_nav의 /rosout과 시각 정렬 가능
+        print(f"[NAV] 목표 실패 status={status} reason={reason}", flush=True)
+        # print는 대시보드 메모리 로그(휘발)뿐 → /rosout에도 남겨 블랙박스에 영속
+        self.get_logger().error(f"[NAV] 목표 실패 status={status} reason={reason}")
+        # 마지막에 플래그 세움 — interface _watch가 이걸 보고 안내 (부분상태 노출 방지)
+        self.nav_failed = True
 
     def vel_callback(self, msg):
         current_time = time.time()

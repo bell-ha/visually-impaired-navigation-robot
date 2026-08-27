@@ -818,11 +818,13 @@ class GuidanceStateMachine:
     def __init__(self, on_arrive: Callable[[], None],
                  on_turn: Callable[[str], None],
                  on_obstacle: Callable[[], None] = lambda: None,
+                 on_nav_failed: Callable[[], None] = lambda: None,
                  sim_duration: float = NAV_SIM_DURATION_SEC,
                  debug: bool = False):
-        self._on_arrive   = on_arrive
-        self._on_turn     = on_turn
-        self._on_obstacle = on_obstacle
+        self._on_arrive     = on_arrive
+        self._on_turn       = on_turn
+        self._on_obstacle   = on_obstacle
+        self._on_nav_failed = on_nav_failed
         self._sim_duration = sim_duration
         self._debug      = debug
         self._ros        = _ROS_OK
@@ -941,6 +943,9 @@ class GuidanceStateMachine:
                 while not stop_ev.is_set():
                     if getattr(self._nav_node, "is_arrived", False):
                         self._on_arrive()
+                        return
+                    if getattr(self._nav_node, "nav_failed", False):
+                        self._on_nav_failed()   # 1-B: Nav2 abort → 큐 경유 안내
                         return
                     threading.Event().wait(0.1)
             self._arrive_thr = threading.Thread(target=_watch, daemon=True)
@@ -1171,6 +1176,7 @@ class InterfaceApp:
             on_arrive=self._on_arrive,
             on_turn=self._on_turn_announce,
             on_obstacle=self._on_obstacle_announce,
+            on_nav_failed=self._on_nav_failed,
             sim_duration=NAV_SIM_DURATION_SEC,
             debug=debug,
         )
@@ -1270,6 +1276,10 @@ class InterfaceApp:
     # ──────────────────────────────────────────
     def _on_arrive(self) -> None:
         self._ev_q.put(Event(kind="arrive"))
+
+    def _on_nav_failed(self) -> None:
+        # ROS/watch 스레드에서 호출 → TTS 직접 금지, 큐 경유 (메인 스레드가 처리)
+        self._ev_q.put(Event(kind="nav_failed"))
 
     def _on_turn_announce(self, direction: str) -> None:
         """NAV 상태에서만 회전 안내 (vel_callback 스레드에서 호출되므로 큐 경유)"""
@@ -1825,6 +1835,17 @@ class InterfaceApp:
             self._say(MSG[16])
             self._go_locked()
 
+    def _handle_nav_failed(self) -> None:
+        # 1-B (§14.3 nav_runtime_failed): 주행 중 abort → 안내 후 LOCKED.
+        # 상태 가드 필수 — 일시정지(PAUSED) 직후 늦게 온 abort는 무시해야
+        # "멈췄는데 갑자기 종료 멘트"가 안 나온다.
+        if self.state != State.NAV:
+            return
+        self.nav.stop()          # 도착감지 스레드(_watch) 종료 + goal 정리
+        self.last_target = None
+        self._say(MSG[15])       # "안내를 계속할 수 없어 중지했습니다..."
+        self._go_locked("주행 실패")
+
     # ──────────────────────────────────────────
     # Tick: confirm timeout, READY idle (§14)
     # ──────────────────────────────────────────
@@ -1865,6 +1886,8 @@ class InterfaceApp:
                 self._handle_stt_timeout()
             elif ev.kind == "arrive":
                 self._handle_arrive()
+            elif ev.kind == "nav_failed":
+                self._handle_nav_failed()
             elif ev.kind == "cancel":
                 self._go_locked("수동 모드 전환")
             elif ev.kind == "obstacle":
