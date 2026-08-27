@@ -105,23 +105,44 @@ class DiagLogger:
         self._lock = threading.Lock()
         try:
             self._fp = open(self.path, "a", buffering=1)  # 줄 단위 버퍼링
-        except Exception:
+        except Exception as e:
             self._fp = None
+            # 디스크풀·권한거부로 파일이 안 열려도 본체는 살아있다 → 조용히 넘어가면
+            # 로그가 안 쌓이는 걸 아무도 모른다. 반드시 알린다.
+            try:
+                print(f"[경고] 진단 로그 파일 열기 실패 {self.path}: {e}", flush=True)
+            except Exception:
+                pass
+        self.ok = bool(self._fp)     # 호출측이 계측 활성 여부를 확인할 수 있게 노출
         self.log("BOOT", f"진단 로거 시작 pid={os.getpid()} → {self.path}")
 
-    def log(self, level, msg):
+    def log(self, level, msg, echo=True):
+        # echo 기본 True → 기존 호출부·다른 프로세스 동작 변화 없음.
+        # 고빈도 호출부(대시보드 _log 파이어호스)만 echo=False로 터미널 플러드 차단.
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         line = f"{ts} [{self.tag}/{level}] {msg}"
+        warn = None
         with self._lock:
             if self._fp:
                 try:
                     self._fp.write(line + "\n")
-                except Exception:
-                    pass
-        try:
-            print(line, flush=True)
-        except Exception:
-            pass
+                except Exception as e:
+                    # 디스크풀 등으로 기록이 멈춘 것 → 최초 1회만 알린다(플러드 방지).
+                    # print를 락 안에서 하면 락 안 I/O가 되어 호출자를 물고 늘어진다.
+                    # 락 안에선 메시지만 만들고, 실제 출력은 락을 놓은 뒤.
+                    if self.ok:
+                        self.ok = False
+                        warn = f"[경고] 진단 로그 쓰기 실패 — 계측 중단 {self.path}: {e}"
+        if warn:
+            try:
+                print(warn, flush=True)
+            except Exception:
+                pass
+        if echo:
+            try:
+                print(line, flush=True)
+            except Exception:
+                pass
 
     def boot_snapshot(self, extra=None):
         """부팅 순간의 DDS 환경/잔재 스냅샷."""

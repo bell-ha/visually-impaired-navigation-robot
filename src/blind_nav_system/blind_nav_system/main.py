@@ -91,6 +91,13 @@ def _log(src: str, msg: str):
     entry = {"t": time.strftime("%H:%M:%S"), "src": src, "msg": msg.rstrip()}
     with _log_lock:
         _LOG_BUF.append(entry)
+    # 파일 영속(#15) — 락 밖에서 호출. 이걸로 SSE/UI 소비자는 분리되지만,
+    # 자식 stdout 백프레셔는 락과 무관하게 남아 있다(디스크 정체 시).
+    if _diaglog:
+        try:
+            _diaglog.log(src, entry["msg"], echo=False)   # 터미널 에코는 차단(파이어호스)
+        except Exception:
+            pass
 
 # ── Pull 감지기 ───────────────────────────────────────────────────────────────
 def _make_pull_detector():
@@ -2389,8 +2396,17 @@ def _clean_stale_shm_at_boot():
 def main():
     global _diaglog
     if _diag is not None:
-        _diaglog = _diag.DiagLogger("system")
-        _diaglog.boot_snapshot()
+        try:
+            _diaglog = _diag.DiagLogger("system")
+            _diaglog.boot_snapshot()
+        except Exception as _le:
+            _diaglog = None
+            _log("SYS", f"robot_diag 로거 생성 실패 — 파일 로그 비활성: {_le}")
+        else:
+            if not getattr(_diaglog, "ok", True):
+                _log("SYS", "파일 로그 열기 실패 — 계측 비활성")
+    else:
+        _log("SYS", "robot_diag 임포트 실패 — 파일 로그 비활성")   # 계측이 조용히 죽는 것 방지(#15)
     Path("/tmp/social_nav_enabled").write_text("1" if _social_nav_enabled else "0")
     Path("/tmp/obstacle_push_enabled").write_text("1" if _obstacle_push_enabled else "0")
     _clean_stale_shm_at_boot()   # ← init_ros()보다 반드시 먼저

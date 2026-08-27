@@ -3875,8 +3875,12 @@ def main():
     # 진단 로거 시작 + 부팅 스냅샷 (제어권 판정 이전 상태를 먼저 남긴다)
     global _diaglog
     if _diag is not None:
-        _diaglog = _diag.DiagLogger("elevator")
-        _diaglog.boot_snapshot({"cwd": os.getcwd()})
+        try:
+            _diaglog = _diag.DiagLogger("elevator")
+            _diaglog.boot_snapshot({"cwd": os.getcwd()})
+        except Exception as _le:
+            _diaglog = None      # 로거 없어도 본체는 정상 동작해야 함
+            print(f"[경고] robot_diag 로거 생성 실패 — 파일 로그 비활성: {_le}", flush=True)
 
     # 제어권 초기값: 대시보드(8080)가 떠 있으면 False(부여 대기) — 주도권은
     # 대시보드에 있다. 대시보드가 없으면 True(단독 개발 모드, 기존과 동일).
