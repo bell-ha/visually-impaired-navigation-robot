@@ -196,6 +196,11 @@ _ready = {"amcl": 0.0, "battery": 0.0, "handle": 0.0, "nav2": 0.0, "elev_app": 0
 #   _ready[key]=monotonic() = "마지막으로 물어본 시각"(폴러 건강),  _ready_val[key] = 판정결과(대상 건강).
 _ready_val = {"nav2": None, "elev_app": None}
 
+# 측위 정지게이트: amcl은 update_min_d/a라 정지 중엔 /amcl_pose가 안 나온다 —
+# 이동명령 여부로 "미갱신=고장"과 "미갱신=정상(정지)"을 구분한다.
+_last_move_cmd = 0.0
+_STILL_GRACE = 3.0
+
 # ── 장애물 상태 ────────────────────────────────────────────────────────────────
 _obstacle_state = {"detected": False, "dist": None, "decision": None}
 _obstacle_last_log_t = 0.0
@@ -293,8 +298,11 @@ def _battery_callback(msg):
         pass
 
 def _cmdvel_callback(msg):
-    global _backup_warn_until
+    global _backup_warn_until, _last_move_cmd
     try:
+        if (abs(msg.linear.x) > 1e-4 or abs(msg.linear.y) > 1e-4
+                or abs(msg.angular.z) > 1e-4):
+            _last_move_cmd = time.monotonic()
         if _manual_mode:
             return   # 수동 모드에서는 안내 생략
         if msg.linear.x < -0.01:
@@ -694,6 +702,20 @@ def _readiness_signal(key, label):
         return {"status": "bad", "age_sec": round(age, 1), "detail": f"{label} 신호 끊김(stale)"}
     return {"status": "ok", "age_sec": round(age, 1), "detail": f"{label} 정상"}
 
+def _readiness_amcl():
+    """amcl 전용 — update_min_d/a라 정지 중엔 /amcl_pose가 안 나온다(정상).
+    이동명령 여부로 '미갱신=고장'과 '미갱신=정상(정지)'을 구분한다."""
+    updated_at = _ready["amcl"]
+    if updated_at <= 0.0:
+        return {"status": "unknown", "age_sec": None, "detail": "측위 미수신"}
+    age = time.monotonic() - updated_at
+    if age <= _READY_THRESH["amcl"]:
+        return {"status": "ok", "age_sec": round(age, 1), "detail": "측위 정상"}
+    moving = (time.monotonic() - _last_move_cmd) <= _STILL_GRACE
+    if not moving:
+        return {"status": "ok", "age_sec": round(age, 1), "detail": "측위 정지 중(갱신 없음이 정상)"}
+    return {"status": "bad", "age_sec": round(age, 1), "detail": "측위 신호 끊김(이동 중 미갱신)"}
+
 def _readiness_polled(key, label):
     """폴링형 표시 — age는 폴러 자체의 건강(콜백형과 동일 age 계산), 내용은 _ready_val."""
     updated_at = _ready.get(key, 0.0)
@@ -710,7 +732,7 @@ def _readiness_polled(key, label):
 @app.route("/readiness")
 def readiness():
     return jsonify(
-        amcl=_readiness_signal("amcl", "측위"),
+        amcl=_readiness_amcl(),
         battery=_readiness_signal("battery", "배터리"),
         handle=_readiness_signal("handle", "손잡이"),
         nav2=_readiness_polled("nav2", "nav2"),
