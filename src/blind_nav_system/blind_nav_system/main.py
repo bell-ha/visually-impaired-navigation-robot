@@ -185,6 +185,11 @@ _backup_warn_until = 0.0   # 후진 안내 디바운스
 # ── 배터리 상태 ────────────────────────────────────────────────────────────────
 _battery = {"pct": None, "voltage": None, "charging": None}
 
+# ── 준비상태 신호 갱신시각 (2a-1: 뼈대) ────────────────────────────────────────
+# monotonic 갱신시각만 저장 — age는 /readiness에서 요청 시점에 계산(값 저장 금지).
+# 초기값 0.0 → age가 거대해져 자동으로 unknown/stale 판정됨(낙관 초기값 금지).
+_ready = {"amcl": 0.0, "battery": 0.0, "handle": 0.0}
+
 # ── 장애물 상태 ────────────────────────────────────────────────────────────────
 _obstacle_state = {"detected": False, "dist": None, "decision": None}
 _obstacle_last_log_t = 0.0
@@ -259,6 +264,7 @@ def _amcl_pose_cb(msg):
         _robot_pose.update(x=round(p.x, 3), y=round(p.y, 3),
                            z=round(q.z, 4), w=round(q.w, 4),
                            yaw_deg=round(math.degrees(yaw), 1))
+        _ready["amcl"] = time.monotonic()
     except Exception:
         pass   # 콜백 예외가 절대 rclpy.spin 스레드를 죽이지 않게
 
@@ -276,6 +282,7 @@ def _battery_callback(msg):
         v = msg.voltage
         _battery["voltage"]  = round(v, 1) if (v is not None and not math.isnan(v)) else None
         _battery["charging"] = msg.power_supply_status == 1  # CHARGING=1
+        _ready["battery"] = time.monotonic()
     except Exception:
         pass
 
@@ -615,6 +622,29 @@ def robot_pose():
 @app.route("/battery_status")
 def battery_status():
     return jsonify(**_battery)
+
+# 2a-1: 실측 3신호 임계값(관대한 잠정값, 첫 주행 실측 후 정밀화 예정)
+_READY_THRESH = {"amcl": 30.0, "battery": 15.0, "handle": 5.0}
+
+def _readiness_signal(key, label):
+    updated_at = _ready[key]
+    if updated_at <= 0.0:
+        return {"status": "unknown", "age_sec": None, "detail": f"{label} 미수신"}
+    age = time.monotonic() - updated_at
+    if age > _READY_THRESH[key]:
+        return {"status": "bad", "age_sec": round(age, 1), "detail": f"{label} 신호 끊김(stale)"}
+    return {"status": "ok", "age_sec": round(age, 1), "detail": f"{label} 정상"}
+
+@app.route("/readiness")
+def readiness():
+    return jsonify(
+        amcl=_readiness_signal("amcl", "측위"),
+        battery=_readiness_signal("battery", "배터리"),
+        handle=_readiness_signal("handle", "손잡이"),
+        nav2={"status": "unknown", "age_sec": None, "detail": "미구현"},
+        gripper_camera={"status": "unknown", "age_sec": None, "detail": "미구현"},
+        elev_app={"status": "unknown", "age_sec": None, "detail": "미구현"},
+    )
 
 @app.route("/robot_speed", methods=["POST"])
 def set_robot_speed():
@@ -1492,6 +1522,7 @@ def serial_loop():
 
             tag = parts[0].strip()
             now = time.monotonic()
+            _ready["handle"] = now
 
             if tag == "TRIG" and len(parts) >= 3:
                 btn = parts[1].strip()
