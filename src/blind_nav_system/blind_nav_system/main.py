@@ -1085,6 +1085,27 @@ def _elev_post(path, payload=None, timeout=20):
         _log("AUTO", f"엘베 {path} 실패: {e}")
         return None
 
+@app.route("/snapshot", methods=["POST"])
+def snapshot_route():
+    """VLM 매핑용 스냅샷 — 저장은 전부 엘베앱(5000)이 함(원본 프레임을 이미 갖고 있음).
+    대시보드는 게이트(이동 중 거부) + 엘베앱이 모르는 대시보드 쪽 컨텍스트만 실어 전달."""
+    if (time.monotonic() - _last_move_cmd) <= 1.0:
+        return jsonify(ok=False, error="이동 중에는 스냅샷 불가"), 409
+    if not _elev_app_running():
+        return jsonify(ok=False, error="엘베앱 실행 필요"), 409
+    data = request.json or {}
+    payload = {
+        "label": (data.get("label") or "").strip(),
+        "floor": _current_floor,
+        "battery": dict(_battery),
+        "amcl_pose": dict(_robot_pose) if _robot_pose.get("x") is not None else None,
+        "dash_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    result = _elev_post("/snapshot", payload, timeout=10)
+    if result is None:
+        return jsonify(ok=False, error="엘베앱 응답 없음"), 502
+    return jsonify(result)
+
 def _elev_status(timeout=3):
     """엘베앱 상태(/status) 조회 — dict 또는 None. ready=정렬완료, door_open 등 포함."""
     try:

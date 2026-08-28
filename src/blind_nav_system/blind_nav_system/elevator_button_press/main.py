@@ -6,7 +6,7 @@
 브라우저: http://localhost:5000
 """
 
-import os, json, subprocess, tempfile, threading, time, webbrowser
+import os, json, shutil, subprocess, tempfile, threading, time, webbrowser
 import collections
 import logging
 import cv2
@@ -29,7 +29,7 @@ except Exception as _e:          # 로거 없어도 본체는 정상 동작해�
     print(f"[경고] robot_diag 로드 실패: {_e}")
 _diaglog = None
 from rclpy.qos import qos_profile_sensor_data
-from sensor_msgs.msg import Image, JointState, LaserScan
+from sensor_msgs.msg import Image, JointState, LaserScan, CameraInfo
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from cv_bridge import CvBridge
@@ -100,6 +100,27 @@ GRIPPER_DEPTH_TOPICS = [
     "/gripper_camera/aligned_depth_to_color/image_raw",   # (예비)
 ]
 BODY_TOPIC    = "/camera/camera/color/image_raw"
+# 스냅샷용 camera_info — 위 이미지 토픽들과 같은 네임스페이스 후보(부팅마다 갈릴 수 있음)
+GRIPPER_INFO_TOPICS = [
+    "/camera/gripper_camera/color/camera_info",
+    "/gripper_camera/color/camera_info",   # (예비)
+]
+BODY_INFO_TOPIC = "/camera/camera/color/camera_info"
+
+# ── 스냅샷 TF 프레임명 — 2026-08-28 실측 확정 (오케 6e) ─────────────────────────
+# 그리퍼 [-0.029,-0.341,0.604] / 몸체 [0.045,-0.003,1.322] (base_link 기준, 실측 대조).
+# ★함정: 그리퍼 camera_info의 header.frame_id가 "camera_color_optical_frame"(몸체 것)으로
+# 잘못 보고됨 — TF lookup에 camera_info의 frame_id를 절대 쓰지 말 것(그리퍼 버튼이 몸체
+# 위치 z=1.322로 변환되는 3D 완전 오류가 남). intrinsics(K/D/w/h)는 정확하니 그건 그대로
+# 쓰되, 프레임명은 반드시 이 CONFIG로만 (아래 코드도 camera_info.header.frame_id를 전혀
+# 안 읽음 — SNAPSHOT_FRAMES만 사용).
+SNAPSHOT_FRAMES = {
+    "grip_color": "gripper_camera_color_optical_frame",
+    "body_color": "camera_color_optical_frame",
+    "base": "base_link",
+    "odom": "odom",
+    "map": "map",   # 측위 켜졌을 때만 lookup 성공 — 안 되면 null(정상, 실패 아님)
+}
 
 IMAGE_W, IMAGE_H = 640, 480
 CX, CY    = IMAGE_W // 2, IMAGE_H // 2
@@ -1621,6 +1642,179 @@ def wrist_yaw():
         node.set_wrist_yaw(yaw)
     return jsonify(ok=True, yaw=yaw)
 
+def _camera_info_dict(msg):
+    if msg is None:
+        return None
+    return {"K": list(msg.k), "D": list(msg.d), "w": msg.width, "h": msg.height,
+            "distortion_model": msg.distortion_model}
+
+def _stamp_to_sec(stamp):
+    return None if stamp is None else stamp.sec + stamp.nanosec * 1e-9
+
+def _save_snapshot(node, out_dir, dash_payload):
+    """VLM 매핑용 원본 프레임 저장 — daemon 스레드에서 실행(PNG16 인코딩 GIL이
+    OCR 스레드를 막지 않게). 모르는 값은 0/단위행렬 대체 없이 null + missing[]."""
+    missing = []
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+
+        grip_raw, grip_stamp = node._last_grip_raw, node._last_grip_stamp
+        body_raw, body_stamp = node._last_body_raw, node._last_body_stamp
+        with state_lock:
+            rot_grip, rot_body = state["rot_grip"], state["rot_body"]
+        with node._depth_lock:
+            # 회전 전 센서 네이티브(#P6) — grip_raw·camera_info K와 같은 축이어야 픽셀→3D가 맞음
+            depth_frame = node._last_grip_depth_native
+            depth_stamp = node._depth_stamp
+        grip_info, body_info = node._grip_color_info, node._body_color_info
+        joint_msg = node._last_joint_state
+
+        cameras = {"gripper": {}, "body": {}}
+
+        if grip_raw is not None:
+            cv2.imwrite(os.path.join(out_dir, "grip_color.jpg"), grip_raw, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cameras["gripper"]["color"] = "grip_color.jpg"
+        else:
+            missing.append("grip_color")
+            cameras["gripper"]["color"] = None
+        cameras["gripper"]["color_stamp"] = _stamp_to_sec(grip_stamp)
+
+        if depth_frame is not None:
+            cv2.imwrite(os.path.join(out_dir, "grip_depth.png"), depth_frame)   # PNG16 — JPEG 금지
+            cameras["gripper"]["depth"] = "grip_depth.png"
+        else:
+            missing.append("grip_depth")
+            cameras["gripper"]["depth"] = None
+        cameras["gripper"]["depth_stamp"] = _stamp_to_sec(depth_stamp)
+        cameras["gripper"]["aligned"] = True   # 후보 토픽이 aligned_depth_to_color 고정
+        cameras["gripper"]["color_info"] = _camera_info_dict(grip_info)
+        if grip_info is None:
+            missing.append("grip_color_info")
+        cameras["gripper"]["frame_color"] = SNAPSHOT_FRAMES["grip_color"]
+        cameras["gripper"]["orientation"] = "sensor_native"   # 회전 미적용 — camera_info K와 축 일치(#P6)
+
+        if body_raw is not None:
+            cv2.imwrite(os.path.join(out_dir, "body_color.jpg"), body_raw, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            cameras["body"]["color"] = "body_color.jpg"
+        else:
+            missing.append("body_color")
+            cameras["body"]["color"] = None
+        cameras["body"]["color_stamp"] = _stamp_to_sec(body_stamp)
+        cameras["body"]["depth"] = None   # 몸체는 depth 미구독(#21 부하 방지) — 항상 없음
+        missing.append("body_depth")
+        cameras["body"]["color_info"] = _camera_info_dict(body_info)
+        if body_info is None:
+            missing.append("body_color_info")
+        cameras["body"]["frame_color"] = SNAPSHOT_FRAMES["body_color"]
+        cameras["body"]["orientation"] = "sensor_native"   # 회전 미적용 — camera_info K와 축 일치(#P6)
+
+        joint_states = dict(zip(joint_msg.name, joint_msg.position)) if joint_msg is not None else None
+        if joint_states is None:
+            missing.append("joint_states")
+
+        # ── on-demand TF: 이 요청만을 위해 생성 → 캐시 채울 시간 대기 → lookup → 파괴 ──
+        import tf2_ros
+        from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+        from rclpy.duration import Duration
+        from rclpy.time import Time as RclpyTime
+
+        buffer = tf2_ros.Buffer()
+        listener = tf2_ros.TransformListener(buffer, node)
+        time.sleep(1.0)   # 0.5~1.0초 — TF 캐시가 찰 시간
+
+        tf_out, tf_errors = {}, {}
+
+        def _lu(target, source, key, attempts=3, retry_wait=0.3):
+            # 실측: 리스너 생성 직후 static TF 캐시가 아직 안 찼으면 첫 lookup이
+            # "frame does not exist"로 실패할 수 있음 — 짧게 재시도(그래도 안 되면
+            # null+errors, 크래시나 전체 실패로 만들지 않음).
+            last_err = None
+            for i in range(attempts):
+                try:
+                    t = buffer.lookup_transform(target, source, RclpyTime(), timeout=Duration(seconds=1.0))
+                    tr, rot = t.transform.translation, t.transform.rotation
+                    tf_out[key] = {
+                        "translation": {"x": tr.x, "y": tr.y, "z": tr.z},
+                        "rotation": {"x": rot.x, "y": rot.y, "z": rot.z, "w": rot.w},
+                    }
+                    return
+                except (LookupException, ConnectivityException, ExtrapolationException) as e:
+                    last_err = e
+                    if i < attempts - 1:
+                        time.sleep(retry_wait)
+            tf_out[key] = None
+            tf_errors[key] = repr(last_err)
+            missing.append(f"tf:{key}")
+
+        _lu(SNAPSHOT_FRAMES["base"], SNAPSHOT_FRAMES["grip_color"], "base_link__grip_color")
+        _lu(SNAPSHOT_FRAMES["base"], SNAPSHOT_FRAMES["body_color"], "base_link__body_color")
+        _lu(SNAPSHOT_FRAMES["odom"], SNAPSHOT_FRAMES["base"], "odom__base_link")
+        _lu(SNAPSHOT_FRAMES["map"], SNAPSHOT_FRAMES["base"], "map__base_link")   # 안 되면 null(실패 아님, 미측위일 뿐)
+        tf_out["errors"] = tf_errors
+        try:
+            listener.unregister()
+        except Exception:
+            pass
+
+        meta = {
+            "label": dash_payload.get("label"),
+            "primary_frame": SNAPSHOT_FRAMES["base"],
+            "wall_time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "dash_time": dash_payload.get("dash_time"),
+            "floor": dash_payload.get("floor"),
+            "battery": dash_payload.get("battery"),
+            "amcl_pose": dash_payload.get("amcl_pose"),
+            "localization_available": tf_out.get("map__base_link") is not None,
+            "rot_grip": rot_grip, "rot_body": rot_body,   # 정보용 — 이미지는 sensor_native(회전 미적용)
+            "joint_states": joint_states,
+            "cameras": cameras,
+            "tf": tf_out,
+            "missing": sorted(set(missing)),
+        }
+        with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        node._dlog(f"[SNAPSHOT] 저장 완료: {out_dir} missing={meta['missing']}")
+    except Exception as e:
+        node.get_logger().error(f"스냅샷 저장 실패: {e!r}")
+        try:
+            node._dlog(f"[SNAPSHOT] 저장 실패: {e!r}")
+        except Exception:
+            pass
+    finally:
+        node._snapshot_in_progress = False
+
+@app.route("/snapshot", methods=["POST"])
+def snapshot_route():
+    """VLM 매핑용 원본 프레임 스냅샷 — 표시용 jpeg가 아니라 raw + camera_info + TF.
+    게이트: 자동안무/베이스정렬/누르기 중이거나 이미 저장 중이면 거부(모션블러·시점불일치 방지)."""
+    node = _node_ref[0]
+    if node is None:
+        return jsonify(ok=False, error="ROS 노드 미초기화"), 503
+    if getattr(node, "_auto_busy", False) or getattr(node, "_nudging", False):
+        return jsonify(ok=False, error="자동 안무/베이스 정렬 진행 중 — 스냅샷 불가"), 409
+    with state_lock:
+        pressing = state["pressing"]
+    if pressing:
+        return jsonify(ok=False, error="누르기 진행 중 — 스냅샷 불가"), 409
+    if node._snapshot_in_progress:
+        return jsonify(ok=False, error="이미 스냅샷 저장 중"), 409
+
+    try:
+        free = shutil.disk_usage(os.path.expanduser("~")).free
+    except Exception as e:
+        return jsonify(ok=False, error=f"디스크 확인 실패: {e!r}"), 500
+    if free < 1 * 1024 ** 3:
+        return jsonify(ok=False, error=f"디스크 여유 부족({free / 1e9:.2f}GB < 1GB) — 저장 거부"), 507
+
+    data = request.json or {}
+    label = "".join(c for c in str(data.get("label") or "snap") if c.isalnum() or c in "-_") or "snap"
+    ts = time.strftime("%Y%m%dT%H%M%S")
+    out_dir = os.path.expanduser(f"~/snapshots/{ts}_{label}")
+
+    node._snapshot_in_progress = True
+    threading.Thread(target=_save_snapshot, args=(node, out_dir, data), daemon=True).start()
+    return jsonify(ok=True, dir=out_dir)
+
 _node_ref = [None]
 
 # ── ROS2 노드 ─────────────────────────────────────────────────────────
@@ -1639,6 +1833,7 @@ class ElevatorTracker(Node):
         # ── D405 depth (color 정렬) — 버튼까지 거리 측정용 (press 준비 0단계) ──
         # 로봇을 움직이지 않음. 화면에 거리 숫자만 표시.
         self._depth_frame = None   # 회전 보정된 uint16 배열 (mm)
+        self._last_grip_depth_native = None   # 스냅샷용 — 회전 전(센서 네이티브, #P6)
         self._depth_lock  = threading.Lock()
         self._letterbox   = None   # (scale, off_x, off_y) — 표시↔원본 좌표 변환
         for t in GRIPPER_DEPTH_TOPICS:
@@ -1671,7 +1866,31 @@ class ElevatorTracker(Node):
         self.create_subscription(Image, BODY_TOPIC, self._on_image_body,
                                  qos_profile_sensor_data)
         self._dlog(f"body   : {BODY_TOPIC}")
+
+        # ── 스냅샷용 원본 프레임(리사이즈·레터박스 전) + camera_info ────────────
+        # 표시용 jpeg(state["jpeg_frame*"])는 리사이즈·회전·레터박스가 들어가 VLM
+        # 3D 매핑에 못 씀 — 여기 raw는 참조만 들고 있음(복사 아님).
+        self._last_grip_raw = None
+        self._last_grip_stamp = None
+        self._last_body_raw = None
+        self._last_body_stamp = None
+        self._depth_stamp = None
+        self._last_joint_state = None
+        self._snapshot_in_progress = False
+        self._grip_color_info = None
+        self._body_color_info = None
+        for t in GRIPPER_INFO_TOPICS:
+            self.create_subscription(CameraInfo, t, self._on_grip_info, qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, BODY_INFO_TOPIC, self._on_body_info,
+                                 qos_profile_sensor_data)
+
         self._dlog("Ready — open http://localhost:5000")
+
+    def _on_grip_info(self, msg):
+        self._grip_color_info = msg
+
+    def _on_body_info(self, msg):
+        self._body_color_info = msg
 
     def _init_wrist_once(self):
         if self._wrist_initialized:
@@ -1696,6 +1915,11 @@ class ElevatorTracker(Node):
         """body(D435i) 프레임 — 모니터링용 표시만 (OCR/제어 없음)."""
         try:
             raw = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            # 스냅샷용 — 회전 적용 "전" 센서 네이티브(참조, 복사 아님). camera_info의 K는
+            # 센서 원본 기준이라, 이미지도 원본이어야 픽셀↔K가 일치해 VLM 3D가 안 틀어짐
+            # (회전 후 프레임을 저장하면 몸체는 rot_body 기본값 자체가 0이 아니라 상시 불일치).
+            self._last_body_raw = raw
+            self._last_body_stamp = msg.header.stamp
             with state_lock:
                 rot = state["rot_body"]
             raw = _rotate_steps(raw, rot)
@@ -2140,6 +2364,7 @@ class ElevatorTracker(Node):
         return True
 
     def _on_joints(self, msg):
+        self._last_joint_state = msg   # 스냅샷용 — 전체 name/position (오프라인 FK 보험)
         for name, pos in zip(msg.name, msg.position):
             if name == "joint_lift":
                 with state_lock: state["lift"] = pos
@@ -2153,12 +2378,17 @@ class ElevatorTracker(Node):
         try:
             arr = np.frombuffer(msg.data, dtype=np.uint16).reshape(
                 (msg.height, msg.width))
+            # 스냅샷용 — 회전 적용 "전" 센서 네이티브(#P6, grip color·camera_info와 축 일치).
+            # 거리 샘플링용 self._depth_frame(회전 적용본, 아래)과는 별개 경로.
+            depth_native = arr.copy()
             # color와 동일한 회전 적용 → 거리 샘플링 좌표계 일치
             with state_lock:
                 rot = state["rot_grip"]
             arr = _rotate_steps(arr, rot)
             with self._depth_lock:
                 self._depth_frame = arr
+                self._depth_stamp = msg.header.stamp
+                self._last_grip_depth_native = depth_native
 
             # 벽 평행도 측정: 중앙 가로 띠의 10개 지점 depth를 직선에 fit.
             # 모든 점이 직선 ±2cm 안이면 "평면(벽)"으로 인정하고 기울기 계산,
@@ -2529,6 +2759,11 @@ class ElevatorTracker(Node):
     def _on_image(self, msg):
         try:
             raw   = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            # 스냅샷용 — 회전 적용 "전" 센서 네이티브(참조, 복사 아님). camera_info의 K는
+            # 센서 원본 기준이라 이미지도 원본이어야 픽셀↔K가 일치(#P6). 표시/OCR/서보용
+            # 회전 프레임(_raw_full, 아래)과는 별개 경로 — 그쪽은 그대로 유지.
+            self._last_grip_raw = raw
+            self._last_grip_stamp = msg.header.stamp
             # 회전을 리사이즈 전에 적용 → 화면/OCR/서보/depth가 모두 같은 방향 사용
             with state_lock:
                 rot = state["rot_grip"]

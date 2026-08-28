@@ -273,6 +273,18 @@
         <button class="btn btn-neutral" onclick="sendPull()">당김 트리거</button>
       </div>
     </div>
+
+    <div>
+      <h2>📸 스냅샷</h2>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-top:4px">
+        <div style="display:flex;gap:6px;align-items:center">
+          <input id="snapshot-label" type="text" placeholder="라벨(선택)"
+                 style="flex:1;background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:0.82rem;">
+          <button id="snapshot-btn" class="btn btn-primary btn-sm" onclick="takeSnapshot()" disabled>📸 촬영</button>
+        </div>
+        <div id="snapshot-result" style="font-size:0.72rem;color:var(--text-dim);min-height:1.2em;"></div>
+      </div>
+    </div>
    </div>
 
    <div class="ctrl-col">
@@ -493,6 +505,7 @@ function toggleCmd(dir, lxMul, azMul) {
     _sendCmd(true);
     cmdInterval = setInterval(() => _sendCmd(true), 100);
     _updateDpad();
+    _updateSnapshotBtn();
   }
 }
 
@@ -503,6 +516,7 @@ function _stopMove() {
   currentLx = 0; currentAz = 0;
   _sendCmd(false);
   _updateDpad();
+  _updateSnapshotBtn();
 }
 
 function _sendCmd(active) {
@@ -583,10 +597,43 @@ function _syncElevApp() {
     elevAppRunning = d.running;
     const t = document.getElementById('elev-app-toggle');
     if (t && document.activeElement !== t) t.checked = elevAppRunning;
+    _updateSnapshotBtn();
   }).catch(() => {});
 }
 _syncElevApp();
 setInterval(_syncElevApp, 3000);
+
+// 📸 스냅샷 — 엘베앱이 원본 저장(main.py는 게이트+컨텍스트 전달만). 이동 중/엘베앱 꺼짐이면 비활성
+// (새 폴링 추가 없이 기존 신호 재사용: activeDir=수동주행 중, autoJourneyActive=자동여정 중)
+let autoJourneyActive = false;
+function _updateSnapshotBtn() {
+  const btn = document.getElementById('snapshot-btn');
+  if (!btn) return;
+  btn.disabled = !elevAppRunning || !!activeDir || autoJourneyActive;
+  btn.style.opacity = btn.disabled ? '0.5' : '1';
+}
+function takeSnapshot() {
+  const label = document.getElementById('snapshot-label').value.trim();
+  const btn = document.getElementById('snapshot-btn');
+  const result = document.getElementById('snapshot-result');
+  btn.disabled = true;
+  result.style.color = 'var(--text-dim)';
+  result.textContent = '저장 중...';
+  fetch('/snapshot', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({label})})
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        result.style.color = 'var(--ok)';
+        result.textContent = `✅ ${d.dir}` + (d.missing && d.missing.length ? ` (missing: ${d.missing.join(', ')})` : '');
+      } else {
+        result.style.color = 'var(--bad)';
+        result.textContent = `❌ ${d.error || '실패'}`;
+      }
+    })
+    .catch(() => { result.style.color = 'var(--bad)'; result.textContent = '❌ 요청 실패'; })
+    .finally(() => _updateSnapshotBtn());
+}
 
 // 엘베 제어권 수동 부여/회수 — 자동 여정은 _auto_run이 자체 관리, 이건 수동 정렬 등 UI용
 let elevAuthorityGranted = false;
@@ -679,6 +726,8 @@ function renderAutoTrack(d) {
 // 상태 폴링 (1초) — 단계/메시지 표시 + '다음 확인' 버튼 활성/강조
 setInterval(() => {
   fetch('/auto_status').then(r => r.json()).then(d => {
+    autoJourneyActive = !!d.active;
+    _updateSnapshotBtn();
     const st = document.getElementById('auto-status');
     const cb = document.getElementById('auto-confirm-btn');
     const gb = document.getElementById('auto-go-btn');
