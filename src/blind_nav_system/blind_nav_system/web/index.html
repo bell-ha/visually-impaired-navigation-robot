@@ -104,6 +104,16 @@
   /* tab 배지 — 숫자 없이 점(dot)만 */
   .tab-badge { display:inline-block; width:6px; height:6px; border-radius:50%; background:#ef4444; margin-left:4px; vertical-align:middle; }
 
+  /* 준비상태 바 (2b) — 항상 노출(탭 무관), 관측 전용(클릭 동작 없음) */
+  .readiness-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 20px; background: #1e293b; border-bottom: 1px solid #334155; }
+  .readiness-pill { display: flex; align-items: baseline; gap: 5px; padding: 3px 10px; border-radius: 14px; font-size: 0.75rem; }
+  .readiness-label { font-weight: 700; }
+  .readiness-detail { opacity: 0.85; }
+  /* 배경은 은은한 tint만 — 색약 대비를 위해 detail 문자열이 항상 상태를 말로도 표현함. 기본값은 unknown(회색) */
+  .readiness-pill.status-unknown { background: #334155; color: #cbd5e1; }
+  .readiness-pill.status-ok      { background: #064e3b; color: #6ee7b7; }
+  .readiness-pill.status-bad     { background: #7f1d1d; color: #fca5a5; }
+
   /* ── 반응형: 반드시 스타일시트 맨 끝에 위치 (동일 특이도 규칙을 덮어쓰기 위해) ── */
   /* 화면 높이가 낮으면 패널을 2열로 펼쳐 스크롤 없이 모두 보이게 */
   @media (max-height: 1300px) and (min-width: 1100px) {
@@ -148,6 +158,14 @@
   <h1>시각장애인 안내 로봇 대시보드</h1>
   <span class="badge badge-auto" id="mode-badge">자동 모드</span>
 </header>
+<div class="readiness-bar" id="readiness-bar">
+  <div class="readiness-pill status-unknown" id="ready-amcl"><span class="readiness-label">측위</span><span class="readiness-detail">모름</span></div>
+  <div class="readiness-pill status-unknown" id="ready-battery"><span class="readiness-label">배터리</span><span class="readiness-detail">모름</span></div>
+  <div class="readiness-pill status-unknown" id="ready-handle"><span class="readiness-label">손잡이</span><span class="readiness-detail">모름</span></div>
+  <div class="readiness-pill status-unknown" id="ready-nav2"><span class="readiness-label">주행</span><span class="readiness-detail">모름</span></div>
+  <div class="readiness-pill status-unknown" id="ready-gripper_camera"><span class="readiness-label">그리퍼캠</span><span class="readiness-detail">모름</span></div>
+  <div class="readiness-pill status-unknown" id="ready-elev_app"><span class="readiness-label">엘베앱</span><span class="readiness-detail">모름</span></div>
+</div>
 <div class="layout">
   <div class="log-container">
     <div class="tab-bar">
@@ -835,6 +853,34 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
   }
 });
+
+// ── 준비상태 바 (2b) — 관측 전용, 백엔드 /readiness 폴링 ─────────────────────────
+const READINESS_KEYS = ['amcl', 'battery', 'handle', 'nav2', 'gripper_camera', 'elev_app'];
+
+function _renderReadinessPill(key, status, detailText, ageSec) {
+  const pill = document.getElementById('ready-' + key);
+  if (!pill) return;
+  pill.className = 'readiness-pill status-' + (status || 'unknown');
+  const ageStr = (ageSec !== null && ageSec !== undefined) ? ` ${ageSec}s` : '';
+  const text = detailText + ageStr;
+  pill.querySelector('.readiness-detail').textContent = text;
+  pill.title = text;
+}
+
+function pollReadiness() {
+  fetch('/readiness').then(r => r.json()).then(d => {
+    READINESS_KEYS.forEach(key => {
+      const sig = d[key];
+      if (!sig) { _renderReadinessPill(key, 'unknown', '모름', null); return; }
+      _renderReadinessPill(key, sig.status, sig.detail || '모름', sig.age_sec);
+    });
+  }).catch(() => {
+    // 대시보드 자체가 죽었을 때 초록 잔상 남기지 않게 — 전부 회색 "연결 끊김"
+    READINESS_KEYS.forEach(key => _renderReadinessPill(key, 'unknown', '연결 끊김', null));
+  });
+}
+pollReadiness();
+setInterval(pollReadiness, 2000);
 </script>
 </body>
 </html>
