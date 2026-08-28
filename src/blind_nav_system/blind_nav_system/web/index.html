@@ -266,13 +266,6 @@
         </div>
         <!-- 장애물 밀기 토글 제거 (2026-07-24 사용자 결정) — 백엔드 코드는 휴면 상태로 보존 -->
         <div class="toggle-row">
-          <span class="toggle-label">온라인 모드<span class="kbd">4</span></span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="net-mode-toggle" checked onchange="toggleNetMode()">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div class="toggle-row">
           <span class="toggle-label">🛗 엘리베이터 앱 실행<span class="kbd">5</span></span>
           <label class="toggle-switch">
             <input type="checkbox" id="elev-app-toggle" onchange="toggleElevatorApp()">
@@ -679,12 +672,6 @@ setInterval(() => {
   }).catch(() => {});
 }, 1000);
 
-let offlineMode = false;
-function toggleNetMode() {
-  offlineMode = !document.getElementById('net-mode-toggle').checked;
-  fetch('/net_mode', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({offline: offlineMode})});
-}
 function setRobotSpeed(v) {
   document.getElementById('robot-speed-val').textContent = parseFloat(v).toFixed(2);
   fetch('/robot_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
@@ -849,7 +836,7 @@ function killAllRobot() {
 const keyToDir = {'ArrowUp':['fwd',1,0],'ArrowDown':['bwd',-0.5,0],
                   'ArrowLeft':['left',0,1],'ArrowRight':['right',0,-1]};
 const FEATURE_KEYS = {1:'stow-btn', 2:'social-nav-toggle',
-                      4:'net-mode-toggle', 5:'elev-app-toggle'};   // 3(장애물 밀기) 제거 (2026-07-24)
+                      5:'elev-app-toggle'};   // 3(장애물 밀기)·4(온라인 모드) 제거 (2026-07-24/2026-08-28)
 const SYS_KEYS   = {1:'launch', 2:'rviz', 3:'battery', 4:'free', 5:'home'};
 const SYS_LABELS = {launch:'ROS2 Launch', rviz:'RViz2', battery:'배터리 확인',
                     free:'프로세스 정리', home:'홈 위치'};

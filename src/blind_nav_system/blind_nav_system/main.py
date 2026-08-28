@@ -1665,13 +1665,6 @@ def killall_robot():
     threading.Thread(target=_do, daemon=True).start()
     return jsonify(ok=True)
 
-@app.route("/net_mode", methods=["POST"])
-def set_net_mode():
-    offline = bool((request.json or {}).get("offline", False))
-    _write("iface", "/offline" if offline else "/online")
-    _log("WEB", f"네트워크 모드: {'🔴 오프라인' if offline else '🟢 온라인'}")
-    return jsonify(ok=True, offline=offline)
-
 # ── 시리얼 루프 ───────────────────────────────────────────────────────────────
 def serial_loop():
     if not _SERIAL_OK:
