@@ -533,6 +533,7 @@ def stop():
 
 # ── 엘리베이터 제어권 (주도권은 대시보드가 소유, 5000에 부여/회수) ─────────────
 _elev_authority = False   # 우리가 아는 엘리베이터 앱의 제어권 보유 상태
+_elev_lease_held = False  # 리스(=이동권+guard_off) 보유 여부 — 한 여정에 1회 부여, 층 이동 전 반납
 
 def _stop_armleft_proc():
     """armleft(팔 고정)를 확실히 종료 — 대시보드가 추적 못 하는 것(재시작 desync)도
@@ -860,19 +861,44 @@ def _elev_app_running() -> bool:
     except Exception:
         return False
 
-def _wait_and_grant_authority(timeout: float = 20.0):
-    """엘베앱 5000 서버가 응답할 때까지 기다렸다가 제어권 부여. 막 spawn한 직후엔
-    5000이 안 떠서 grant POST가 유실되므로, 뜬 뒤에 부여해야 확실히 닿는다.
-    (엘베앱은 시작 시 8080이 살아있으면 authority=False로 대기 → 여기서 켜줌)"""
+def _wait_elev_app_up(timeout: float = 20.0) -> bool:
+    """엘베앱 5000 서버가 응답할 때까지 대기. 막 spawn한 직후엔 5000이 안 떠서
+    POST가 유실되므로, 뜬 뒤에 호출해야 확실히 닿는다. 제어권은 절대 안 줌
+    (엘베앱 켜기 ≠ 제어권 주기 — 리스 부여는 _grant_elev_lease 몫)."""
     import urllib.request
     t0 = time.monotonic()
     while time.monotonic() - t0 < timeout:
         try:
             urllib.request.urlopen("http://localhost:5000/authority", timeout=0.5)
-            break            # 응답 = 5000 떴음
+            return True      # 응답 = 5000 떴음
         except Exception:
             time.sleep(0.4)
-    _set_elev_authority(True, "엘리베이터 앱 시작")
+    return False
+
+def _grant_elev_lease(granted: bool, reason: str = "") -> bool:
+    """제어권 리스 부여/회수 — 한 여정에 딱 1회, 층 이동 전 반납.
+    리스 보유 중엔 guard(라이다 충돌가드)가 꺼지므로, 반납 후 guard_off가
+    실제로 복원됐는지 실측 검증한다(의도가 아니라 실측 — POST 실패해도
+    _set_elev_authority는 내부 플래그를 갱신하므로 실측 없인 못 잡는다).
+    반환값은 호출부가 반드시 확인해야 함 — grant는 실패해도 fail-closed(안전)라
+    재시도 안 함(1회), revoke는 가드 복원이 핵심이라 2회 재시도."""
+    global _elev_lease_held
+    attempts = 1 if granted else 2
+    for i in range(attempts):
+        _set_elev_authority(granted, reason)
+        time.sleep(0.4)
+        st = _elev_status(timeout=1.0)
+        ok = bool(st) and (st.get("authority") is granted) and \
+             (granted or st.get("guard_off") is False)
+        _log("ELEVLEASE", f"리스={granted} 시도{i+1}/{attempts} → 실측 "
+                          f"authority={st and st.get('authority')} "
+                          f"guard_off={st and st.get('guard_off')} ({reason})")
+        if ok:
+            _elev_lease_held = granted
+            return True
+    if not granted:
+        _log("ELEVLEASE", "🚨 리스 반납 실패 — 가드 미복원 상태로 엘베앱이 살아있음")
+    return False
 
 @app.route("/elevator_app_status")
 def elevator_app_status():
@@ -880,6 +906,7 @@ def elevator_app_status():
 
 @app.route("/elevator_app", methods=["POST"])
 def elevator_app():
+    global _elev_lease_held
     data    = request.json or {}
     desired = data.get("running")     # True=시작, False=종료, None=토글
     running = _elev_app_running()
@@ -902,12 +929,15 @@ def elevator_app():
         except Exception:
             pass
         _procs.pop("elevator", None)
+        # 프로세스가 죽으면 리스는 물리적으로 소멸 — abort·수동종료·8단계가 전부
+        # 이 라우트를 지나므로 여기 한 곳만 리셋하면 죽은 앱에 finally가 재POST해
+        # 가짜 🚨를 내는 것도 자연히 없어짐(_elev_lease_held=False라 no-op)
+        _elev_lease_held = False
         _log("MAIN", "엘리베이터 앱 종료 + 제어권 회수 → 주행(nav) 복귀")
         return jsonify(ok=True, running=False)
 
-    # 이미 켜져 있음 → 제어권만 재확인
+    # 이미 켜져 있음 → 앱만 켜진 상태 유지, 제어권은 건드리지 않음(엘베앱 켜기 ≠ 제어권 주기)
     if desired is True and running:
-        threading.Thread(target=_wait_and_grant_authority, daemon=True).start()
         return jsonify(ok=True, running=True)
 
     # 시작 (경로는 __file__ 기준이라 cwd 무관, 부모 env(ROS·FastDDS) 상속)
@@ -919,9 +949,10 @@ def elevator_app():
     )
     _procs["elevator"] = proc
     threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
-    # 5000 뜨면 자동으로 제어권 부여(+armleft 자동 종료는 _set_elev_authority가 처리)
-    threading.Thread(target=_wait_and_grant_authority, daemon=True).start()
-    _log("MAIN", f"엘리베이터 앱 시작 PID={proc.pid} → 5000 뜨면 제어권 자동 부여")
+    # 앱만 켠다 — 제어권은 안 줌(엘베앱 켜기 ≠ 제어권 주기). 수동 사용 시 UI의
+    # "제어권 부여" 토글로, 자동 여정 중엔 _auto_run이 _grant_elev_lease로 부여.
+    threading.Thread(target=_wait_elev_app_up, daemon=True).start()
+    _log("MAIN", f"엘리베이터 앱 시작 PID={proc.pid} (제어권은 별도 부여 필요)")
     return jsonify(ok=True, running=True)
 
 # ── 반자동 엘리베이터 여정 오케스트레이터 ──────────────────────────────────────────
@@ -1016,11 +1047,11 @@ def _elev_post(path, payload=None, timeout=20):
         _log("AUTO", f"엘베 {path} 실패: {e}")
         return None
 
-def _elev_status():
+def _elev_status(timeout=3):
     """엘베앱 상태(/status) 조회 — dict 또는 None. ready=정렬완료, door_open 등 포함."""
     try:
         import urllib.request
-        r = urllib.request.urlopen("http://localhost:5000/status", timeout=3)
+        r = urllib.request.urlopen("http://localhost:5000/status", timeout=timeout)
         return json.loads(r.read().decode() or "{}")
     except Exception:
         return None
@@ -1121,7 +1152,7 @@ def _auto_run(dest):
             _auto_set("오류", "승차지점 도착 실패(취소/시간초과)"); return
         _auto_set("도착", "승차지점 도착 ✅", phase="board")
 
-        # 2) 엘베앱 ON (제어권/armleft 자동)
+        # 2) 엘베앱 ON + 제어권 리스 부여 (한 여정에 1회 — 유일한 자동 grant 지점)
         _auto_set("엘베시작", "엘리베이터 앱 시작 + 제어권 부여...", phase="app")
         if not _elev_app_running():
             proc = subprocess.Popen(
@@ -1129,8 +1160,10 @@ def _auto_run(dest):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             _procs["elevator"] = proc
             threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
-        threading.Thread(target=_wait_and_grant_authority, daemon=True).start()
-        time.sleep(6)  # 5000 + 제어권 부여 대기
+        if not _wait_elev_app_up(20):
+            _auto_set("오류", "엘베앱 기동 실패"); return
+        if not _grant_elev_lease(True, "엘베 여정 시작"):
+            _auto_set("오류", "제어권 부여 실패 — 여정 중단"); return
 
         # ── 엘리베이터 6 시나리오 ──────────────────────────────────────────
         #   버튼 선택(상/하행·층)·정렬 = 자동 / 누르기(press) = '다음'에 포함.
@@ -1187,6 +1220,14 @@ def _auto_run(dest):
         _elev_scene(5)
         time.sleep(3)
 
+        # 리스 반납 — 지도전환·AMCL초기화·목적지주행은 가드(라이다 충돌가드)가
+        # 켜진 상태로 시작해야 함. 앱 종료(8단계)까지 리스를 끌고 가지 않는다.
+        if not _grant_elev_lease(False, "하차 완료"):
+            _auto_abort_elev()   # 순서 중요: abort가 먼저(문구 "취소" 세팅) →
+                                  # 아래 _auto_set("오류",...)로 덮어써야 UI에 사고원인이 남음
+            _auto_set("오류", "🚨 엘베 가드 미복원 — 여정 중단(앱 강제종료)")
+            return
+
         # 7) 지도 전환 + 하차지점 초기화 (자동)
         _auto_set("지도전환", f"{dest_floor}층 지도 전환 + 하차지점 초기화", phase="exit")
         _http_self("/switch_map", {"floor": dest_floor, "init_exit": True})
@@ -1205,6 +1246,13 @@ def _auto_run(dest):
     except Exception as e:
         _auto_set("오류", f"여정 예외: {e!r}")
     finally:
+        # 최종 보루 — 위 정상 반납(하차 직후)을 못 탄 모든 이탈 경로(예외·취소·
+        # 좌표없음 등)에서 리스가 켜진 채 방치되면 가드가 계속 꺼져 있다.
+        try:
+            if _elev_lease_held and not _grant_elev_lease(False, "여정 종료(finally)"):
+                _log("ELEVLEASE", "🚨 최후보루 반납 실패")
+        except Exception:
+            pass
         with _auto_lock:
             _AUTO["active"] = False; _AUTO["waiting"] = False
 

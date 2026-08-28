@@ -280,6 +280,13 @@
           </label>
         </div>
         <div class="toggle-row">
+          <span class="toggle-label" title="앱 실행과 별개 — 이동권(guard 해제). 수동 정렬 등에 사용">🔑 엘베 제어권</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="elev-authority-toggle" onchange="toggleElevAuthority()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
           <span class="toggle-label">🗺 지도(층)</span>
           <span style="display:flex;gap:6px;align-items:center;">
             <select id="floor-sel" style="background:#223;color:#cde;border:1px solid #345;border-radius:4px;padding:3px 6px;">
@@ -537,7 +544,7 @@ function queryPose() {
   }).catch(() => {});
 }
 
-// 엘리베이터 앱 on-demand 실행 (켜면 앱 시작+제어권 자동 부여, 끄면 종료+제어권 회수)
+// 엘리베이터 앱 on-demand 실행 (앱 실행 ≠ 제어권 — 제어권은 아래 toggleElevAuthority)
 let elevAppRunning = false;
 function toggleElevatorApp() {
   const desired = document.getElementById('elev-app-toggle').checked;
@@ -560,6 +567,29 @@ function _syncElevApp() {
 }
 _syncElevApp();
 setInterval(_syncElevApp, 3000);
+
+// 엘베 제어권 수동 부여/회수 — 자동 여정은 _auto_run이 자체 관리, 이건 수동 정렬 등 UI용
+let elevAuthorityGranted = false;
+function toggleElevAuthority() {
+  const desired = document.getElementById('elev-authority-toggle').checked;
+  fetch('/elev_authority', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({granted: desired})
+  }).then(r => r.json()).then(d => {
+    elevAuthorityGranted = d.granted;
+    document.getElementById('elev-authority-toggle').checked = elevAuthorityGranted;
+  }).catch(() => {
+    document.getElementById('elev-authority-toggle').checked = elevAuthorityGranted;
+  });
+}
+function _syncElevAuthority() {
+  fetch('/elev_authority').then(r => r.json()).then(d => {
+    elevAuthorityGranted = d.granted;
+    const t = document.getElementById('elev-authority-toggle');
+    if (t && document.activeElement !== t) t.checked = elevAuthorityGranted;
+  }).catch(() => {});
+}
+_syncElevAuthority();
+setInterval(_syncElevAuthority, 3000);
 
 // ── 자동 여정 (반자동 엘베 오케스트레이터) ──────────────────────────────────
 // 목적지 드롭다운 채우기 (엘베 탑승/하차 지점은 제외)
