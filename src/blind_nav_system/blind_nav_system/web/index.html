@@ -35,13 +35,6 @@
   .src-POSE     { color: #f0abfc; }
   .src-ARM      { color: #fca5a5; }
 
-  /* 의자 감지 상태 카드 */
-  .chair-card { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 10px 14px; }
-  .chair-card.detected { border-color: #fb923c; }
-  .chair-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #475569; margin-right: 6px; vertical-align: middle; }
-  .chair-dot.on { background: #fb923c; box-shadow: 0 0 6px #fb923c; }
-  .chair-status { font-size: 0.82rem; color: #e2e8f0; font-weight: 600; }
-  .chair-detail { font-size: 0.75rem; color: #94a3b8; margin-top: 4px; }
   .ts { color: #475569; margin-right: 6px; }
 
   /* 컨트롤 패널 */
@@ -67,10 +60,7 @@
   .dpad-btn { background: #334155; border: none; border-radius: 10px; color: #e2e8f0; font-size: 1.4rem; cursor: pointer; user-select: none; transition: background .1s; }
   .dpad-btn.pressed { background: #2563eb; box-shadow: 0 0 0 3px #3b82f6; }
   .dpad-center { background: #1e293b; cursor: default; }
-  .speed-wrap { display: flex; align-items: center; gap: 8px; }
-  .speed-wrap label { font-size: 0.75rem; color: #94a3b8; white-space: nowrap; }
   input[type=range] { flex: 1; accent-color: #3b82f6; }
-  .speed-val { font-size: 0.75rem; color: #94a3b8; width: 32px; text-align: right; }
 
   /* 토글 스위치 */
   .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #1e293b; }
@@ -139,10 +129,8 @@
     header { padding: 6px 20px; }
     #kbd-help { font-size: 0.66rem !important; line-height: 1.5 !important;
                 padding: 5px 8px !important; margin-top: 6px !important; }
-    #manual-section .speed-wrap { margin-bottom: 6px !important; }
     #manual-section .btn-danger { margin-top: 6px !important; font-size: 0.8rem !important; }
     #sys-proc-list > div:last-child { margin-top: 6px !important; padding-top: 6px !important; }
-    .chair-card { padding: 6px 12px; }
     .toggle-row { padding: 2px 0; }
     .toggle-switch { width: 38px; height: 20px; }
     .toggle-slider::before { width: 14px; height: 14px; }
@@ -213,12 +201,6 @@
 
     <div id="manual-section" style="display:none">
       <h2>수동 조작</h2>
-      <div class="speed-wrap" style="margin-bottom:10px">
-        <label>속도</label>
-        <input type="range" id="speed" min="5" max="40" value="15"
-               oninput="setSpeed(parseInt(this.value))">
-        <span class="speed-val" id="spv">15</span>
-      </div>
       <div class="dpad">
         <div></div>
         <button class="dpad-btn" id="btn-fwd"   onclick="toggleCmd('fwd',   1,    0)">↑</button>
@@ -323,17 +305,6 @@
     </div>
 
     <div>
-      <h2>의자 감지</h2>
-      <div class="chair-card" id="chair-card">
-        <div>
-          <span class="chair-dot" id="chair-dot"></span>
-          <span class="chair-status" id="chair-status">감지 없음</span>
-        </div>
-        <div class="chair-detail" id="chair-detail"></div>
-      </div>
-    </div>
-
-    <div>
       <h2>시스템 프로세스</h2>
       <div id="sys-proc-list" style="margin-top:6px">
         <div class="sys-proc-row" id="sysrow-launch">
@@ -373,9 +344,9 @@
       <h2>속도 설정</h2>
       <div id="speed-settings" style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
         <div>
-          <label style="color:#94a3b8;font-size:0.8rem">로봇 속도: <span id="robot-speed-val">0.26</span> m/s</label>
-          <input type="range" min="0.10" max="0.50" step="0.02" value="0.26" style="width:100%"
-                 oninput="setRobotSpeed(this.value)">
+          <label style="color:#94a3b8;font-size:0.8rem">속도: <span id="spv">0.26</span> m/s</label>
+          <input type="range" id="speed" min="0.10" max="0.40" step="0.02" value="0.26" style="width:100%"
+                 oninput="_speedDisplay(this.value)" onchange="_speedApply(this.value)">
         </div>
         <div>
           <label style="color:#94a3b8;font-size:0.8rem">TTS 속도: <span id="tts-speed-val">1.5</span>x</label>
@@ -436,20 +407,32 @@ function loadLocations() {
 }
 loadLocations();
 
-function getSpeed() { return parseInt(document.getElementById('speed').value) / 100; }
+function getSpeed() { return parseFloat(document.getElementById('speed').value); }   // 슬라이더 값 = m/s 직접
 
 const DIR_MUL = {fwd:[1,0], bwd:[-0.5,0], left:[0,1], right:[0,-1]};
 
-function setSpeed(v) {
-  v = Math.max(5, Math.min(40, v));
-  document.getElementById('speed').value = v;
-  document.getElementById('spv').textContent = v;
-  // 주행 중이면 새 속도 즉시 반영
+// oninput = 표시만 (드래그 중 /robot_speed가 매번 spawn하면 프로세스 처닝) — 손 뗄 때 _speedApply가 실제 반영
+function _speedDisplay(v) {
+  document.getElementById('spv').textContent = parseFloat(v).toFixed(2);
+}
+
+// onchange(또는 키패드 +/-) = 실제 반영: 수동 teleop 속도 + /robot_speed(자율주행) POST 1회
+function _speedApply(v) {
+  v = parseFloat(v);
+  _speedDisplay(v);
   if (activeDir) {
     const [lxMul, azMul] = DIR_MUL[activeDir];
-    currentLx = lxMul * v / 100;
-    currentAz = azMul * v / 100 * 2;
+    currentLx = lxMul * v;
+    currentAz = azMul * v * 2;
   }
+  fetch('/robot_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: v})});
+}
+
+function setSpeed(v) {
+  v = Math.max(0.10, Math.min(0.40, Math.round(v / 0.02) * 0.02));
+  v = parseFloat(v.toFixed(2));
+  document.getElementById('speed').value = v;
+  _speedApply(v);
 }
 
 // 토글: 같은 버튼 재클릭 → 정지 / 다른 버튼 클릭 → 방향 전환
@@ -672,10 +655,6 @@ setInterval(() => {
   }).catch(() => {});
 }, 1000);
 
-function setRobotSpeed(v) {
-  document.getElementById('robot-speed-val').textContent = parseFloat(v).toFixed(2);
-  fetch('/robot_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
-}
 function setTtsSpeed(v) {
   document.getElementById('tts-speed-val').textContent = parseFloat(v).toFixed(1);
   fetch('/tts_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
@@ -750,29 +729,6 @@ es.onmessage = e => {
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
-
-// 의자 감지 상태 폴링
-const DECISION_LABEL = {push:'밀기', detour:'우회', probing:'탐침 중'};
-setInterval(() => {
-  fetch('/obstacle_status').then(r => r.json()).then(d => {
-    const card   = document.getElementById('chair-card');
-    const dot    = document.getElementById('chair-dot');
-    const status = document.getElementById('chair-status');
-    const detail = document.getElementById('chair-detail');
-    if (d.detected) {
-      card.classList.add('detected');
-      dot.classList.add('on');
-      status.textContent = `의자 감지 (${d.dist ?? '?'} m)`;
-      const dec = d.decision ? DECISION_LABEL[d.decision] || d.decision : '판단 대기';
-      detail.textContent = `결정: ${dec}`;
-    } else {
-      card.classList.remove('detected');
-      dot.classList.remove('on');
-      status.textContent = '감지 없음';
-      detail.textContent = '';
-    }
-  }).catch(() => {});
-}, 1000);
 
 // ── 시스템 프로세스 ──────────────────────────────────────────────────────────
 const SYS_NAMES = ['launch','rviz','battery','free','home'];
@@ -880,10 +836,10 @@ document.addEventListener('keydown', e => {
     toggleCmd(dir, lx, az);
     e.preventDefault();
   } else if (e.key === '+') {
-    setSpeed(parseInt(document.getElementById('speed').value) + 5);
+    setSpeed(parseFloat(document.getElementById('speed').value) + 0.02);
     e.preventDefault();
   } else if (e.key === '-') {
-    setSpeed(parseInt(document.getElementById('speed').value) - 5);
+    setSpeed(parseFloat(document.getElementById('speed').value) - 0.02);
     e.preventDefault();
   }
 });
