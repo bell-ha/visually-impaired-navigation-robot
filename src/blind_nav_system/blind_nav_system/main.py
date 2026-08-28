@@ -349,7 +349,14 @@ def _readiness_poll_loop():
                 r = requests.get("http://127.0.0.1:5000/ping", timeout=(0.3, 0.5),
                                  proxies={"http": None, "https": None})
                 if r.status_code == 200:
-                    _ready_val["elev_app"] = {"status": "ok", "detail": "응답"}
+                    # 리스 만료(deadman) 표면화 — 엘베가 스스로 권한을 내린 채
+                    # 대기 중이면 "정상 응답"이 아니라 재부여가 필요한 상태
+                    st = _elev_status(timeout=1.0)
+                    if st and st.get("lease_expired"):
+                        _ready_val["elev_app"] = {"status": "bad",
+                                                  "detail": "엘베 리스 만료 — 제어권 재부여 필요"}
+                    else:
+                        _ready_val["elev_app"] = {"status": "ok", "detail": "응답"}
                 else:
                     _ready_val["elev_app"] = {"status": "bad", "detail": f"HTTP {r.status_code}"}
             except Exception:
@@ -534,6 +541,14 @@ def stop():
 # ── 엘리베이터 제어권 (주도권은 대시보드가 소유, 5000에 부여/회수) ─────────────
 _elev_authority = False   # 우리가 아는 엘리베이터 앱의 제어권 보유 상태
 _elev_lease_held = False  # 리스(=이동권+guard_off) 보유 여부 — 한 여정에 1회 부여, 층 이동 전 반납
+_lease_stop = threading.Event()   # set()이면 하트비트 중단 — 리스 보유 중에만 clear() 상태로 돎
+_lease_renewer_thread = None      # 하트비트 스레드 핸들 (반납 시 join용)
+
+def _lease_renewer():
+    """리스 하트비트(2초 주기) — 엘베앱은 6초(LEASE_TTL) 내 재갱신 없으면 자체 회수(deadman).
+    반드시 별도 스레드에서 돈다(_auto_run은 확인 대기로 최대 15분 블록될 수 있음)."""
+    while not _lease_stop.wait(2.0):
+        _set_elev_authority(True, "리스 갱신", quiet=True)
 
 def _stop_armleft_proc():
     """armleft(팔 고정)를 확실히 종료 — 대시보드가 추적 못 하는 것(재시작 desync)도
@@ -550,18 +565,22 @@ def _stop_armleft_proc():
         pass
     _procs.pop("armleft", None)
 
-def _set_elev_authority(granted: bool, reason: str = ""):
+def _set_elev_authority(granted: bool, reason: str = "", quiet: bool = False):
     """엘리베이터 앱에 이동 제어권 부여/회수. 회수 시 엘리베이터는 즉시 전면
     정지(바퀴 정지·타겟 해제·안무 중단)하고 이후 모든 이동을 거부한다.
-    구버전 엘리베이터 앱(엔드포인트 없음)이면 /reset 폴백. 꺼져 있으면 무시."""
+    구버전 엘리베이터 앱(엔드포인트 없음)이면 /reset 폴백. 꺼져 있으면 무시.
+    quiet=True면 로그를 안 남김 — 리스 하트비트(2초 주기)가 다른 로그를 덮지 않게."""
     global _elev_authority
     # 대시보드 의도를 항상 반영 — 엘리베이터 앱(5000)이 안 떠서 POST가 실패해도
     # 토글이 되돌아오지 않게. (JS 폴링이 이 값으로 토글을 동기화하므로)
     _elev_authority = granted
     if granted:
-        # 엘리베이터가 팔(트래젝토리 액션)을 써야 함 → armleft를 반드시 종료(팔 넘겨줌)
-        _stop_armleft_proc()
-        _log("MAIN", "엘리베이터 제어권 부여 → armleft 자동 종료")
+        # 엘리베이터가 팔(트래젝토리 액션)을 써야 함 → armleft를 반드시 종료(팔 넘겨줌).
+        # quiet(하트비트)면 생략 — 상태변화 없는 재확인일 뿐이라 이미 첫 grant(non-quiet)
+        # 에서 멈췄음. 매번 pkill을 새로 스폰하면 DDS churn(#22와 같은 패턴).
+        if not quiet:
+            _stop_armleft_proc()
+            _log("MAIN", "엘리베이터 제어권 부여 → armleft 자동 종료")
     try:
         import urllib.request
         req = urllib.request.Request(
@@ -569,15 +588,17 @@ def _set_elev_authority(granted: bool, reason: str = ""):
             data=json.dumps({"granted": granted}).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
         urllib.request.urlopen(req, timeout=1)
-        _log("MAIN", f"엘리베이터 제어권 {'부여' if granted else '회수'}"
-                     + (f" ({reason})" if reason else ""))
+        if not quiet:
+            _log("MAIN", f"엘리베이터 제어권 {'부여' if granted else '회수'}"
+                         + (f" ({reason})" if reason else ""))
     except Exception:
         if not granted:
             try:   # 폴백: 구버전 앱이면 최소한 타겟 해제
                 import urllib.request
                 urllib.request.urlopen(urllib.request.Request(
                     "http://localhost:5000/reset", method="POST"), timeout=1)
-                _log("MAIN", "엘리베이터 /authority 없음 → /reset 폴백")
+                if not quiet:
+                    _log("MAIN", "엘리베이터 /authority 없음 → /reset 폴백")
             except Exception:
                 pass
 
@@ -882,7 +903,14 @@ def _grant_elev_lease(granted: bool, reason: str = "") -> bool:
     _set_elev_authority는 내부 플래그를 갱신하므로 실측 없인 못 잡는다).
     반환값은 호출부가 반드시 확인해야 함 — grant는 실패해도 fail-closed(안전)라
     재시도 안 함(1회), revoke는 가드 복원이 핵심이라 2회 재시도."""
-    global _elev_lease_held
+    global _elev_lease_held, _lease_renewer_thread
+    if not granted:
+        # 반납 진입 시 하트비트부터 멈춘다 — 안 그러면 갱신 스레드가 반납 직후
+        # 다시 True로 되돌릴 수 있음(revoke가 항상 하트비트보다 우선해야 함)
+        _lease_stop.set()
+        if _lease_renewer_thread is not None:
+            _lease_renewer_thread.join(timeout=1.0)
+            _lease_renewer_thread = None
     attempts = 1 if granted else 2
     for i in range(attempts):
         _set_elev_authority(granted, reason)
@@ -895,6 +923,10 @@ def _grant_elev_lease(granted: bool, reason: str = "") -> bool:
                           f"guard_off={st and st.get('guard_off')} ({reason})")
         if ok:
             _elev_lease_held = granted
+            if granted:
+                _lease_stop.clear()
+                _lease_renewer_thread = threading.Thread(target=_lease_renewer, daemon=True)
+                _lease_renewer_thread.start()
             return True
     if not granted:
         _log("ELEVLEASE", "🚨 리스 반납 실패 — 가드 미복원 상태로 엘베앱이 살아있음")
@@ -906,13 +938,16 @@ def elevator_app_status():
 
 @app.route("/elevator_app", methods=["POST"])
 def elevator_app():
-    global _elev_lease_held
+    global _elev_lease_held, _lease_renewer_thread
     data    = request.json or {}
     desired = data.get("running")     # True=시작, False=종료, None=토글
     running = _elev_app_running()
 
     # 종료 (또는 토글인데 켜져 있음)
     if desired is False or (desired is None and running):
+        # 0) 하트비트부터 정지 — 앱 kill 전에 걸어야 종료 창 동안 재부여가 안 튐
+        #    (phantom 하트비트가 재기동된 앱에 조용히 재부여하는 갭 차단)
+        _lease_stop.set()
         # 1) 제어권 먼저 회수 → 엘베가 즉시 정지·타겟 해제 (프로세스 살아있을 때 받게)
         _set_elev_authority(False, "엘리베이터 앱 종료")
         time.sleep(0.3)
@@ -929,6 +964,9 @@ def elevator_app():
         except Exception:
             pass
         _procs.pop("elevator", None)
+        if _lease_renewer_thread is not None:
+            _lease_renewer_thread.join(timeout=1.0)
+            _lease_renewer_thread = None
         # 프로세스가 죽으면 리스는 물리적으로 소멸 — abort·수동종료·8단계가 전부
         # 이 라우트를 지나므로 여기 한 곳만 리셋하면 죽은 앱에 finally가 재POST해
         # 가짜 🚨를 내는 것도 자연히 없어짐(_elev_lease_held=False라 no-op)

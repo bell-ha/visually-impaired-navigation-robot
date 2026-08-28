@@ -321,6 +321,10 @@ state = {
                             # 카메라·OCR·UI 관찰은 유지. fail-closed: 기본 False,
                             # /authority로 명시적으로 줄 때만 True(main()의
                             # --standalone 플래그로 켠 단독 모드는 예외).
+    "lease_deadline": 0.0,  # 리스 만료 시각(monotonic) — 대시보드 하트비트(2s)가 갱신,
+                            # 워치독이 이 시각을 넘기면(LEASE_TTL=6s 무갱신) 자체 회수
+    "lease_expired":  False,  # 마지막 회수가 워치독(리스 만료)이었는지 — /status로 노출,
+                              # 대시보드가 "제어권 재부여 필요" 표시에 사용
 }
 # RLock(재진입 허용): _dlog가 내부에서 이 락을 잡으므로, 락 보유 중 _dlog 호출이
 # 일반 Lock이면 자기 자신과 교착 → 앱 전체 동결 (2026-07-15 ③ 문대기 동결 사건)
@@ -1180,6 +1184,7 @@ def status():
                    dz=_dead_zone_px(s.get("target_dist")),
                    scene=s.get("scene"), scene_acc=s.get("scene_acc"),
                    authority=bool(s.get("authority", False)),
+                   lease_expired=bool(s.get("lease_expired")),
                    clear_f=clear_f, clear_b=clear_b,
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
                    door_base=s.get("door_base"))
@@ -1522,6 +1527,46 @@ def reset():
         state["press_ready"]  = False
     return jsonify(ok=True)
 
+LEASE_TTL = 6.0   # 리스 만료 임계값(초) — 대시보드 하트비트 주기(2s)의 3배 여유
+
+def _revoke_authority(reason: str, expired: bool = False):
+    """제어권 강제 회수(공통 경로) — 즉시 전면 정지 + 안전 복구(가드 ON).
+    /authority 핸들러(대시보드 요청)와 워치독(리스 만료)이 이 함수 하나를 공유한다
+    (중복 금지 — 회수 로직이 두 곳에 있으면 한쪽만 고치는 실수가 난다).
+    state_lock은 RLock이지만 _dlog가 내부에서 다시 이 락을 잡으므로(L321-323 부근
+    동결사건 주석) — publish/dlog는 반드시 락을 놓은 뒤 실행한다."""
+    node = _node_ref[0]
+    with state_lock:
+        prev = bool(state.get("authority", False))
+        state["authority"]     = False
+        state["target_text"]   = None
+        state["phase"]         = "SELECT"
+        state["centered"]      = False
+        state["press_ready"]   = False
+        state["guard_off"]     = False   # 엘베 밖 = 충돌 보호 가드 다시 ON
+        state["lease_expired"] = expired
+    if node and prev:
+        node._step_abort = True                # 수동 스텝·자동 안무 즉시 탈출
+        try:
+            node._cmd_pub.publish(Twist())     # 바퀴 정지 (안전 최우선)
+        except Exception:
+            pass
+        node._dlog(f"[AUTH] ⛔ 제어권 회수됨 ({reason}) — 모든 이동 중단·차단, 관찰만 가능")
+
+def _lease_watchdog():
+    """리스 deadman — 대시보드 하트비트(2s)가 끊기면 LEASE_TTL(6s) 후 엘베가 스스로
+    권한을 내리고 가드를 복원한다. 순수 데몬 스레드(ROS 타이머 아님) — 감시자가
+    ROS 스핀 스레드와 운명을 같이하면 정작 감시해야 할 상황(스핀 죽음)에서 같이
+    죽는다. 만료 판정만 락 안에서, 회수 실행(_revoke_authority)은 락 밖에서."""
+    while True:
+        time.sleep(0.5)
+        with state_lock:
+            if not state.get("authority"):
+                continue
+            if time.monotonic() < state.get("lease_deadline", 0):
+                continue
+        _revoke_authority("리스 만료 — 대시보드 접촉 끊김", expired=True)
+
 @app.route("/authority", methods=["GET", "POST"])
 def authority_route():
     """이동 제어권 부여/회수 — 대시보드(8080)가 호출하는 주도권 관리 API.
@@ -1530,33 +1575,22 @@ def authority_route():
         with state_lock:
             return jsonify(granted=bool(state.get("authority", False)))
     granted = bool((request.json or {}).get("granted", False))
+    if not granted:
+        _revoke_authority("대시보드")
+        return jsonify(ok=True, granted=False)
     node = _node_ref[0]
     with state_lock:
         prev = bool(state.get("authority", False))
-        state["authority"] = granted
-        if granted:
-            # 엘베 모드 진입: 좁은 엘베에서 베이스 전후 이동이 필요하고, 라이다 가드가
-            # 켜져있으면 벽/문을 장애물로 보고 이동을 막음 → 몸체이동 ON + 가드 OFF 자동.
-            state["base_align"] = True
-            state["guard_off"]  = True
-        else:
-            # 회수 = 즉시 전면 정지 + 안전 복구: 타겟 해제 + 진행 중 스텝/안무 중단 + 가드 ON
-            state["target_text"] = None
-            state["phase"]       = "SELECT"
-            state["centered"]    = False
-            state["press_ready"] = False
-            state["guard_off"]   = False   # 엘베 밖 = 충돌 보호 가드 다시 ON
-    if node and prev != granted:
-        if not granted:
-            node._step_abort = True                # 수동 스텝·자동 안무 즉시 탈출
-            try:
-                node._cmd_pub.publish(Twist())     # 바퀴 정지 (안전 최우선)
-            except Exception:
-                pass
-            node._dlog("[AUTH] ⛔ 제어권 회수됨 (대시보드) — 모든 이동 중단·차단, 관찰만 가능")
-        else:
-            node._dlog("[AUTH] ✅ 제어권 부여됨 — 이동 가능 (몸체이동 ON + 가드 OFF 자동)")
-    return jsonify(ok=True, granted=granted)
+        # 엘베 모드 진입: 좁은 엘베에서 베이스 전후 이동이 필요하고, 라이다 가드가
+        # 켜져있으면 벽/문을 장애물로 보고 이동을 막음 → 몸체이동 ON + 가드 OFF 자동.
+        state["authority"]      = True
+        state["base_align"]     = True
+        state["guard_off"]      = True
+        state["lease_deadline"] = time.monotonic() + LEASE_TTL  # 하트비트(재POST)마다 갱신
+        state["lease_expired"]  = False
+    if node and not prev:
+        node._dlog("[AUTH] ✅ 제어권 부여됨 — 이동 가능 (몸체이동 ON + 가드 OFF 자동)")
+    return jsonify(ok=True, granted=True)
 
 @app.route("/wrist_forward", methods=["POST"])
 def wrist_forward():
@@ -3894,6 +3928,10 @@ def main():
     _standalone = "--standalone" in _sys.argv
     with state_lock:
         state["authority"] = _standalone
+        if _standalone:
+            # 단독모드 = 대시보드 없음 = 하트비트 없음 → 워치독(리스 deadman) 면제.
+            # inf는 /status에 노출 안 되는 내부값이라 JSON 직렬화에 안전.
+            state["lease_deadline"] = float("inf")
     if _diaglog:
         _diaglog.log("AUTH", f"제어권 초기화: standalone={_standalone} → authority={_standalone}")
     print(("제어권: 단독 모드 (--standalone, 보유)" if _standalone
@@ -3932,6 +3970,9 @@ def main():
         # SIGTERM(VSCode 정지 등)으로 죽여도 finally 정리가 돌게 흘려보냄 →
         # 잔재 감소 + "어떻게 죽었나" 기록
         _diag.install_signal_logging(_diaglog, reraise=True)
+
+    # 리스 deadman — 순수 데몬 스레드(ROS 스핀과 운명 분리, 스핀 죽어도 감시 유지)
+    threading.Thread(target=_lease_watchdog, daemon=True).start()
 
     try:
         rclpy.spin(node)
