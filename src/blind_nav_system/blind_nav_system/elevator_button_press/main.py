@@ -316,10 +316,11 @@ state = {
     "align_note":   None,   # X정렬 상태 메시지
     "pressing":     False,  # 누르기 시퀀스 진행 중
     "press_status": None,   # 누르기 진행 메시지
-    "authority":    True,   # 이동 제어권 — 대시보드(8080)가 부여/회수하는 주도권.
+    "authority":    False,   # 이동 제어권 — 대시보드(8080)가 부여/회수하는 주도권.
                             # False면 모든 이동(서보·스캔·패드·안무·press) 거부,
-                            # 카메라·OCR·UI 관찰은 유지. 시작 시 대시보드가 떠
-                            # 있으면 False(부여 대기), 없으면 True(단독 개발 모드).
+                            # 카메라·OCR·UI 관찰은 유지. fail-closed: 기본 False,
+                            # /authority로 명시적으로 줄 때만 True(main()의
+                            # --standalone 플래그로 켠 단독 모드는 예외).
 }
 # RLock(재진입 허용): _dlog가 내부에서 이 락을 잡으므로, 락 보유 중 _dlog 호출이
 # 일반 Lock이면 자기 자신과 교착 → 앱 전체 동결 (2026-07-15 ③ 문대기 동결 사건)
@@ -328,7 +329,7 @@ state_lock = threading.RLock()
 def _authority_ok() -> bool:
     """이동 제어권 확인 — 모든 이동 진입점의 공통 관문."""
     with state_lock:
-        return bool(state.get("authority", True))
+        return bool(state.get("authority", False))
 
 # 판단/행동 로그 버퍼 (웹 패널 표시 + 복사용). HTTP 접근 로그는 침묵시킴.
 _DECISIONS = collections.deque(maxlen=400)
@@ -1178,7 +1179,7 @@ def status():
                    lock_shape=bool(s.get("lock_shape")),
                    dz=_dead_zone_px(s.get("target_dist")),
                    scene=s.get("scene"), scene_acc=s.get("scene_acc"),
-                   authority=bool(s.get("authority", True)),
+                   authority=bool(s.get("authority", False)),
                    clear_f=clear_f, clear_b=clear_b,
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
                    door_base=s.get("door_base"))
@@ -1527,11 +1528,11 @@ def authority_route():
     회수 시: 진행 중인 모든 이동 즉시 중단 + 바퀴 정지 + 타겟 해제."""
     if request.method == "GET":
         with state_lock:
-            return jsonify(granted=bool(state.get("authority", True)))
+            return jsonify(granted=bool(state.get("authority", False)))
     granted = bool((request.json or {}).get("granted", False))
     node = _node_ref[0]
     with state_lock:
-        prev = bool(state.get("authority", True))
+        prev = bool(state.get("authority", False))
         state["authority"] = granted
         if granted:
             # 엘베 모드 진입: 좁은 엘베에서 베이스 전후 이동이 필요하고, 라이다 가드가
@@ -1713,7 +1714,7 @@ class ElevatorTracker(Node):
         direction = 1.0 if move_m > 0 else -1.0
         with state_lock:
             guard_off = state["guard_off"]
-            if not state["base_align"] or not state.get("authority", True):
+            if not state["base_align"] or not state.get("authority", False):
                 return False   # 몸체이동 OFF 또는 제어권 없음 — 바퀴 절대 금지
         if not guard_off:
             c = self._clearance(direction)
@@ -1765,7 +1766,7 @@ class ElevatorTracker(Node):
         self._last_motion_ts = time.time()   # [A안] 이동 발생 기록
         with state_lock:
             guard_off = state["guard_off"]
-            if not state["base_align"] or not state.get("authority", True):
+            if not state["base_align"] or not state.get("authority", False):
                 return False   # 몸체이동 OFF 또는 제어권 없음 — 회전도 금지
         if not guard_off:
             s = self._scan
@@ -2016,7 +2017,7 @@ class ElevatorTracker(Node):
     def _maybe_base_nudge(self, ex: float, dist):
         """좌우 픽셀 오차 → 안전 확인 후 베이스 소폭 전/후진 (별도 스레드)."""
         with state_lock:
-            enabled  = state["base_align"] and state.get("authority", True)
+            enabled  = state["base_align"] and state.get("authority", False)
             pressing = state["pressing"]
             travel   = state["base_travel"]
         if not enabled or pressing or self._nudging:
@@ -3886,28 +3887,17 @@ def main():
             _diaglog = None      # 로거 없어도 본체는 정상 동작해야 함
             print(f"[경고] robot_diag 로거 생성 실패 — 파일 로그 비활성: {_le}", flush=True)
 
-    # 제어권 초기값: 대시보드(8080)가 떠 있으면 False(부여 대기) — 주도권은
-    # 대시보드에 있다. 대시보드가 없으면 True(단독 개발 모드, 기존과 동일).
-    _probe_t0 = time.time()
-    _probe_err = None
-    try:
-        import urllib.request
-        urllib.request.urlopen("http://localhost:8080/battery_status", timeout=1.0)
-        _dash_alive = True
-    except Exception as _pe:
-        _dash_alive = False
-        _probe_err = repr(_pe)
-    _probe_ms = (time.time() - _probe_t0) * 1000.0
+    # 제어권 초기값: fail-closed — 기본은 False(부여 대기), 대시보드가 /authority로
+    # 명시적으로 줄 때만 True가 된다. "대시보드 응답 없음 → 나 혼자 권한 보유" 같은
+    # 자동판정은 하지 않는다(권한 없이 열리는 경로를 원천 차단). 사람이 명시적으로
+    # 켜는 단독 개발 모드만 --standalone 플래그로 보존.
+    _standalone = "--standalone" in _sys.argv
     with state_lock:
-        state["authority"] = not _dash_alive
-    # ★가설②: probe가 늦어 timeout되면 대시보드가 살아있어도 단독모드로 오판 →
-    #   Nav2와 cmd_vel 경합으로 이동이 막힐 수 있음. 소요시간/오류를 반드시 기록.
+        state["authority"] = _standalone
     if _diaglog:
-        _diaglog.log("AUTH",
-                     f"8080 probe: dash_alive={_dash_alive} 소요={_probe_ms:.0f}ms "
-                     f"err={_probe_err} → authority={not _dash_alive}")
-    print(("제어권: 대시보드 감지 — 부여 대기 (8080에서 켜세요)" if _dash_alive
-           else "제어권: 단독 개발 모드 (보유)"), flush=True)
+        _diaglog.log("AUTH", f"제어권 초기화: standalone={_standalone} → authority={_standalone}")
+    print(("제어권: 단독 모드 (--standalone, 보유)" if _standalone
+           else "제어권: 부여 대기 (8080에서 주세요)"), flush=True)
 
     threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False),
