@@ -3942,8 +3942,10 @@ def main():
         daemon=True,
     ).start()
 
-    # 브라우저 자동 오픈 (Flask 뜰 시간 잠깐 준 뒤)
-    threading.Timer(1.5, lambda: webbrowser.open("http://localhost:5000")).start()
+    # 브라우저 자동 오픈 — standalone일 때만. 대시보드가 spawn한 경우엔 이미
+    # iframe 탭 안에서 보이므로 별도 창을 띄우면 사용자가 원하는 "한 화면"이 깨짐.
+    if _standalone:
+        threading.Timer(1.5, lambda: webbrowser.open("http://localhost:5000")).start()
     print("대시보드: http://localhost:5000", flush=True)
 
     rclpy.init()
