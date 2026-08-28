@@ -1044,6 +1044,10 @@ HTML = """
 # ── Flask ─────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
+@app.route("/ping")
+def ping():
+    return "ok", 200
+
 @app.route("/")
 def index():
     return render_template_string(HTML)

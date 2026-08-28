@@ -75,6 +75,7 @@ try:
     from control_msgs.action import FollowJointTrajectory   # 팔 수납(트래젝토리) 트리거용
     from trajectory_msgs.msg import JointTrajectoryPoint
     from rclpy.action import ActionClient
+    from std_srvs.srv import Trigger
     _ROS_OK = True
     try:
         from nav2_msgs.srv import LoadMap   # 지도(층) 전환용 — 없어도 나머지는 동작
@@ -177,6 +178,8 @@ def start_subprocesses():
 _cmd_node = None
 _cmd_pub  = None
 _arm_client = None   # 팔 수납 트래젝토리 액션 클라이언트 (init_ros에서 생성)
+_lc_loc_client = None    # lifecycle_manager_localization is_active 클라이언트 (init_ros에서 생성)
+_lc_nav_client = None    # lifecycle_manager_navigation is_active 클라이언트 (init_ros에서 생성)
 _manual_mode = False
 _manual_lock = threading.Lock()
 
@@ -188,7 +191,10 @@ _battery = {"pct": None, "voltage": None, "charging": None}
 # ── 준비상태 신호 갱신시각 (2a-1: 뼈대) ────────────────────────────────────────
 # monotonic 갱신시각만 저장 — age는 /readiness에서 요청 시점에 계산(값 저장 금지).
 # 초기값 0.0 → age가 거대해져 자동으로 unknown/stale 판정됨(낙관 초기값 금지).
-_ready = {"amcl": 0.0, "battery": 0.0, "handle": 0.0}
+_ready = {"amcl": 0.0, "battery": 0.0, "handle": 0.0, "nav2": 0.0, "elev_app": 0.0}
+# 2a-2: 폴링 신호는 "답의 내용"이 age와 독립 → 값을 따로 저장(2a-1의 '값 저장 금지'는 콜백형에만 적용).
+#   _ready[key]=monotonic() = "마지막으로 물어본 시각"(폴러 건강),  _ready_val[key] = 판정결과(대상 건강).
+_ready_val = {"nav2": None, "elev_app": None}
 
 # ── 장애물 상태 ────────────────────────────────────────────────────────────────
 _obstacle_state = {"detected": False, "dist": None, "decision": None}
@@ -300,8 +306,57 @@ def _cmdvel_callback(msg):
     except Exception:
         pass
 
+# ── 2a-2: 준비상태 능동폴링 (nav2 lifecycle + 엘베앱 HTTP) ──────────────────────
+def _query_lc(client):
+    """lifecycle_manager의 is_active를 논블로킹으로 질의. spin_until_future_complete
+    금지(공유 스핀 스레드 데드락) — add_done_callback + Event만 사용."""
+    if client is None or not client.service_is_ready():
+        return {"status": "unknown", "detail": "기동중"}   # 서비스 자체 없음 = 부팅 정상창
+    fut = client.call_async(Trigger.Request())
+    ev = threading.Event()
+    fut.add_done_callback(lambda f: ev.set())   # 콜백 본문은 set()만 — 로깅·락·HTTP 금지(공유 스핀 스레드)
+    if not ev.wait(timeout=0.5):
+        client.remove_pending_request(fut)      # 필수 — 안 하면 pending 요청이 무한 누적
+        return {"status": "unknown", "detail": "응답없음(매니저 멈춤 의심)"}
+    try:
+        res = fut.result()
+    except Exception:
+        return {"status": "unknown", "detail": "응답오류"}
+    if res is not None and res.success:
+        return {"status": "ok", "detail": "활성"}   # "정상"은 아님 — is_active는 내부 멈춤을 못 잡음
+    return {"status": "bad", "detail": "비활성"}
+
+def _readiness_poll_loop():
+    order = {"bad": 0, "unknown": 1, "ok": 2}
+    while True:
+        try:
+            loc = _query_lc(_lc_loc_client)
+            nav = _query_lc(_lc_nav_client)
+            worst = min([loc, nav], key=lambda d: order[d["status"]])
+            _ready_val["nav2"] = {"status": worst["status"],
+                                  "detail": f"측위 {loc['detail']} / 주행 {nav['detail']}"}
+
+            try:
+                import requests   # 로컬 import — urllib과 달리 프록시 우회(proxies=)가 명시적
+                r = requests.get("http://127.0.0.1:5000/ping", timeout=(0.3, 0.5),
+                                 proxies={"http": None, "https": None})
+                if r.status_code == 200:
+                    _ready_val["elev_app"] = {"status": "ok", "detail": "응답"}
+                else:
+                    _ready_val["elev_app"] = {"status": "bad", "detail": f"HTTP {r.status_code}"}
+            except Exception:
+                _ready_val["elev_app"] = {"status": "unknown", "detail": "무응답(미기동/접속거부)"}
+        except Exception:
+            time.sleep(3.0)
+            continue
+        finally:
+            # 성공/타임아웃/예외 무관 — 폴러가 살아있다는 증거로 매 사이클 갱신
+            _ready["nav2"] = time.monotonic()
+            _ready["elev_app"] = time.monotonic()
+        time.sleep(3.0)
+
 def init_ros():
-    global _cmd_node, _cmd_pub, _map_client, _init_pub, _arm_client
+    global _cmd_node, _cmd_pub, _map_client, _init_pub, _arm_client, _lc_loc_client, _lc_nav_client
     if not _ROS_OK:
         return
     rclpy.init()
@@ -329,6 +384,9 @@ def init_ros():
     # 팔 수납(armleft 대체) — 트래젝토리 액션 클라이언트 (엘베와 동일 서버)
     _arm_client = ActionClient(_cmd_node, FollowJointTrajectory,
                                "/stretch_controller/follow_joint_trajectory")
+    # 2a-2: 준비상태 폴링용 lifecycle is_active 클라이언트 — 여기서 1회만 생성(폴러 안에서 만들지 않음)
+    _lc_loc_client = _cmd_node.create_client(Trigger, "/lifecycle_manager_localization/is_active")
+    _lc_nav_client = _cmd_node.create_client(Trigger, "/lifecycle_manager_navigation/is_active")
     # 진단 계측 부착 (cmd_vel 퍼블리셔 수·엘리베이터 노드 존재 추적)
     if _diag is not None and _diaglog is not None:
         _diag.attach(
@@ -350,6 +408,7 @@ def init_ros():
                     pass
                 time.sleep(0.3)
     threading.Thread(target=_spin_resilient, daemon=True).start()
+    threading.Thread(target=_readiness_poll_loop, daemon=True).start()
     _log("MAIN", "ROS2 cmd_vel 퍼블리셔/구독자 시작")
 
 # ── 팔 수납 (armleft 프로세스 대체 — 대시보드가 직접 one-shot 트리거) ────────────────
@@ -624,7 +683,7 @@ def battery_status():
     return jsonify(**_battery)
 
 # 2a-1: 실측 3신호 임계값(관대한 잠정값, 첫 주행 실측 후 정밀화 예정)
-_READY_THRESH = {"amcl": 30.0, "battery": 15.0, "handle": 5.0}
+_READY_THRESH = {"amcl": 30.0, "battery": 15.0, "handle": 5.0, "nav2": 12.0, "elev_app": 12.0}
 
 def _readiness_signal(key, label):
     updated_at = _ready[key]
@@ -635,15 +694,28 @@ def _readiness_signal(key, label):
         return {"status": "bad", "age_sec": round(age, 1), "detail": f"{label} 신호 끊김(stale)"}
     return {"status": "ok", "age_sec": round(age, 1), "detail": f"{label} 정상"}
 
+def _readiness_polled(key, label):
+    """폴링형 표시 — age는 폴러 자체의 건강(콜백형과 동일 age 계산), 내용은 _ready_val."""
+    updated_at = _ready.get(key, 0.0)
+    if updated_at <= 0.0:
+        return {"status": "unknown", "age_sec": None, "detail": f"{label} 폴링 대기"}
+    age = time.monotonic() - updated_at
+    if age > _READY_THRESH[key]:
+        return {"status": "unknown", "age_sec": round(age, 1), "detail": f"{label} 폴러 정지(stale)"}
+    val = _ready_val.get(key)
+    if val is None:
+        return {"status": "unknown", "age_sec": round(age, 1), "detail": f"{label} 판정대기"}
+    return {"status": val["status"], "age_sec": round(age, 1), "detail": val["detail"]}
+
 @app.route("/readiness")
 def readiness():
     return jsonify(
         amcl=_readiness_signal("amcl", "측위"),
         battery=_readiness_signal("battery", "배터리"),
         handle=_readiness_signal("handle", "손잡이"),
-        nav2={"status": "unknown", "age_sec": None, "detail": "미구현"},
+        nav2=_readiness_polled("nav2", "nav2"),
         gripper_camera={"status": "unknown", "age_sec": None, "detail": "미구현"},
-        elev_app={"status": "unknown", "age_sec": None, "detail": "미구현"},
+        elev_app=_readiness_polled("elev_app", "엘베앱"),
     )
 
 @app.route("/robot_speed", methods=["POST"])
