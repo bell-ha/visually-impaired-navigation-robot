@@ -606,8 +606,10 @@ def _set_elev_authority(granted: bool, reason: str = "", quiet: bool = False):
 def elev_authority_route():
     if request.method == "POST":
         granted = bool((request.json or {}).get("granted", False))
-        threading.Thread(target=_set_elev_authority,
-                         args=(granted, "UI 토글"), daemon=True).start()
+        # _set_elev_authority 직접호출 금지 — 하트비트 renewer가 안 켜져서 수동 grant가
+        # deadman(TTL 6s)에 회수당함. _grant_elev_lease 경유해야 renewer 시작/중단됨.
+        threading.Thread(target=_grant_elev_lease,
+                         args=(granted, "수동 제어권 토글"), daemon=True).start()
         return jsonify(ok=True, granted=granted)
     return jsonify(granted=_elev_authority)
 
