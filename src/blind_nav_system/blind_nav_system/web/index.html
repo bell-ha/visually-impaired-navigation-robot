@@ -19,9 +19,17 @@
   .badge-manual { background: #7c2d12; color: #fdba74; }
   .layout { display: grid; grid-template-columns: 1fr auto; flex: 1; overflow: hidden; }
 
+  /* 뷰 전환기(관제 로그 / 엘리베이터 화면) — log-container 최상단, 항상 노출 */
+  .view-switch { display: flex; gap: 4px; padding: 8px 12px; background: #1e293b; border-bottom: 1px solid #334155; }
+  .view-btn { background: #334155; border: none; border-radius: 6px; color: #94a3b8; font-size: 0.8rem; font-weight: 700; padding: 6px 14px; cursor: pointer; }
+  .view-btn.active { background: #2563eb; color: #fff; }
+  .view-btn:hover:not(.active) { background: #475569; }
+  #log-view { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  #current-source-label { padding: 6px 12px 0; font-size: 0.85rem; font-weight: 700; color: #cbd5e1; }
+
   /* 로그 패널 */
-  #log-panel { padding: 12px; overflow-y: auto; font-family: monospace; font-size: 0.8rem; background: #0f172a; }
-  /* 엘베화면 탭 (iframe) — 탭 이탈 시 src 제거로 자원 회수(연결예산·과부하 방지) */
+  #log-panel { padding: 12px; overflow-y: auto; font-family: monospace; font-size: 0.8rem; background: #0f172a; flex: 1; min-height: 0; }
+  /* 엘리베이터 화면 뷰 (iframe) — 뷰 이탈 시 src 제거로 자원 회수(연결예산·과부하 방지) */
   #elev-screen-container { display: none; flex: 1; overflow: hidden; }
   #elev-screen-frame { width: 100%; height: 100%; border: none; background: #0f172a; }
   .log-entry { padding: 2px 0; border-bottom: 1px solid #1e293b; white-space: pre-wrap; word-break: break-all; }
@@ -82,6 +90,8 @@
   .tab-btn.active { background: #2563eb; color: #fff; }
   .tab-btn:hover:not(.active) { background: #475569; }
   .tab-badge { background: #ef4444; color: #fff; border-radius: 10px; font-size: 0.65rem; padding: 1px 5px; margin-left: 4px; vertical-align: middle; }
+  .other-source-wrap { display: inline-flex; align-items: center; }
+  #other-source-sel { background: #334155; border: none; border-radius: 6px; color: #94a3b8; font-size: 0.75rem; font-weight: 600; padding: 4px 8px; cursor: pointer; }
   .src-ARD  { color: #4ade80; }
   .src-SYS  { color: #a78bfa; }
   .src-ROS2 { color: #38bdf8; }
@@ -159,29 +169,41 @@
 </div>
 <div class="layout">
   <div class="log-container">
-    <div class="tab-bar">
-      <button class="tab-btn active" id="tab-ALL"    onclick="setTab('ALL')">전체</button>
-      <button class="tab-btn"        id="tab-IFACE"  onclick="setTab('IFACE')">인터페이스<span class="tab-badge" id="badge-IFACE"  style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-VISION" onclick="setTab('VISION')">비전<span class="tab-badge" id="badge-VISION" style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-HW"     onclick="setTab('HW')">하드웨어<span class="tab-badge" id="badge-HW"     style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-MAIN"   onclick="setTab('MAIN')">메인<span class="tab-badge" id="badge-MAIN"   style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-WEB"    onclick="setTab('WEB')">웹<span class="tab-badge" id="badge-WEB"    style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-ARM"    onclick="setTab('ARM')">팔고정<span class="tab-badge" id="badge-ARM"    style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-ELEV"   onclick="setTab('ELEV')">엘베<span class="tab-badge" id="badge-ELEV"   style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-ELEVSCREEN" onclick="setTab('ELEVSCREEN')">엘베화면</button>
-      <button class="tab-btn"        id="tab-NAV2"   onclick="setTab('NAV2')">주행<span class="tab-badge" id="badge-NAV2"   style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-SYS"    onclick="setTab('SYS')">시스템<span class="tab-badge" id="badge-SYS"    style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-ROS2"   onclick="setTab('ROS2')">ROS2<span class="tab-badge" id="badge-ROS2"   style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-RVIZ"   onclick="setTab('RVIZ')">RViz<span class="tab-badge" id="badge-RVIZ"   style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-BATT"   onclick="setTab('BATT')">배터리<span class="tab-badge" id="badge-BATT"   style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-FREE"   onclick="setTab('FREE')">정리<span class="tab-badge" id="badge-FREE"   style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-HOME"   onclick="setTab('HOME')">홈위치<span class="tab-badge" id="badge-HOME"   style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-ARD"    onclick="setTab('ARD')">아두이노<span class="tab-badge" id="badge-ARD"    style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-MAP"      onclick="setTab('MAP')">지도<span class="tab-badge" id="badge-MAP"      style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-POSE"     onclick="setTab('POSE')">위치<span class="tab-badge" id="badge-POSE"     style="display:none"></span></button>
-      <button class="tab-btn"        id="tab-OBSTACLE" onclick="setTab('OBSTACLE')">장애물<span class="tab-badge" id="badge-OBSTACLE" style="display:none"></span></button>
+    <div class="view-switch">
+      <button class="view-btn active" id="view-log"  onclick="setView('log')">관제 로그</button>
+      <button class="view-btn"        id="view-elev" onclick="setView('elev')">엘리베이터 화면</button>
     </div>
-    <div id="log-panel"></div>
+    <div id="log-view">
+      <div class="tab-bar">
+        <button class="tab-btn active" id="tab-ALL"  onclick="setTab('ALL')">전체</button>
+        <button class="tab-btn"        id="tab-NAV2" onclick="setTab('NAV2')">주행<span class="tab-badge" id="badge-NAV2" style="display:none"></span></button>
+        <button class="tab-btn"        id="tab-ELEV" onclick="setTab('ELEV')">엘베<span class="tab-badge" id="badge-ELEV" style="display:none"></span></button>
+        <button class="tab-btn"        id="tab-MAIN" onclick="setTab('MAIN')">메인<span class="tab-badge" id="badge-MAIN" style="display:none"></span></button>
+        <button class="tab-btn"        id="tab-IFACE" onclick="setTab('IFACE')">인터페이스<span class="tab-badge" id="badge-IFACE" style="display:none"></span></button>
+        <span class="other-source-wrap">
+          <select id="other-source-sel" onchange="setTab(this.value)">
+            <option value="" disabled selected>기타 소스 ▾</option>
+            <option value="VISION">비전</option>
+            <option value="HW">하드웨어</option>
+            <option value="WEB">웹</option>
+            <option value="ARM">팔고정</option>
+            <option value="SYS">시스템</option>
+            <option value="ROS2">ROS2</option>
+            <option value="RVIZ">RViz</option>
+            <option value="BATT">배터리</option>
+            <option value="FREE">정리</option>
+            <option value="HOME">홈위치</option>
+            <option value="ARD">아두이노</option>
+            <option value="MAP">지도</option>
+            <option value="POSE">위치</option>
+            <option value="OBSTACLE">장애물</option>
+          </select>
+          <span class="tab-badge" id="badge-OTHER" style="display:none"></span>
+        </span>
+      </div>
+      <div id="current-source-label">전체</div>
+      <div id="log-panel"></div>
+    </div>
     <div id="elev-screen-container"><iframe id="elev-screen-frame" title="엘리베이터 화면"></iframe></div>
   </div>
   <div class="ctrl-panel">
@@ -660,11 +682,36 @@ function setTtsSpeed(v) {
   fetch('/tts_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: parseFloat(v)})});
 }
 
+// 뷰 전환기(관제 로그 / 엘리베이터 화면) — 로그 소스탭 필터와는 별개 축
+const ALWAYS_TABS = ['NAV2', 'ELEV', 'MAIN', 'IFACE'];   // 상시 노출 5개(ALL 제외) — 나머지는 드롭다운
+
+function setView(view) {
+  document.getElementById('view-log').classList.toggle('active', view === 'log');
+  document.getElementById('view-elev').classList.toggle('active', view === 'elev');
+  const logView      = document.getElementById('log-view');
+  const elevContainer = document.getElementById('elev-screen-container');
+  const elevFrame      = document.getElementById('elev-screen-frame');
+  if (view === 'elev') {
+    // 뷰 진입 시에만 src 부여 — 이탈 시 제거(아래 else)해 MJPEG 스트림이 배경에서 계속 흐르지 않게
+    logView.style.display = 'none';
+    elevContainer.style.display = 'flex';
+    elevFrame.src = `http://${location.hostname}:5000/`;
+  } else {
+    elevContainer.style.display = 'none';
+    elevFrame.src = '';
+    logView.style.display = 'flex';
+  }
+}
+
 // 로그 SSE + 탭 필터
 const logPanel = document.getElementById('log-panel');
 let allLogs = [];
 let currentTab = 'ALL';
 const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM','ELEV','NAV2','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD','MAP','POSE','OBSTACLE'];
+const SOURCE_LABELS = {ALL:'전체', IFACE:'인터페이스', VISION:'비전', HW:'하드웨어', MAIN:'메인', WEB:'웹',
+                       ARM:'팔고정', ELEV:'엘베', NAV2:'주행', SYS:'시스템', ROS2:'ROS2', RVIZ:'RViz',
+                       BATT:'배터리', FREE:'정리', HOME:'홈위치', ARD:'아두이노', MAP:'지도', POSE:'위치',
+                       OBSTACLE:'장애물'};
 const unread = Object.fromEntries(SOURCES.map(s => [s, 0]));
 
 function setTab(tab) {
@@ -672,20 +719,12 @@ function setTab(tab) {
   if (tab === 'ALL') SOURCES.forEach(s => { unread[s] = 0; });
   else unread[tab] = 0;
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('tab-' + tab).classList.add('active');
-  const elevContainer = document.getElementById('elev-screen-container');
-  const elevFrame = document.getElementById('elev-screen-frame');
-  if (tab === 'ELEVSCREEN') {
-    // 탭 진입 시에만 src 부여 — 이탈 시 제거(아래 else)해 MJPEG 스트림이 배경에서 계속 흐르지 않게
-    logPanel.style.display = 'none';
-    elevContainer.style.display = 'flex';
-    elevFrame.src = `http://${location.hostname}:5000/`;
-  } else {
-    elevContainer.style.display = 'none';
-    elevFrame.src = '';
-    logPanel.style.display = '';
-    renderLogs();
-  }
+  const btn = document.getElementById('tab-' + tab);   // 드롭다운으로 옮긴 14개는 전용 버튼이 없음
+  if (btn) btn.classList.add('active');
+  const sel = document.getElementById('other-source-sel');
+  if (sel) sel.value = Array.from(sel.options).some(o => o.value === tab) ? tab : '';
+  document.getElementById('current-source-label').textContent = SOURCE_LABELS[tab] || tab;
+  renderLogs();
   updateBadges();
 }
 
@@ -710,6 +749,12 @@ function updateBadges() {
     // 숫자 없이 점(dot)만 표시 — 읽지 않은 메시지 있을 때만
     b.style.display = unread[s] > 0 ? 'inline-block' : 'none';
   });
+  // 드롭다운으로 옮긴 14개는 개별 배지가 없음 — 그중 하나라도 안 읽었으면 select 옆에 점 하나
+  const otherBadge = document.getElementById('badge-OTHER');
+  if (otherBadge) {
+    const hasUnread = SOURCES.some(s => !ALWAYS_TABS.includes(s) && unread[s] > 0);
+    otherBadge.style.display = hasUnread ? 'inline-block' : 'none';
+  }
 }
 
 const es = new EventSource('/logs');
