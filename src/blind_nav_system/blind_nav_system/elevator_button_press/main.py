@@ -1445,11 +1445,14 @@ def scene_set():
             node._dlog("[SCENE] 인식 자세 — 그리퍼 닫고→손목 전방→그리퍼 열기 (충돌·과부하 방지)")
             # #1 과부하 방지: 손목 회전은 반드시 그리퍼 닫힌 채로. 몸통 근처에서 그리퍼가
             # 열린 채 회전하면 손가락이 몸통에 닿아 과부하 → 닫기→회전→열기로 순서 분리.
-            node._move_joint_wait(GRIPPER_JOINT, GRIPPER_CLOSE_M, 1, 4.0)         # 1) 닫기 보장
-            node._move_joint_wait("joint_wrist_yaw", WRIST_YAW_DEFAULT, 2, 8.0)   # 2) 손목 전방(닫힌 채)
-            node._send_goal(                                                       # 3) 그리퍼 열기 + lift
-                ["joint_wrist_pitch", "joint_wrist_roll", GRIPPER_JOINT, "joint_lift"],
-                [WRIST_PITCH_DEFAULT, 0.0, GRIPPER_OPEN_M, prior])
+            if not node._move_joint_wait(GRIPPER_JOINT, GRIPPER_CLOSE_M, 1, 4.0):  # 1) 닫기 보장
+                node._dlog("[SCENE] ⚠ 그리퍼 닫기 실패 — 이후 손목 회전 과부하 위험")
+            if not node._move_joint_wait("joint_wrist_yaw", WRIST_YAW_DEFAULT, 2, 8.0):  # 2) 손목 전방(닫힌 채)
+                node._dlog("[SCENE] ⚠ 손목 전방 회전 실패 — 인식 자세 미완성")
+            if not node._send_goal(                                                # 3) 그리퍼 열기 + lift
+                    ["joint_wrist_pitch", "joint_wrist_roll", GRIPPER_JOINT, "joint_lift"],
+                    [WRIST_PITCH_DEFAULT, 0.0, GRIPPER_OPEN_M, prior]):
+                node._dlog("[SCENE] ⚠ 그리퍼 열기·lift 전송 실패 — 인식 자세 미완성")
     else:
         # 이동 단계(②③④⑥): 타겟 강제 해제 — press 실패 경로는 타겟을 유지하므로,
         # 그 상태로 주행에 들어가면 서보/자동접근(phase TRACK 잔존)이 주행 중
@@ -1468,10 +1471,12 @@ def scene_set():
             node._dlog("[SCENE] 이동 자세 — 그리퍼 먼저 닫고→팔 수납·손목 안쪽 (충돌·과부하 방지)")
             # #1 과부하 방지: 손목을 안쪽(WRIST_YAW_IN)으로 돌리기 전에 그리퍼를 먼저 닫는다.
             # 열린 채 안쪽으로 돌면 손가락이 몸통에 닿아 wrist_yaw 서보 과부하.
-            node._move_joint_wait(GRIPPER_JOINT, GRIPPER_CLOSE_M, 1, 4.0)
-            node._send_goal(
-                ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll", ARM_JOINT],
-                [WRIST_PITCH_DEFAULT, WRIST_YAW_IN, 0.0, ARM_EXT_MIN])
+            if not node._move_joint_wait(GRIPPER_JOINT, GRIPPER_CLOSE_M, 1, 4.0):
+                node._dlog("[SCENE] ⚠ 그리퍼 닫기 실패 — 이후 손목 안쪽 회전 과부하 위험")
+            if not node._send_goal(
+                    ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll", ARM_JOINT],
+                    [WRIST_PITCH_DEFAULT, WRIST_YAW_IN, 0.0, ARM_EXT_MIN]):
+                node._dlog("[SCENE] ⚠ 이동 자세(팔 수납·손목 안쪽) 전송 실패 — 충돌 위험")
     # 단계 전환 = 진행 중이던 자동 안무·수동 스텝 즉시 취소 (새 의도가 우선)
     if node:
         node._step_abort = True
@@ -1825,6 +1830,7 @@ class ElevatorTracker(Node):
         self.bridge         = CvBridge()
         self._processing    = False
         self._goal_done     = True
+        self._goal_ok       = True   # 마지막 goal이 '수락'됐는지 — 거부/예외를 완료와 구분
         self._det_mem       = {}     # 탐지 기억 (라벨 → 마지막 박스/시각)
 
         self.create_subscription(JointState, "/joint_states", self._on_joints, 10)
@@ -3826,9 +3832,12 @@ class ElevatorTracker(Node):
     def _move_joint_wait(self, joint: str, pos: float, sec: int, timeout: float) -> bool:
         """관절 하나를 목표 위치로 움직이고 완료까지 블로킹 대기. 성공 여부 반환.
         (press 전용 — 별도 스레드에서 호출됨)"""
-        self._last_motion_ts = time.time()   # [A안] 이동 발생 기록
         if not self.action_client.wait_for_server(timeout_sec=2.0):
+            # ★_last_motion_ts는 '실제로 보낸' 경우에만 갱신 — 실패해도 갱신하면
+            # _may_explore가 '안 움직였는데 움직인 걸로' 보고 쿨다운을 먹는다.
+            self._dlog(f"[MOVE] ⛔ 액션서버 없음(2.0s) — 관절이동 유실: {joint}")
             return False
+        self._last_motion_ts = time.time()   # [A안] 이동 발생 기록 — 전송 성공 경로에서만
         done = threading.Event()
         ok = {"v": False}
         goal = FollowJointTrajectory.Goal()
@@ -3843,10 +3852,19 @@ class ElevatorTracker(Node):
             done.set()
 
         def on_resp(fut):
-            h = fut.result()
+            # fut.result() 무가드였음 — 예외가 나면 rclpy.spin()이 KeyboardInterrupt만
+            # 잡으므로 프로세스가 통째로 죽는다(스핀사망 계열). 반드시 감싼다.
+            # 예외 시 ok["v"]는 False 그대로 두고 done만 세워 대기루프를 푼다(=실패 반환).
+            try:
+                h = fut.result()
+            except Exception as e:
+                self._dlog(f"[MOVE] ⛔ 응답 예외 — 관절이동 실패 처리: {e!r}")
+                done.set()
+                return
             if h.accepted:
                 h.get_result_async().add_done_callback(on_result)
             else:
+                self._dlog(f"[MOVE] ⛔ 거부됨 — 관절이 움직이지 않음: {joint}")
                 done.set()
 
         self.action_client.send_goal_async(goal).add_done_callback(on_resp)
@@ -4144,9 +4162,14 @@ class ElevatorTracker(Node):
     def set_wrist_yaw(self, yaw: float):
         self._send_single_joint("joint_wrist_yaw", yaw)
 
-    def _send_goal(self, joint_names, positions):
-        self._last_motion_ts = time.time()   # [A안] 이동 발생 기록
-        if not self.action_client.wait_for_server(timeout_sec=1.0): return
+    def _send_goal(self, joint_names, positions) -> bool:
+        """관절 목표 전송. 전송 성공 True / 액션서버 없어 유실되면 False.
+        ★_last_motion_ts는 '실제로 보낸' 경우에만 갱신 — 실패해도 갱신하면
+        _may_explore가 '안 움직였는데 움직인 걸로' 보고 쿨다운을 먹는다."""
+        if not self.action_client.wait_for_server(timeout_sec=1.0):
+            self._dlog("[GOAL] ⛔ 액션서버 없음(1.0s) — 명령 유실: "
+                       + ", ".join(str(n) for n in joint_names))
+            return False
         goal = FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = list(joint_names)
         pt = JointTrajectoryPoint()
@@ -4154,16 +4177,29 @@ class ElevatorTracker(Node):
         pt.time_from_start.sec = 1
         goal.trajectory.points = [pt]
         self._goal_done = False
+        self._goal_ok   = True   # 응답 콜백이 거부/예외면 False로 내림
+        self._last_motion_ts = time.time()   # [A안] 이동 발생 기록 — 전송 성공 경로에서만
         self.action_client.send_goal_async(goal).add_done_callback(self._on_goal_response)
         self._dlog("-> " + ", ".join(
             f"{n}={p:.3f}" for n, p in zip(joint_names, positions)))
+        return True
 
     def _on_goal_response(self, fut):
-        h = fut.result()
+        # fut.result() 무가드였음 — 예외가 나면 rclpy.spin()이 KeyboardInterrupt만
+        # 잡으므로 프로세스가 통째로 죽는다(스핀사망 계열). 반드시 감싼다.
+        try:
+            h = fut.result()
+        except Exception as e:
+            self._goal_ok   = False
+            self._goal_done = True   # 대기 루프가 영원히 안 풀리는 것 방지
+            self._dlog(f"[GOAL] ⛔ 응답 예외 — 명령 실패 처리: {e!r}")
+            return
         if h.accepted:
             h.get_result_async().add_done_callback(lambda _: setattr(self,"_goal_done",True))
         else:
+            self._goal_ok   = False
             self._goal_done = True
+            self._dlog("[GOAL] ⛔ 거부됨 — 로봇이 움직이지 않음")
 
 
 def main():
