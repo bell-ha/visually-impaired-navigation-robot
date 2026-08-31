@@ -832,6 +832,7 @@ const es = new EventSource('/logs');
 es.onmessage = e => {
   const d = JSON.parse(e.data);
   allLogs.push(d);
+  if (allLogs.length > 2000) allLogs.splice(0, allLogs.length - 2000);
   if (currentTab === 'ALL' || d.src === currentTab) {
     appendLogEntry(d);
     logPanel.scrollTop = logPanel.scrollHeight;

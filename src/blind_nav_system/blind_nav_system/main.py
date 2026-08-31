@@ -88,10 +88,15 @@ except ImportError:
 # ── 로그 버퍼 ─────────────────────────────────────────────────────────────────
 _LOG_BUF: collections.deque = collections.deque(maxlen=800)
 _log_lock = threading.Lock()
+_LOG_SEQ = 0   # 단조증가 id — SSE가 "보낸 개수"(len, 포화 시 고정) 대신 이걸로 커서 삼음
 
 def _log(src: str, msg: str):
-    entry = {"t": time.strftime("%H:%M:%S"), "src": src, "msg": msg.rstrip()}
+    global _LOG_SEQ
+    ts = time.strftime("%H:%M:%S")
+    text = msg.rstrip()
     with _log_lock:
+        _LOG_SEQ += 1
+        entry = {"id": _LOG_SEQ, "t": ts, "src": src, "msg": text}
         _LOG_BUF.append(entry)
     # 파일 영속(#15) — 락 밖에서 호출. 이걸로 SSE/UI 소비자는 분리되지만,
     # 자식 stdout 백프레셔는 락과 무관하게 남아 있다(디스크 정체 시).
@@ -529,14 +534,34 @@ def index():
 
 @app.route("/logs")
 def logs_sse():
+    def sse(entry):
+        return f"data: {json.dumps(entry, ensure_ascii=False)}\n\n"
+
     def gen():
-        sent = 0
+        # id(단조증가) 커서로 스캔 — "보낸 개수"(len)는 deque(maxlen=800) 포화 시
+        # 항상 800으로 고정돼 entries[sent:]가 영원히 빈 리스트가 되는 버그가 있었음.
+        last_id = 0
+        last_beat = time.monotonic()
         while True:
             with _log_lock:
-                entries = list(_LOG_BUF)
-            for e in entries[sent:]:
-                yield f"data: {json.dumps(e, ensure_ascii=False)}\n\n"
-            sent = len(entries)
+                new = []
+                for e in reversed(_LOG_BUF):
+                    if e["id"] <= last_id:
+                        break
+                    new.append(e)
+                new.reverse()
+                oldest_id = _LOG_BUF[0]["id"] if _LOG_BUF else 0
+            # 커서보다 오래된 로그가 이미 버퍼에서 밀려났으면(포화) 유실 고지
+            if new and last_id and oldest_id > last_id + 1:
+                yield sse({"t": time.strftime("%H:%M:%S"), "src": "SYS",
+                          "msg": f"⚠ 로그 {oldest_id - last_id - 1}줄 유실(버퍼 초과)"})
+            for e in new:
+                yield sse(e)
+                last_id = e["id"]
+                last_beat = time.monotonic()
+            if not new and time.monotonic() - last_beat > 15:
+                yield ": ping\n\n"   # SSE 주석 하트비트 — 유령 스레드 회수
+                last_beat = time.monotonic()
             time.sleep(0.1)
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
