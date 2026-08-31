@@ -191,10 +191,10 @@ _battery = {"pct": None, "voltage": None, "charging": None}
 # ── 준비상태 신호 갱신시각 (2a-1: 뼈대) ────────────────────────────────────────
 # monotonic 갱신시각만 저장 — age는 /readiness에서 요청 시점에 계산(값 저장 금지).
 # 초기값 0.0 → age가 거대해져 자동으로 unknown/stale 판정됨(낙관 초기값 금지).
-_ready = {"amcl": 0.0, "battery": 0.0, "handle": 0.0, "nav2": 0.0, "elev_app": 0.0}
+_ready = {"amcl": 0.0, "battery": 0.0, "handle": 0.0, "nav2": 0.0, "elev_app": 0.0, "gripper_camera": 0.0}
 # 2a-2: 폴링 신호는 "답의 내용"이 age와 독립 → 값을 따로 저장(2a-1의 '값 저장 금지'는 콜백형에만 적용).
 #   _ready[key]=monotonic() = "마지막으로 물어본 시각"(폴러 건강),  _ready_val[key] = 판정결과(대상 건강).
-_ready_val = {"nav2": None, "elev_app": None}
+_ready_val = {"nav2": None, "elev_app": None, "gripper_camera": None}
 
 # 측위 정지게이트: amcl은 update_min_d/a라 정지 중엔 /amcl_pose가 안 나온다 —
 # 이동명령 여부로 "미갱신=고장"과 "미갱신=정상(정지)"을 구분한다.
@@ -357,10 +357,22 @@ def _readiness_poll_loop():
                                                   "detail": "엘베 리스 만료 — 제어권 재부여 필요"}
                     else:
                         _ready_val["elev_app"] = {"status": "ok", "detail": "응답"}
+                    # 그리퍼 카메라 — "대기"로 속아 헛걸음시킨 사고 방지(엘베앱 /status의
+                    # camera_missing 재사용, 엘베앱이 이미 기동 10초 유예까지 다 처리함)
+                    cam_missing = st.get("camera_missing") if st else None
+                    if cam_missing is None:
+                        _ready_val["gripper_camera"] = {"status": "unknown", "detail": "판정 불가"}
+                    elif cam_missing:
+                        _ready_val["gripper_camera"] = {"status": "bad",
+                                                        "detail": "미수신 — 엘베앱 재시작 필요"}
+                    else:
+                        _ready_val["gripper_camera"] = {"status": "ok", "detail": "정상"}
                 else:
                     _ready_val["elev_app"] = {"status": "bad", "detail": f"HTTP {r.status_code}"}
+                    _ready_val["gripper_camera"] = {"status": "unknown", "detail": "엘베앱 응답 없음"}
             except Exception:
                 _ready_val["elev_app"] = {"status": "unknown", "detail": "무응답(미기동/접속거부)"}
+                _ready_val["gripper_camera"] = {"status": "unknown", "detail": "미기동"}
         except Exception:
             time.sleep(3.0)
             continue
@@ -368,6 +380,7 @@ def _readiness_poll_loop():
             # 성공/타임아웃/예외 무관 — 폴러가 살아있다는 증거로 매 사이클 갱신
             _ready["nav2"] = time.monotonic()
             _ready["elev_app"] = time.monotonic()
+            _ready["gripper_camera"] = time.monotonic()
         time.sleep(3.0)
 
 def init_ros():
@@ -715,7 +728,8 @@ def battery_status():
     return jsonify(**_battery)
 
 # 2a-1: 실측 3신호 임계값(관대한 잠정값, 첫 주행 실측 후 정밀화 예정)
-_READY_THRESH = {"amcl": 30.0, "battery": 15.0, "handle": 5.0, "nav2": 12.0, "elev_app": 12.0}
+_READY_THRESH = {"amcl": 30.0, "battery": 15.0, "handle": 5.0, "nav2": 12.0, "elev_app": 12.0,
+                 "gripper_camera": 12.0}
 
 def _readiness_signal(key, label):
     updated_at = _ready[key]
@@ -760,7 +774,7 @@ def readiness():
         battery=_readiness_signal("battery", "배터리"),
         handle=_readiness_signal("handle", "손잡이"),
         nav2=_readiness_polled("nav2", "nav2"),
-        gripper_camera={"status": "unknown", "age_sec": None, "detail": "미구현"},
+        gripper_camera=_readiness_polled("gripper_camera", "그리퍼캠"),
         elev_app=_readiness_polled("elev_app", "엘베앱"),
     )
 

@@ -238,10 +238,15 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
         if t - st["last_snap"] >= snap_period:
             st["last_snap"] = t
             cam_ages = []
-            for label in cameras:
+            for label, topic in cameras.items():
                 last = st["last"].get(label)
+                try:
+                    pub = node.count_publishers(topic)
+                except Exception:
+                    pub = "?"
+                # pub=0인데 수신도 0 = 발행측 고장 / pub>=1인데 수신 0 = 구독측 고장 — 구분됨
                 cam_ages.append(
-                    f"{label}={'never' if last is None else f'{t - last:.1f}s'}")
+                    f"{label}={'never' if last is None else f'{t - last:.1f}s'}(pub={pub})")
             extra = ""
             if cmd_vel_topic:
                 try:

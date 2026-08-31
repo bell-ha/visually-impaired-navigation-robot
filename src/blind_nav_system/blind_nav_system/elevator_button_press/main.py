@@ -1206,6 +1206,7 @@ def status():
                    scene=s.get("scene"), scene_acc=s.get("scene_acc"),
                    authority=bool(s.get("authority", False)),
                    lease_expired=bool(s.get("lease_expired")),
+                   camera_missing=(_n._camera_missing_check() if _n is not None else None),
                    clear_f=clear_f, clear_b=clear_b,
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
                    door_base=s.get("door_base"))
@@ -1879,6 +1880,12 @@ class ElevatorTracker(Node):
         self._snapshot_in_progress = False
         self._grip_color_info = None
         self._body_color_info = None
+
+        # ── 카메라 미수신 안전망 — "대기"로 표시돼 정상처럼 보이다 헛걸음시킨 사고 방지 ──
+        self._boot_mono = time.monotonic()
+        self._last_grip_frame_mono = None
+        self._camera_missing_logged = False
+
         for t in GRIPPER_INFO_TOPICS:
             self.create_subscription(CameraInfo, t, self._on_grip_info, qos_profile_sensor_data)
         self.create_subscription(CameraInfo, BODY_INFO_TOPIC, self._on_body_info,
@@ -1891,6 +1898,23 @@ class ElevatorTracker(Node):
 
     def _on_body_info(self, msg):
         self._body_color_info = msg
+
+    def _camera_missing_check(self) -> bool:
+        """그리퍼 카메라 미수신 감지 — 기동 10초 유예 후, 프레임을 한 번도
+        못 받았거나 5초 넘게 끊겼으면 True. "대기"로 속아 헛걸음시킨 사고(구독
+        실패해도 정상처럼 보임) 재발 방지. 상태 전이(정상→미수신) 때만 1회 🚨
+        로그(복구되면 리셋 — 재발 시 다시 경고, 스팸은 안 남)."""
+        now = time.monotonic()
+        if now - self._boot_mono <= 10.0:
+            return False
+        last = self._last_grip_frame_mono
+        missing = (last is None) or (now - last > 5.0)
+        if missing and not self._camera_missing_logged:
+            self._camera_missing_logged = True
+            self._dlog("🚨 카메라 미수신 — 엘베앱 재시작 필요 (그리퍼 0프레임)")
+        elif not missing:
+            self._camera_missing_logged = False
+        return missing
 
     def _init_wrist_once(self):
         if self._wrist_initialized:
@@ -2764,6 +2788,7 @@ class ElevatorTracker(Node):
             # 회전 프레임(_raw_full, 아래)과는 별개 경로 — 그쪽은 그대로 유지.
             self._last_grip_raw = raw
             self._last_grip_stamp = msg.header.stamp
+            self._last_grip_frame_mono = time.monotonic()   # 카메라 미수신 감지용
             # 회전을 리사이즈 전에 적용 → 화면/OCR/서보/depth가 모두 같은 방향 사용
             with state_lock:
                 rot = state["rot_grip"]
