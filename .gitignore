@@ -30,6 +30,6 @@ results/
 # venv
 venv_ocr/
 
-# 스냅샷 도구 출력물 (VLM 매핑용 원본 프레임 — ~/snapshots가 기본이지만
-# 혹시 프로젝트 안에 생기더라도 무시되게)
-snapshots/
+# 스냅샷(VLM 매핑용 원본 프레임) — 사용자 결정(2026-08-31)으로 저장소 내
+# src/blind_nav_system/blind_nav_system/snapshots/ 에 저장하고 git으로 추적함.
+# (깊이 PNG 포함이라 용량 커질 수 있음 — 많아지면 git-lfs 검토)
