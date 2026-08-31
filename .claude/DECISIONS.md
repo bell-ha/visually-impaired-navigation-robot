@@ -264,6 +264,33 @@ advisor·verifier 토론 수렴 결과(**정황**, 오케 1차보고 — 이 세
 
 ---
 
+## 15. K0(엘베앱 DDS 고립 대응) 방향 재정의 — "프로파일 통일" 폐기, "WiFi 멀티캐스트 loopback 강제"로 전환
+
+**상황/문제**
+레인A A5(#55 DDS 고립)의 착수 항목으로 잠정 잡혀있던 **K0 = "bringup + DDS 프로파일 통일"**이라는 원래 방향이, 2026-08-31 저녁 사용자가 직접 로봇을 켜고 고립을 재현한 실측 세션에서 **틀렸다는 것이 밝혀졌다** — 프로파일은 이미 통일돼 있었다.
+
+**분석**
+오케가 셸에서 직접 4가지 후보 원인을 측정해 전부 반증했다:
+1. **제어권 전환 아님** — 엘베앱 `nodes=2`가 `authority=False`/`True` 양쪽에서 동일. 처음부터 고립 상태였다(사용자의 원래 가설이었으나 데이터가 반증).
+2. **env 발산 아님** — 엘베앱·인터페이스·런치노드의 `/proc/PID/environ`이 `FASTRTPS_DEFAULT_PROFILES_FILE`·`ROS_DOMAIN_ID`·`RMW`·`LOCALHOST_ONLY` 전부 동일. verifier가 이전에 "프로파일 발산 아니다"라고 판단했던 것이 실측으로 확증됨.
+3. **venv 버전 아님** — 엘베앱 venv가 `include-system-site-packages=true`라 시스템 FastDDS 2.6.10을 그대로 쓴다(자체 rmw/fastdds 없음).
+4. **SHM 아님** — `shm=0`, `/dev/shm/fastrtps` 잔재 없음.
+
+네 가지가 전부 반증되면서, 남은 유력 후보로 **"단일 머신인데 노드 디스커버리가 WiFi UDP 멀티캐스트를 타고 있다"**가 떠올랐다. `fastdds_no_shm.xml`(SHM 회피를 위해 도입됨, [[fastdds-no-shm]])이 `useBuiltinTransports=false`+UDP 전용이라 디스커버리가 멀티캐스트로 나가는데, 이 세션이 `ip -brief link show`로 직접 확인한 결과 이더넷(`enp86s0`)은 DOWN, WiFi(`wlo1`)만 UP이었다(**확증**) — `ROS_LOCALHOST_ONLY=0`이면 이 멀티캐스트가 WiFi 인터페이스를 통해 나가고, WiFi 멀티캐스트는 DDS 디스커버리에 본질적으로 불안정해 참가자별 간헐적 고립을 일으킬 수 있다. `IgnoredMulti`·`RcvbufErrors`가 0이 아닌 것이 그 흔적으로 관측됨(카운터 절대값은 세션마다 리셋돼 비교 무의미하나, 0이 아니라는 사실 자체는 이 세션이 재확인).
+
+**결정**
+**새 K0 = 모든 ROS 노드가 물리적으로 한 대의 머신에서 도는 것을 이용해 `ROS_LOCALHOST_ONLY=1`로 loopback을 강제한다** — WiFi 멀티캐스트 의존을 아예 제거하면서, SHM 회피(`no_shm` 유지)도 그대로 지킨다. **미증명** — 다음 세션에서 엘베앱을 `ROS_LOCALHOST_ONLY=1`로 재기동해 고립이 사라지는지 실험 필요.
+
+**주의(caveat, 사용자 확인 필요)**: `ROS_LOCALHOST_ONLY=1`은 원격(다른 PC)에서 이 로봇의 ROS 그래프를 봐야 하는 경우 못 쓴다 — 현재 RViz도 로봇 로컬에서 띄우고 있어 아마 안전하지만, 사용자에게 원격 접근 필요 여부를 확인해야 확정할 수 있다.
+
+**변경**
+없음(방향 재정의만, 코드 미착수). K0 잠정 방향("프로파일 통일")은 **폐기**, "loopback 강제"로 교체.
+
+**결과/근거**
+**정황**(오케 1차보고 — 4가지 배제 원인의 원시 측정 자체는 이 세션이 재현하지 않음). **이 세션이 독립 확증한 부분**: `ip -brief link show`로 `enp86s0` DOWN·`wlo1` UP 재확인, `fastdds_no_shm.xml`의 `useBuiltinTransports=false` 재확인, `/proc/net/snmp`의 `IgnoredMulti`·`RcvbufErrors`가 0이 아님을 재확인. **오늘 측정의 핵심 성과** — 근거 없는 K0("프로파일 통일")로 다음 세션이 헛다리 짚는 것을 막음. **상태: 방향 재정의 완료, 실험(다음 세션) 대기.**
+
+---
+
 ## 11. 엘베 제어권 "단일주인" 리팩터 — authority=이동권+guard_off 묶음, 여정당 1회 리스 + deadman (리스 1/3~3/3)
 
 **상황/문제**
