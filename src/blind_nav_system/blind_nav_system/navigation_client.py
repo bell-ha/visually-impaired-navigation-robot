@@ -59,6 +59,7 @@ class NavigationClient(Node):
         self._replan_timer      = None
         self._obstacle_push_wp: tuple[float, float] | None = None  # 박스 side-waypoint
         self._probing           = False   # probe 중 Nav2 일시 중단 플래그
+        self._social_nav_flag_logged = False   # SOCIAL_NAV_FLAG 부재/실패 로그 1회 제한
 
         self.create_subscription(
             StringMsg, OBSTACLE_TOPIC, self._obstacle_cb, 10)
@@ -107,7 +108,7 @@ class NavigationClient(Node):
         self._through_poses_client.wait_for_server(timeout_sec=2.0)
 
         # 초기 전송
-        waypoints = self._compute_waypoints_if_enabled()
+        waypoints = self._compute_waypoints_if_enabled(self._social_nav_enabled())
         ok = self._send_to_nav2(waypoints)
         if not ok:
             self._navigating = False
@@ -153,9 +154,9 @@ class NavigationClient(Node):
             self._obstacle_push_wp = None
             print("[NAV] 우회 결정 → 기존 경로 유지", flush=True)
 
-        # 내비게이션 중이면 즉시 재계획
+        # 내비게이션 중이면 즉시 재계획 (social 여부와 무관하게 장애물 대응은 온전해야 함)
         if self._navigating and not self.is_arrived:
-            waypoints = self._compute_waypoints_if_enabled()
+            waypoints = self._compute_waypoints_if_enabled(self._social_nav_enabled())
             if not self._send_to_nav2(waypoints):
                 if self.goal_handle is None:      # 살아있는 goal 없음 = 진짜 막다른 길
                     self._nav_failed(-1, "resend_failed")
@@ -195,11 +196,16 @@ class NavigationClient(Node):
         if dist_to_goal < REPLAN_MIN_DIST:
             return
 
-        waypoints   = self._compute_waypoints_if_enabled()
+        # 사이클당 1회만 평가 — waypoints 계산과 approaching 판정이 각자 파일을
+        # 다시 읽으면 그 사이 토글돼 반쪽상태(레이스)가 생길 수 있었음(#24)
+        social_on = self._social_nav_enabled()
+        waypoints   = self._compute_waypoints_if_enabled(social_on)
         now_has_wp  = len(waypoints) > 1
 
-        # 접근자가 있으면 매 주기 경유지 갱신 (사람이 다가올수록 회피 방향 재계산)
-        approaching_present = any(
+        # 접근자가 있으면 매 주기 경유지 갱신 (사람이 다가올수록 회피 방향 재계산).
+        # social OFF면 애초에 회피 자체를 안 하므로 접근자 유무로 강제 재계획하면
+        # 안 됨(게이트 우회 — social 끄고도 매초 재계획 로그가 찍히던 버그).
+        approaching_present = social_on and any(
             p.get('classification') == 'approaching'
             for p in self._modifier._people
         )
@@ -222,14 +228,20 @@ class NavigationClient(Node):
     # ── 헬퍼 ──────────────────────────────────────────────────────────────────
 
     def _social_nav_enabled(self) -> bool:
-        """'/tmp/social_nav_enabled' 파일로 ON/OFF 확인. 없으면 ON."""
+        """'/tmp/social_nav_enabled' 파일로 ON/OFF 확인. 없거나 읽기 실패하면
+        OFF(fail-closed) — ON을 기본으로 두면 대시보드 없이 뜨거나 /tmp 청소
+        직후에 UI 표시 없이 회피가 몰래 켜진다. 도배 방지로 로그는 1회만."""
         try:
             return FilePath(SOCIAL_NAV_FLAG).read_text().strip() == '1'
         except Exception:
-            return True
+            if not self._social_nav_flag_logged:
+                self._social_nav_flag_logged = True
+                print(f"[NAV] {SOCIAL_NAV_FLAG} 없음/읽기실패 → social nav OFF(fail-closed)",
+                      flush=True)
+            return False
 
-    def _compute_waypoints_if_enabled(self) -> list[tuple[float, float]]:
-        if self._social_nav_enabled():
+    def _compute_waypoints_if_enabled(self, social_on: bool) -> list[tuple[float, float]]:
+        if social_on:
             waypoints = self._modifier.compute_waypoints(self._goal_x, self._goal_y)
         else:
             waypoints = [(self._goal_x, self._goal_y)]
