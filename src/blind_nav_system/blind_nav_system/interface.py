@@ -16,6 +16,7 @@ import os
 import queue
 import re
 import signal
+import stat
 import struct
 import sys
 import tempfile
@@ -1321,13 +1322,42 @@ class InterfaceApp:
         /pull    → pull 이벤트
         그 외    → text 이벤트
         """
+        # stdin이 실제 파이프(FIFO)일 때만 EOF=부모(대시보드) 사망으로 간주해 자폭한다.
+        # </dev/null·일반파일·TTY로 뜬 경우(테스트·systemd StandardInput=null 등)엔
+        # 기동 직후 즉시 EOF가 나는 게 정상이라, 그때 자폭하면 부팅하자마자 죽는
+        # 회귀가 생긴다 — 그런 경우는 예전처럼 감시 스레드만 조용히 종료.
+        try:
+            is_pipe = stat.S_ISFIFO(os.fstat(sys.stdin.fileno()).st_mode)
+        except Exception:
+            is_pipe = False
+
         while not self._stop.is_set():
             try:
                 line = sys.stdin.readline()
             except Exception:
-                break
+                if is_pipe:
+                    # stdin 읽기 예외 = 부모(대시보드) 사망으로 간주 — 스레드만 끝내고
+                    # run()/nav는 계속 살아있으면 조종 통로 끊긴 채 계속 주행하는
+                    # 고아가 남는다(#근본C). 안전정지 후 프로세스까지 종료.
+                    # sys.exit()는 이 스레드만 끝냄 — 프로세스 종료는 close()의
+                    # _stop.set()이 run() 루프를 빠져나가게 해서 이뤄진다.
+                    print("[APP] stdin 읽기 예외 (부모 파이프 닫힘) → 부모 사망 간주, 안전정지 후 종료", flush=True)
+                    self.close()
+                    sys.exit(0)
+                else:
+                    print("[APP] stdin 읽기 예외 (파이프 아님) → stdin 감시만 종료, 앱 계속", flush=True)
+                    return
             if not line:
-                break
+                if is_pipe:
+                    # EOF = 부모(대시보드)가 stdin 파이프를 닫음 = 부모 사망.
+                    # sys.exit()는 이 스레드만 끝냄 — 프로세스 종료는 close()의
+                    # _stop.set()이 run() 루프를 빠져나가게 해서 이뤄진다.
+                    print("[APP] stdin EOF (부모 파이프 닫힘) → 부모 사망 간주, 안전정지 후 종료", flush=True)
+                    self.close()
+                    sys.exit(0)
+                else:
+                    print("[APP] stdin EOF (파이프 아님) → stdin 감시만 종료, 앱 계속", flush=True)
+                    return
             s = line.strip()
             if not s:
                 continue
