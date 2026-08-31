@@ -493,15 +493,27 @@ def publish_cmd(lx: float, az: float):
 # ── 수동 조작 루프 (버튼 누르는 동안 연속 퍼블리시) ──────────────────────────
 _manual_cmd = {"lx": 0.0, "az": 0.0}
 _manual_active = False
+_last_cmd_t = 0.0   # 마지막 /cmd 수신 시각(monotonic) — 서버측 데드맨(#27, 브라우저/와이파이 끊김 대비)
 
 def _manual_loop():
+    global _manual_active
     while True:
         with _manual_lock:
             active = _manual_active
             lx = _manual_cmd["lx"]
             az = _manual_cmd["az"]
-        # 수동 활성 상태일 때만 퍼블리시 — 자동 모드에서는 Nav2가 직접 제어
-        if active:
+            # 데드맨: 활성 상태인데 0.5초 넘게 새 /cmd가 안 오면(탭 닫힘·와이파이
+            # 끊김 등) 마지막 명령이 영원히 재발행되는 걸 막고 서버가 스스로 정지
+            stale = active and (time.monotonic() - _last_cmd_t > 0.5)
+            if stale:
+                _manual_active = False
+                _manual_cmd["lx"] = 0.0
+                _manual_cmd["az"] = 0.0
+        if stale:
+            publish_cmd(0.0, 0.0)
+            _log("MAIN", "⚠ 수동 명령 0.5초 무수신 → 서버측 데드맨 정지")
+        elif active:
+            # 수동 활성 상태일 때만 퍼블리시 — 자동 모드에서는 Nav2가 직접 제어
             publish_cmd(lx, az)
         time.sleep(0.1)
 
@@ -531,7 +543,7 @@ def logs_sse():
 
 @app.route("/cmd", methods=["POST"])
 def cmd():
-    global _manual_active
+    global _manual_active, _last_cmd_t
     data = request.json or {}
     lx = float(data.get("lx", 0.0))
     az = float(data.get("az", 0.0))
@@ -539,6 +551,7 @@ def cmd():
         _manual_cmd["lx"] = lx
         _manual_cmd["az"] = az
         _manual_active = data.get("active", True)
+        _last_cmd_t = time.monotonic()
     return jsonify(ok=True)
 
 @app.route("/stop", methods=["POST"])
