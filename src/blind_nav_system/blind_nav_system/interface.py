@@ -845,12 +845,33 @@ class GuidanceStateMachine:
                 _rclpy.init()
             self._executor = _SingleThreadedExecutor()
             self._spin_thr = threading.Thread(
-                target=self._executor.spin, daemon=True)
+                target=self._spin_resilient, daemon=True)
             self._spin_thr.start()
             if debug:
                 print("[NAV] ROS2 모드")
         else:
             print("[NAV] ROS2 없음 – 시뮬레이션 모드")
+
+    def _spin_resilient(self) -> None:
+        """콜백 예외로 executor.spin()이 죽으면 nav_failed/is_arrived 갱신이
+        멈춰 _watch()가 영원히 침묵하고 로봇은 계속 주행한다(조용한 죽음) —
+        main.py의 _spin_resilient(L426)와 동일 패턴으로 스핀을 되살리고,
+        진행 중인 목표가 있으면 실패로 알려 안내가 나가게 한다."""
+        while _rclpy.ok():
+            try:
+                self._executor.spin()
+            except Exception as e:
+                print(f"[NAV-ERR] ROS2 스핀 예외 → 재개: {e!r}", flush=True)
+                try:
+                    # 플래그만 세우지 않고 navigation_client._nav_failed()를 그대로 호출 —
+                    # 재진입 방어(_failed_announced)·재계획 타이머 정지·/tmp/navigation_active
+                    # 갱신까지 한 번에 처리됨(단순 대입은 이 정리를 건너뜀). ROS 콜백이
+                    # 아니라 평범한 메서드라 스핀이 죽은 상태에서도 안전하게 호출 가능.
+                    if self._nav_node is not None:
+                        self._nav_node._nav_failed(-1, "spin_exception")
+                except Exception:
+                    pass
+                time.sleep(0.3)
 
     # ── public API ────────────────────────────
     def start(self, dest_key: str) -> bool:

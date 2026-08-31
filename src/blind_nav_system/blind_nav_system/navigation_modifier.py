@@ -60,32 +60,40 @@ class NavigationModifier:
         목표 (goal_x, goal_y)로 가는 경유지 목록 반환.
         마지막 원소는 항상 원래 목표. 경유지가 없으면 [(goal_x, goal_y)].
         """
-        approaching = [p for p in self._people
-                       if p['classification'] == 'approaching'
-                       and p['distance'] < APPROACH_DIST_MAX]
-        companions  = [p for p in self._people
-                       if p['classification'] == 'companion'
-                       and p['distance'] < COMPANION_DIST_MAX]
+        try:
+            approaching = [p for p in self._people
+                           if p['classification'] == 'approaching'
+                           and p['distance'] < APPROACH_DIST_MAX]
+            companions  = [p for p in self._people
+                           if p['classification'] == 'companion'
+                           and p['distance'] < COMPANION_DIST_MAX]
 
-        waypoints: list[tuple[float, float]] = []
+            waypoints: list[tuple[float, float]] = []
 
-        if approaching:
-            wp = self._avoidance_waypoint(approaching)
-            if wp and self._is_navigable(*wp):
-                waypoints.append(wp)
-                self._node.get_logger().info(
-                    f"[Modifier] 접근자 {len(approaching)}명 감지 → 회피 경유지 ({wp[0]:.2f}, {wp[1]:.2f})")
+            if approaching:
+                wp = self._avoidance_waypoint(approaching)
+                if wp and self._is_navigable(*wp):
+                    waypoints.append(wp)
+                    self._node.get_logger().info(
+                        f"[Modifier] 접근자 {len(approaching)}명 감지 → 회피 경유지 ({wp[0]:.2f}, {wp[1]:.2f})")
 
-        # 접근자 처리 중에는 동행자 힌트 생략 (경유지 충돌 방지)
-        if companions and not waypoints:
-            wp = self._companion_waypoint(goal_x, goal_y, companions)
-            if wp and self._is_navigable(*wp):
-                waypoints.append(wp)
-                self._node.get_logger().info(
-                    f"[Modifier] 동행자 {len(companions)}명 감지 → 경로 힌트 ({wp[0]:.2f}, {wp[1]:.2f})")
+            # 접근자 처리 중에는 동행자 힌트 생략 (경유지 충돌 방지)
+            if companions and not waypoints:
+                wp = self._companion_waypoint(goal_x, goal_y, companions)
+                if wp and self._is_navigable(*wp):
+                    waypoints.append(wp)
+                    self._node.get_logger().info(
+                        f"[Modifier] 동행자 {len(companions)}명 감지 → 경로 힌트 ({wp[0]:.2f}, {wp[1]:.2f})")
 
-        waypoints.append((goal_x, goal_y))
-        return waypoints
+            waypoints.append((goal_x, goal_y))
+            return waypoints
+        except Exception as e:
+            # people_tracker가 키 빠진 dict를 한 번만 내도(예: classification/distance
+            # 누락) 여기서 죽으면 _replan_check(1초 타이머)가 매초 재발시켜 스핀
+            # 스레드를 계속 위협함 — 회피 없이 목표만 반환해 주행은 계속되게 한다.
+            self._node.get_logger().error(
+                f"[Modifier] compute_waypoints 예외 → 회피 없이 목표만 반환: {e!r}")
+            return [(goal_x, goal_y)]
 
     # ── 내부 계산 ──────────────────────────────────────────────────────────────
 
