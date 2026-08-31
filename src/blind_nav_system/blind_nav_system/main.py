@@ -674,7 +674,9 @@ def set_mode():
         _write("iface", "/cancel")
         # 주도권 단일화: 수동 = 사람이 바퀴 주인 → 엘리베이터 제어권 자동 회수
         # (두 앱이 /stretch/cmd_vel을 동시에 지휘하면 수동 조작이 먹히지 않음)
-        threading.Thread(target=_set_elev_authority,
+        # _set_elev_authority 직접호출 금지 — renewer(2초 하트비트)가 안 꺼져서
+        # 회수 직후 authority=True를 도로 쏨(수동 중 이동권·guard_off 부활).
+        threading.Thread(target=_grant_elev_lease,
                          args=(False, "수동 전환"), daemon=True).start()
     else:
         # 자동 전환 시: 수동 이동 정지 명령 한 번만 발행 후 Nav2에 제어권 넘김
