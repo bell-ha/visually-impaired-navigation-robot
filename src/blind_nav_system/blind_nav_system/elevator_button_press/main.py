@@ -1810,7 +1810,7 @@ def snapshot_route():
     data = request.json or {}
     label = "".join(c for c in str(data.get("label") or "snap") if c.isalnum() or c in "-_") or "snap"
     ts = time.strftime("%Y%m%dT%H%M%S")
-    out_dir = os.path.expanduser(f"~/snapshots/{ts}_{label}")
+    out_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "snapshots", f"{ts}_{label}"))
 
     node._snapshot_in_progress = True
     threading.Thread(target=_save_snapshot, args=(node, out_dir, data), daemon=True).start()
