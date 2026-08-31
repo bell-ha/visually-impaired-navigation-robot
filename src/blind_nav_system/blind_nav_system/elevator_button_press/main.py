@@ -4107,7 +4107,12 @@ class ElevatorTracker(Node):
                        near_ext + (d2 - FINGER_STANDOFF) + PRESS_DEPTH))
             st(f"4/6 누르는 중… →{push:.3f}m")
             if not self._move_joint_wait(ARM_JOINT, push, 2, 8.0):
+                # return이 없으면 아래 접촉감지로 그대로 진입 — 팔이 안 움직였으니
+                # actual=누르기 전 위치 → shortfall이 커서 "막힘=닿음"으로 오판하고
+                # "✅ 누르기 완료"를 잘못 선언한다(뿌리B). 다른 실패분기와 동일하게 복귀+중단.
                 st("❌ 누르기 실패 — 복귀")
+                self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
+                return
             time.sleep(0.4)
 
             # 접촉 감지 (위치 오차): 명령보다 5mm 이상 못 갔으면 막힌 것 = 닿은 것
