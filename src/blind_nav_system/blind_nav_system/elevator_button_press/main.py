@@ -2412,10 +2412,16 @@ class ElevatorTracker(Node):
             self._nudging = False
 
     def _dlog(self, msg: str):
-        """판단/행동 로그: ROS 터미널 + 웹 로그 패널에 동시 기록."""
+        """판단/행동 로그: ROS 터미널 + 웹 로그 패널 + 진단 파일에 동시 기록."""
         self.get_logger().info(msg)
         with state_lock:
             _DECISIONS.append(f"{time.strftime('%H:%M:%S')} {msg}")
+        # 진단 파일(robot_diag)에도 보존 — 인식/판단 이벤트를 사후 수치분석용으로
+        # 파일에 남긴다. 디스크 I/O는 반드시 state_lock '밖'에서(디스크 정체 시
+        # 앱 전체가 락에 묶여 동결되던 지점 — 반복 사고). _diaglog는 모듈 전역.
+        if _diaglog:
+            try: _diaglog.log("DEC", msg)
+            except Exception: pass
 
     def _may_explore(self) -> bool:
         """탐색성 이동(스캔·시크·군집접근·회전)의 공통 관문 — 난투극 방지.
@@ -3275,6 +3281,62 @@ class ElevatorTracker(Node):
             # 오차가 요동치는데, 이때 서보가 lift 명령을 쏘면 팔 뻗기가 선점·취소됨
             if phase == "TRACK" and not pressing and self._goal_done and lift is not None:
                 self._servo_step(detections, lift)
+
+            # ── [OCR] 인식 라운드 구조적 로그 (1Hz 스로틀) — 사후 수치분석용 블랙박스 ──
+            # "그때 후보가 뭐였고 belief가 얼마였나"를 파일에 남긴다(_dlog→_diaglog).
+            # 2↔3 오인 순간 두 후보의 belief 차이·잠금이 옆 버튼으로 점프했는지가
+            # 한 줄로 보이게. 파일 쓰기는 _dlog가 state_lock 밖에서 수행(인식 스레드=백그라운드).
+            if time.time() - getattr(self, "_ocrlog_ts", 0) > 1.0:
+                self._ocrlog_ts = time.time()
+                try:
+                    with state_lock:                     # 값 읽기만(디스크 I/O 없음)
+                        _tgt   = state["target_text"]
+                        _tdL   = state["target_dist"]
+                        _liftL = state["lift"]
+                        _extL  = state["arm_ext"]
+                        _lshp  = state.get("lock_shape")
+                    # 후보 전부(선택 안 된 동명이인/타 후보 포함): text:belief@(cx,cy)
+                    #   ~=coast(비신선) S=모양추론 X=배치모순 강등(suspect)
+                    _parts = []
+                    for _d in detections:
+                        _b = _d.get("box", {})
+                        _cx = int((_b.get("x1", 0) + _b.get("x2", 0)) / 2)
+                        _cy = int((_b.get("y1", 0) + _b.get("y2", 0)) / 2)
+                        _fl = ""
+                        if not _d.get("fresh", True): _fl += "~"
+                        if _d.get("shape"):           _fl += "S"
+                        if _d.get("suspect"):         _fl += "X"
+                        _fl = f"[{_fl}]" if _fl else ""
+                        _parts.append(f"{_d.get('text','?')}:{_d.get('belief',0):.2f}"
+                                      f"@({_cx},{_cy}){_fl}")
+                    # 위치 잠금: 잠금이 옆 버튼으로 점프했는지 추적
+                    _lk = getattr(self, "_target_lock", None)
+                    if _lk:
+                        _lks = (f"({int(_lk['cx'])},{int(_lk['cy'])},"
+                                f"b{_lk.get('bel', 0):.2f})" + ("S" if _lshp else ""))
+                    else:
+                        _lks = "none"
+                    # 타겟 서보오차 ex/ey (상태창 1214행과 동일 계산식) + dead-zone
+                    _exy = ""
+                    _oxL, _oyL = _aim_offsets(_tdL)
+                    _dzL = _dead_zone_px(_tdL)
+                    if _tgt:
+                        _dt = next((d for d in detections
+                                    if d.get("text") == _tgt and not d.get("suspect")),
+                                   None)
+                        if _dt:
+                            _bt = _dt["box"]
+                            _ex = int((_bt["x1"] + _bt["x2"]) / 2 - (CX + _oxL))
+                            _ey = int((_bt["y1"] + _bt["y2"]) / 2 - (CY + _oyL))
+                            _exy = f" ex={_ex:+d} ey={_ey:+d} dz={_dzL}"
+                    _distS = f"{_tdL:.2f}" if _tdL is not None else "?"
+                    _liftS = f"{_liftL:.2f}" if _liftL is not None else "?"
+                    _extS  = f"{_extL:.2f}" if _extL is not None else "?"
+                    self._dlog(f"[OCR] tgt='{_tgt}' dets=[{', '.join(_parts)}] "
+                               f"lock={_lks} dist={_distS} lift={_liftS} "
+                               f"ext={_extS}{_exy}")
+                except Exception:
+                    pass
 
         except Exception as e:
             self.get_logger().error(str(e))
