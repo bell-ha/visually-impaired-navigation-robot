@@ -212,6 +212,10 @@ _ELEV_ISO_GRACE    = 20.0    # 기동 유예(초) — _wait_elev_app_up(timeout=
 _ELEV_ISO_HITS     = 3       # 연속 관측 횟수 — 폴러 3초 주기라 약 9초
 _elev_iso_hits     = 0       # 연속 카운터(폴러 스레드 전용)
 _diag_st = None              # robot_diag.attach()가 돌려주는 상태 캐시(HB가 채움)
+# 엘베앱 obs 캐시가 얼마나 오래됐으면 "모름"으로 볼지 — 엘베앱 OBS_STALE_SEC의
+# 미러(별도 프로세스라 상수를 직접 못 읽는다). 엘베앱 OBS_PERIOD=1s라 그보다
+# 훨씬 커야 GIL 경합에 깜빡이지 않는다. 저쪽 값을 바꾸면 여기도 같이 바꿀 것.
+_OBS_AGE_MAX = 5.0
 
 # 측위 정지게이트: amcl은 update_min_d/a라 정지 중엔 /amcl_pose가 안 나온다 —
 # 이동명령 여부로 "미갱신=고장"과 "미갱신=정상(정지)"을 구분한다.
@@ -408,7 +412,8 @@ def _obs_brief(obs) -> str:
     """엘베앱 /status의 고립 관측(A5 B1)을 한 줄로 옮겨 적는다 — 표시 전용.
     판정은 엘베앱이 이미 했고 여기선 문자열로 바꾸기만 한다(대시보드 재판정 금지)."""
     if not isinstance(obs, dict):
-        return "관측 없음"
+        # 신선도 게이트에 걸렸거나 아예 안 온 경우 — "정상"이 아니라 "모름"이다.
+        return "관측 없음/오래됨 — 판정 불가"
     mark = {"ok": "정상", "stale": "끊김", "unknown": "미관측"}
     # 몸체캠은 표시만 하고 바를 빨갛게 만들지 않으므로, 초록 바에 "끊김"이
     # 떠 있어도 모순이 아니라는 걸 꼬리표로 알린다.
@@ -449,7 +454,16 @@ def _readiness_poll_loop():
                     # 어느 하나라도 나쁘면 bad로 올리고(하나가 다른 하나를 가리지
                     # 않게), 앞머리 문구는 고립 > 리스만료 순으로 하나만 고른 뒤
                     # 관측 상태는 항상 뒤에 병기한다.
-                    obs  = st.get("obs") if st else None
+                    obs = st.get("obs") if st else None
+                    # 엘베앱의 obs는 그쪽 ROS 타이머가 채우는 캐시다 — 스핀이
+                    # 굶으면 얼어붙는데 /status는 캐시만 읽으므로 옛 "정상"이
+                    # 그대로 넘어온다(무증상 실패의 재현). 잰 지 오래됐으면
+                    # 내용을 믿지 않고 통째로 모름으로 둔다.
+                    # ★모름은 고장이 아니다 — 여기서 bad로 올리지 말 것.
+                    # 부하 스파이크마다 빨간 바가 뜨면 아무도 바를 안 믿는다.
+                    obs_age = st.get("obs_age") if st else None
+                    if obs_age is None or obs_age > _OBS_AGE_MAX:
+                        obs = None
                     iso  = _elev_isolated(True)
                     leas = bool(st and st.get("lease_expired"))
                     # obs에 stale이 있으면 픽토그램 승격 — 문자열로만 적어두면

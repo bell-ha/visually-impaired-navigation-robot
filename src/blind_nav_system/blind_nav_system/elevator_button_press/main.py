@@ -1153,6 +1153,19 @@ def video():
             time.sleep(0.1)
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
+def _obs_age(node):
+    """고립 관측 캐시를 잰 지 몇 초 됐는지. Flask 스레드(=executor와 독립)에서
+    계산해 '초 단위 나이'로만 내보낸다 — monotonic 값 자체를 보내면 받는 쪽의
+    시계와 원점이 달라 비교가 불가능하다(프로세스가 다르면 기준이 다르다).
+    None = 아직 한 번도 안 쟀음(받는 쪽에서 '모름'으로 다뤄야 하고, 정상으로
+    읽으면 안 된다). 스핀이 굶어 타이머가 멈추면 이 값이 계속 커진다."""
+    if node is None:
+        return None
+    last = getattr(node, "_obs_mono", None)
+    if last is None:
+        return None
+    return round(time.monotonic() - last, 1)
+
 @app.route("/status")
 def status():
     with state_lock:
@@ -1259,6 +1272,7 @@ def status():
                    lease_expired=bool(s.get("lease_expired")),
                    camera_missing=(_n._camera_missing_check() if _n is not None else None),
                    obs=(_n._obs if _n is not None else None),   # 고립 관측(A5) 캐시 — 판정은 _obs_tick이 함
+                   obs_age=_obs_age(_n),   # 위 캐시를 잰 지 몇 초 됐나(이 프로세스 안에서 계산)
                    clear_f=clear_f, clear_b=clear_b,
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
                    door_base=s.get("door_base"))
@@ -1982,6 +1996,7 @@ class ElevatorTracker(Node):
         self._obs_nodes = None
         self._obs = {"driver": "unknown", "body": "unknown",
                      "depth": "unknown", "detail": "관측 시작 전"}
+        self._obs_mono = None    # _obs를 마지막으로 갱신한 시각(신선도 판단용)
         # 관측 전용 신규 타이머 — 위(L1907)의 비활성 손목 초기화 타이머와 무관하며
         # 어떤 관절도 움직이지 않는다(server_is_ready·monotonic 차·캐시 기록뿐).
         self.create_timer(OBS_PERIOD, self._obs_tick)
@@ -2054,6 +2069,10 @@ class ElevatorTracker(Node):
         prev = self._obs
         # 통째 교체(부분 수정 아님) — 읽는 쪽은 참조 하나만 잡으면 일관된 스냅샷이 된다.
         self._obs = {"driver": driver, "body": body, "depth": depth, "detail": detail}
+        # 이 타이머는 executor에서 돈다 — 스핀이 굶으면 위 캐시가 얼어붙는데
+        # /status는 캐시만 읽으므로 얼어붙은 ok가 정상처럼 나간다. 갱신 시각을
+        # 남겨 읽는 쪽이 "언제 잰 값인지"로 걸러낼 수 있게 한다(판정은 안 한다).
+        self._obs_mono = now
 
         # 전이할 때만 1회 로그(_camera_missing_check의 🚨 패턴) — 매 초 찍으면 로그가
         # 묻혀 정작 사고 때 안 보인다. state_lock은 잡지 않는다(_dlog는 디스크 I/O).
