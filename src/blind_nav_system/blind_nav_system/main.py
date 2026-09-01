@@ -410,8 +410,10 @@ def _obs_brief(obs) -> str:
     if not isinstance(obs, dict):
         return "관측 없음"
     mark = {"ok": "정상", "stale": "끊김", "unknown": "미관측"}
+    # 몸체캠은 표시만 하고 바를 빨갛게 만들지 않으므로, 초록 바에 "끊김"이
+    # 떠 있어도 모순이 아니라는 걸 꼬리표로 알린다.
     return " · ".join(f"{lbl} {mark.get(obs.get(k), '미관측')}"
-                      for k, lbl in (("driver", "팔"), ("body", "몸체캠"),
+                      for k, lbl in (("driver", "팔"), ("body", "몸체캠(표시)"),
                                      ("depth", "depth")))
 
 
@@ -450,10 +452,14 @@ def _readiness_poll_loop():
                     obs  = st.get("obs") if st else None
                     iso  = _elev_isolated(True)
                     leas = bool(st and st.get("lease_expired"))
-                    # obs에 stale이 하나라도 있으면 픽토그램 승격 — 문자열로만
-                    # 적어두면 팔이 "끊김"인데 바는 초록이라 아무도 안 본다.
+                    # obs에 stale이 있으면 픽토그램 승격 — 문자열로만 적어두면
+                    # 팔이 "끊김"인데 바는 초록이라 아무도 안 본다.
+                    # 단 승격은 driver·depth만 본다: body(D435i)가 끊겨도 누르기·
+                    # 정렬·주행은 그대로 되므로 여정을 막지 않는다. body 상태는
+                    # _obs_brief 문자열에 그대로 남으니 운영자는 여전히 본다
+                    # (승격에서 빼는 것이지 숨기는 게 아니다).
                     obs_stale = isinstance(obs, dict) and any(
-                        obs.get(k) == "stale" for k in ("driver", "body", "depth"))
+                        obs.get(k) == "stale" for k in ("driver", "depth"))
                     if iso:
                         head = "고립 — 앱은 응답하나 elevator_tracker 없음(ROS 단절)"
                     elif leas:
