@@ -351,6 +351,19 @@ def _query_lc(client):
         return {"status": "ok", "detail": "활성"}   # "정상"은 아님 — is_active는 내부 멈춤을 못 잡음
     return {"status": "bad", "detail": "비활성"}
 
+def _diag_fresh() -> bool:
+    """HB 캐시(_diag_st)가 방금 잰 값인지. HB가 멈췄거나 그래프 질의가 계속
+    예외면 캐시가 상하는데, 상한 값으로 판정하면 탐지가 조용히 꺼지거나(옛
+    blind=True) 엉뚱한 걸 범인으로 만든다. blind·miss가 같은 캐시에서 오므로
+    둘 다 이 게이트 뒤에서만 읽는다 — 하나만 게이트하면 나머지가 샌다.
+    (miss_ts는 robot_diag가 time.time()으로 찍으니 같은 시계로 잰다.)"""
+    if not isinstance(_diag_st, dict):
+        return False
+    ts = _diag_st.get("miss_ts")
+    hb = _diag_st.get("hb_period") or 2.0
+    return ts is not None and (time.time() - ts) <= 3 * hb
+
+
 def _elev_isolated(ping_ok: bool) -> bool:
     """엘베 고립 signature 판정 — "앱은 응답하는데 ROS 그래프엔 없다".
 
@@ -363,13 +376,20 @@ def _elev_isolated(ping_ok: bool) -> bool:
     판정하면 100% 오발이라, 기동 후 20초 + 연속 3회를 모두 넘어야 고립이라 부른다.
     반대로 오래 돌던 앱에서 사라진 것은 진짜 런타임 고립(8/31)이라 그대로 잡힌다."""
     global _elev_iso_hits
-    if isinstance(_diag_st, dict) and _diag_st.get("blind"):
+    # ★불변식: blind와 miss를 따로 읽는다(개별 read). 연속 _ELEV_ISO_HITS회를
+    # 요구하고 폴러 주기(3s)가 HB 주기(2s)보다 길어서 한 틱 섞인 조합이 판정을
+    # 바꾸지 못하기 때문이다. _ELEV_ISO_HITS를 1로 줄이거나 폴러를 HB보다 짧게
+    # 하면 그 전제가 깨지므로, 그때는 둘을 한 덩어리로(dict 통째 교체) 읽어야 한다.
+    if not _diag_fresh():   # 캐시 없음(_diag_st None)도 여기서 걸린다
+        _elev_iso_hits = 0
+        return False
+    if _diag_st.get("blind"):
         # 대시보드 자신조차 그래프에 안 보이면 elevator_tracker가 없는 것도
         # 당연하다 — 이걸 고립으로 부르면 멀쩡한 엘베앱을 범인으로 지목해
         # 운영자가 엉뚱한 재시작을 하게 된다. 이 경우는 판정 자체를 보류한다.
         _elev_iso_hits = 0
         return False
-    miss = _diag_st.get("miss") if isinstance(_diag_st, dict) else None
+    miss = _diag_st.get("miss")
     started = _elev_started_mono
     if (not ping_ok) or started is None or miss is None:
         _elev_iso_hits = 0          # 재료가 없으면 판정 보류 (무소식을 정상으로 읽지 않음)
@@ -396,6 +416,7 @@ def _obs_brief(obs) -> str:
 
 
 def _readiness_poll_loop():
+    global _elev_started_mono
     order = {"bad": 0, "unknown": 1, "ok": 2}
     while True:
         try:
@@ -413,6 +434,14 @@ def _readiness_poll_loop():
                     # 리스 만료(deadman) 표면화 — 엘베가 스스로 권한을 내린 채
                     # 대기 중이면 "정상 응답"이 아니라 재부여가 필요한 상태
                     st = _elev_status(timeout=1.0)
+                    if _elev_started_mono is None:
+                        # 대시보드만 재시작했거나 앱을 밖에서 띄운 경우 — Popen을
+                        # 우리가 안 해서 기동시각이 없다. 그대로 두면 고립 탐지가
+                        # 영영 꺼진 채로 남으므로 지금을 기준으로 삼는다. 유예가
+                        # 처음부터 다시 도는 fail-late일 뿐, 틀린 경보는 안 낸다.
+                        _elev_started_mono = time.monotonic()
+                        _log("MAIN", "엘베앱 기동시각 미상(외부 기동/대시보드 재시작) "
+                                     "→ 지금부터 고립 유예 재시작")
                     # 고립이 먼저 — 앱이 ROS에서 떨어져 있으면 리스 얘기는 의미가 없다
                     if _elev_isolated(True):
                         _ready_val["elev_app"] = {
@@ -427,7 +456,7 @@ def _readiness_poll_loop():
                         # 자기고립이면 고립 여부를 "정상"이라 말할 수 없다 —
                         # 모른다고 적는다(무소식을 정상으로 읽지 않기).
                         head = ("응답(고립 판정 불가 — 대시보드도 그래프 미검출)"
-                                if isinstance(_diag_st, dict) and _diag_st.get("blind")
+                                if _diag_fresh() and _diag_st.get("blind")
                                 else "응답")
                         _ready_val["elev_app"] = {
                             "status": "ok",

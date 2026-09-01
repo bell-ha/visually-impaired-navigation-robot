@@ -180,7 +180,8 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
     """
     cameras = cameras or {}
     st = {"last": {}, "alive": {}, "pubcount": None, "ghost": None,
-          "last_snap": 0.0, "t0": time.time(), "miss": None, "blind": None}
+          "last_snap": 0.0, "t0": time.time(), "miss": None, "blind": None,
+          "miss_ts": None, "hb_period": hb_period}
     now = time.time
 
     # 카메라 프레시니스 구독 (진단 전용)
@@ -253,6 +254,10 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
                 # 밖에서 읽는 쪽(고립 판정)도 이 구분이 필요해 st에 항상 기록한다.
                 blind = (own_node_name is not None and own_node_name not in names)
                 st["blind"] = blind
+                # 이 캐시를 밖에서 읽는 쪽(고립 판정)이 "언제 잰 값인지"를 알아야
+                # 한다 — HB가 멈춘 줄 모르고 상한 값으로 판정하면 탐지가 조용히
+                # 꺼진다. blind/miss는 같은 틱의 값이라 시각도 하나만 둔다.
+                st["miss_ts"] = t
                 miss = tuple(n for n in expected_nodes if n not in names)
                 if miss != st["miss"]:
                     st["miss"] = miss
