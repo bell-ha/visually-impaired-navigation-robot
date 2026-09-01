@@ -6,7 +6,7 @@
 브라우저: http://localhost:5000
 """
 
-import os, json, shutil, subprocess, tempfile, threading, time, webbrowser
+import os, json, math, shutil, subprocess, tempfile, threading, time, webbrowser
 import collections
 import logging
 import cv2
@@ -1604,6 +1604,8 @@ def gripper_ctrl():
 def lift_ctrl():
     """팔 높이(joint_lift) 수동 조정."""
     pos = float(request.json.get("lift", 0.6))
+    if not math.isfinite(pos):      # nan/inf는 아래 클램프를 그대로 통과한다
+        return jsonify(ok=False, error="lift 값이 유한한 숫자가 아님(nan/inf)"), 400
     pos = max(0.15, min(1.10, pos))
     node = _node_ref[0]
     if node is None:
@@ -1619,6 +1621,8 @@ def lift_ctrl():
     return jsonify(ok=True, lift=pos)
 
 ARM_EXT_STEP_MAX = 0.05   # 한 번의 수동 명령으로 허용하는 최대 이동(m)
+ARM_CMD_BLOCK_SEC = 2.5   # 팔 명령 후 베이스를 막는 시간(초) — 궤적 2초 + 여유
+ARM_EXT_FRESH_SEC = 1.0   # 팔 현재값이 이보다 오래되면 상한을 못 믿는다
 
 @app.route("/arm_ext", methods=["POST"])
 def arm_ext_ctrl():
@@ -1646,10 +1650,20 @@ def arm_ext_ctrl():
     if cur is None:
         # 현재값을 모르면 한 걸음 상한을 강제할 수 없다 — 모르면 안 움직인다.
         return jsonify(ok=False, error="팔 위치 미수신(joint_states) — 상한을 강제할 수 없어 거부"), 409
+    last = getattr(node, "_arm_ext_mono", None)
+    if last is None or (time.monotonic() - last) > ARM_EXT_FRESH_SEC:
+        # 값이 있어도 언제 잰 건지 모르면 없는 것과 같다. joint_states가 끊긴
+        # 동안 얼어붙은 현재값으로 ±5cm를 재면 상한이 그대로 무력화된다.
+        return jsonify(ok=False,
+                       error="팔 위치가 오래됨(joint_states 끊김) — 상한을 강제할 수 없어 거부"), 409
     try:
         target = float((request.json or {}).get("arm_ext"))
     except (TypeError, ValueError):
         return jsonify(ok=False, error="arm_ext 값이 숫자가 아님"), 400
+    if not math.isfinite(target):
+        # nan/inf는 float()를 통과하고 min/max도 통과해 상한까지 그대로 간다.
+        # 브라우저를 안 믿는다는 설계라면 여기서 걸러야 한다.
+        return jsonify(ok=False, error="arm_ext 값이 유한한 숫자가 아님(nan/inf)"), 400
     target = max(ARM_EXT_MIN, min(ARM_EXT_MAX, target))     # 절대 안전범위
     capped = target
     if abs(target - cur) > ARM_EXT_STEP_MAX:                # 1회 이동 상한
@@ -1663,6 +1677,10 @@ def arm_ext_ctrl():
     # 직후의 스냅샷은 기존 정착 게이트에 그대로 걸린다(선명한 사진 + 낡은 좌표
     # 짝짓기 방지) — 따로 배선하지 않는다.
     ok = node._send_single_joint(ARM_JOINT, capped, duration_sec=2)
+    if ok:
+        # 베이스 배타용 전용 표식 — 전송은 즉시 돌아오지만 궤적은 몇 초 더 간다.
+        # _last_motion_ts를 재사용하면 베이스가 자기 이동으로 자기를 막는다.
+        node._arm_cmd_ts = time.time()
     if not ok:
         return jsonify(ok=False, arm_ext=capped, requested=target,
                        error="모션 명령 실패(액션서버 없음/고립 가능)")
@@ -2056,6 +2074,8 @@ class ElevatorTracker(Node):
         self._obs = {"driver": "unknown", "body": "unknown",
                      "depth": "unknown", "detail": "관측 시작 전"}
         self._obs_mono = None    # _obs를 마지막으로 갱신한 시각(신선도 판단용)
+        self._arm_ext_mono = None   # state["arm_ext"]를 마지막으로 받은 시각
+        self._arm_cmd_ts = 0.0      # 마지막 팔 수동 명령 전송 시각(베이스 배타용)
         # 관측 전용 신규 타이머 — 위(L1907)의 비활성 손목 초기화 타이머와 무관하며
         # 어떤 관절도 움직이지 않는다(server_is_ready·monotonic 차·캐시 기록뿐).
         self.create_timer(OBS_PERIOD, self._obs_tick)
@@ -2340,6 +2360,12 @@ class ElevatorTracker(Node):
             guard_off = state["guard_off"]
         if pressing_now:
             self._dlog("[MOVE] press 진행 중 — 스텝 거부")
+            return
+        # 팔 수동 명령은 비블로킹이라 응답이 돌아온 뒤에도 궤적이 몇 초 더 간다.
+        # 그 창에 바퀴가 움직이면 이 기능이 막으려던 합성 동작(팔+베이스 동시)이
+        # 그대로 난다. duration_sec=2 궤적을 덮도록 2.5초 잡는다.
+        if time.time() - getattr(self, "_arm_cmd_ts", 0.0) < ARM_CMD_BLOCK_SEC:
+            self._dlog("[MOVE] 팔 수동 이동 중 — 스텝 거부 (팔과 바퀴 동시 이동 금지)")
             return
         self._step_busy  = True
         self._step_abort = False
@@ -2654,6 +2680,10 @@ class ElevatorTracker(Node):
                 with state_lock: state["yaw"] = pos
             elif name == ARM_JOINT:
                 with state_lock: state["arm_ext"] = pos
+                # 이 값이 언제 잰 것인지. joint_states가 끊기면 state["arm_ext"]는
+                # 옛값 그대로 남는데, 그 값을 기준으로 ±5cm를 재면 상한이 무의미해진다
+                # (실제 0.05m인데 0.45m로 알고 있으면 '5cm'가 40cm 이동이 된다).
+                self._arm_ext_mono = time.monotonic()
 
     def _on_depth(self, msg):
         """aligned depth 프레임 저장. color와 동일하게 회전 보정해 좌표계를 맞춤."""
