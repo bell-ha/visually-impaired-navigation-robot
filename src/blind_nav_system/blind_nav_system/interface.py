@@ -1320,6 +1320,7 @@ class InterfaceApp:
         """
         /button  → 버튼 이벤트
         /pull    → pull 이벤트
+        /say …   → 낭독 이벤트 (대시보드가 보낸 문장을 그대로 읽는다)
         그 외    → text 이벤트
         """
         # stdin이 실제 파이프(FIFO)일 때만 EOF=부모(대시보드) 사망으로 간주해 자폭한다.
@@ -1369,6 +1370,10 @@ class InterfaceApp:
                 self._ev_q.put(Event(kind="cancel"))
             elif s == "/backup":
                 self._ev_q.put(Event(kind="backup_warn"))
+            elif s.startswith("/say "):
+                # 대시보드가 보내는 낭독 요청 — 여정이 중단됐는데 아무 말도 안
+                # 나가면 사용자는 왜 멈췄는지 알 길이 없다(그 침묵이 사고였다).
+                self._ev_q.put(Event(kind="say", text=s[5:].strip()))
             elif s.startswith("/goto "):
                 # 대시보드 장소 클릭 — 정확한 목적지명으로 즉시 출발 (GPT·마이크 생략)
                 self._ev_q.put(Event(kind="goto", text=s[6:].strip()))
@@ -1953,6 +1958,14 @@ class InterfaceApp:
                 threading.Thread(
                     target=self.tts.say,
                     args=("잠시 뒤로 이동합니다.",),
+                    daemon=True,
+                ).start()
+            elif ev.kind == "say" and ev.text:
+                # 대시보드발 낭독 – 후진 안내와 같은 방식(상태 무관 즉시 TTS).
+                # 멈춘 이유는 어느 상태에서든 들려야 해서 상태로 거르지 않는다.
+                threading.Thread(
+                    target=self.tts.say,
+                    args=(ev.text,),
                     daemon=True,
                 ).start()
 
