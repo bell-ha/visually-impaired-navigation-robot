@@ -180,7 +180,7 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
     """
     cameras = cameras or {}
     st = {"last": {}, "alive": {}, "pubcount": None, "ghost": None,
-          "last_snap": 0.0, "t0": time.time(), "miss": None}
+          "last_snap": 0.0, "t0": time.time(), "miss": None, "blind": None}
     now = time.time
 
     # 카메라 프레시니스 구독 (진단 전용)
@@ -248,14 +248,15 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
             except Exception:
                 names = None
             if names is not None:
+                # 자기 노드조차 안 보이면 상대가 죽은 게 아니라 내 그래프가 고립된
+                # 것 — "이 노드들이 죽었다"로 읽으면 오판한다. 로그 문구뿐 아니라
+                # 밖에서 읽는 쪽(고립 판정)도 이 구분이 필요해 st에 항상 기록한다.
+                blind = (own_node_name is not None and own_node_name not in names)
+                st["blind"] = blind
                 miss = tuple(n for n in expected_nodes if n not in names)
                 if miss != st["miss"]:
                     st["miss"] = miss
                     if miss:
-                        # 자기 노드조차 안 보이면 상대가 죽은 게 아니라 내 그래프가
-                        # 고립된 것 — "이 노드들이 죽었다"로 읽으면 오판한다.
-                        blind = (own_node_name is not None
-                                 and own_node_name not in names)
                         note = (f" (자기 노드 '{own_node_name}'도 그래프 미검출 "
                                 "— 목록 신뢰불가)") if blind else ""
                         logger.log("NODE", f"없는노드={list(miss)}{note}")

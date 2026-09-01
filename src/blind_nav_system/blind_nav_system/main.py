@@ -363,6 +363,12 @@ def _elev_isolated(ping_ok: bool) -> bool:
     판정하면 100% 오발이라, 기동 후 20초 + 연속 3회를 모두 넘어야 고립이라 부른다.
     반대로 오래 돌던 앱에서 사라진 것은 진짜 런타임 고립(8/31)이라 그대로 잡힌다."""
     global _elev_iso_hits
+    if isinstance(_diag_st, dict) and _diag_st.get("blind"):
+        # 대시보드 자신조차 그래프에 안 보이면 elevator_tracker가 없는 것도
+        # 당연하다 — 이걸 고립으로 부르면 멀쩡한 엘베앱을 범인으로 지목해
+        # 운영자가 엉뚱한 재시작을 하게 된다. 이 경우는 판정 자체를 보류한다.
+        _elev_iso_hits = 0
+        return False
     miss = _diag_st.get("miss") if isinstance(_diag_st, dict) else None
     started = _elev_started_mono
     if (not ping_ok) or started is None or miss is None:
@@ -418,9 +424,14 @@ def _readiness_poll_loop():
                     else:
                         # 응답 = HTTP가 살아있다는 뜻까지다. 팔/카메라가 실제로 살아있는지는
                         # 엘베앱이 낸 관측 결과를 그대로 옮겨 붙여 운영자가 보게 한다.
+                        # 자기고립이면 고립 여부를 "정상"이라 말할 수 없다 —
+                        # 모른다고 적는다(무소식을 정상으로 읽지 않기).
+                        head = ("응답(고립 판정 불가 — 대시보드도 그래프 미검출)"
+                                if isinstance(_diag_st, dict) and _diag_st.get("blind")
+                                else "응답")
                         _ready_val["elev_app"] = {
                             "status": "ok",
-                            "detail": "응답 · " + _obs_brief(st.get("obs") if st else None)}
+                            "detail": head + " · " + _obs_brief(st.get("obs") if st else None)}
                     # 그리퍼 카메라 — "대기"로 속아 헛걸음시킨 사고 방지(엘베앱 /status의
                     # camera_missing 재사용, 엘베앱이 이미 기동 10초 유예까지 다 처리함)
                     cam_missing = st.get("camera_missing") if st else None
