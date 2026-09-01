@@ -1366,9 +1366,28 @@ def _http_self(path, payload):
         _log("AUTO", f"{path} 호출 실패: {e}")
         return False
 
+def _auto_notify(msg: str):
+    """여정 거부·중단을 남긴다. 조용히 멈추면 그게 또 무증상 실패다.
+
+    ⚠ 지금은 운영자 로그까지만 간다 — 시각장애인 음성 통보는 아직 통로가 없다.
+    interface는 stdin으로 슬래시 명령만 받고(/goto·/button…), 그 밖의 줄은
+    "사용자 발화"(text 이벤트)로 처리한다. 여정 중 상태(NAV/LOCKED)에서는
+    _handle_text가 그대로 return이라 한 마디도 안 나오고, READY 입력 단계였다면
+    이 문장을 목적지 발화로 해석해 엉뚱한 동작을 할 수 있다. 그래서 여기서
+    _write("iface", msg)를 하지 않는다 — 말한다고 착각하게 만드는 코드는
+    무증상 실패를 하나 더 만드는 것이다.
+    음성까지 가려면 interface에 낭독 전용 명령(/say)이 필요하다(별건)."""
+    _log("AUTO", f"🚨 여정 중단 통보: {msg} (운영자 화면·로그만 — 음성 통로 없음)")
+
+
 def _auto_run(dest):
     """반자동 여정 상태머신 (백그라운드 스레드)."""
     global _elev_started_mono
+    # 팔이 수납돼 있다고 볼 수 있는가. 대시보드는 /joint_states를 안 보므로 팔
+    # 자세를 직접 못 잰다 — 엘베앱이 주는 "누르기+팔복귀+그리퍼열기 완료" 신호가
+    # 유일한 근거다. 그래서 이 래치를 푸는 곳은 아래 단 두 곳(press_done True)뿐이고,
+    # 다른 데서 True로 만들면 근거 없는 안전 주장이 된다.
+    arm_safe = True     # 여정 시작 = 수납 상태 가정
     try:
         with _auto_lock:
             _AUTO.update(active=True, dest=dest, cancel=False, phase="", mode="")
@@ -1423,6 +1442,7 @@ def _auto_run(dest):
 
         # ① 호출 press: 인식자세 → 호출버튼(상/하행) 자동선택 → 정렬 → '다음'에 누르기
         _auto_set("① 호출", f"인식 자세 + {dir_txt} 버튼 자동 선택·정렬 중...", phase="call")
+        arm_safe = False                        # 인식자세 = 팔이 뻗는다
         _elev_scene(0)                          # place=hall + 인식자세(블로킹)
         _elev_select("^" if up else "s")        # 호출버튼 자동 선택 (^=상행 s=하행)
         if _elev_wait_ready():
@@ -1430,11 +1450,23 @@ def _auto_run(dest):
         else:
             _auto_set("① 호출", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
         if not _auto_wait_confirm(): _auto_abort_elev(); return
-        _elev_press()                           # 다음 → 호출버튼 누르기
+        if not _elev_press():                   # 다음 → 호출버튼 누르기
+            _auto_notify("누르기 명령을 보내지 못해 멈췄습니다")
+            _auto_set("오류", "누르기 전송 실패 — 여정 중단")
+            _auto_abort_elev(); return
         _auto_set("① 호출", "호출 버튼 누르는 중... (팔 복귀까지 대기)")
-        _elev_wait_press_done()                 # 눌림+팔복귀 완료까지 대기(이동 안전)
+        # 눌림+팔복귀+그리퍼열기 완료까지 대기 — 이게 True여야 이동해도 안전하다.
+        if not _elev_wait_press_done():
+            _auto_notify("누르기를 확인하지 못해 멈췄습니다")
+            _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
+            _auto_abort_elev(); return
+        arm_safe = True                         # 유일한 release 지점 (1/2)
 
         # ② 문앞 정렬: 전진 56.5 + 우회전 90° (자동 안무)
+        if not arm_safe:
+            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다")
+            _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(② 문앞정렬)")
+            _auto_abort_elev(); return
         _auto_set("② 문앞정렬", "문 앞으로 정렬 중(전진·회전)... 완료되면 '다음'",
                   wait=True, phase="front")
         _elev_scene(1)
@@ -1446,6 +1478,10 @@ def _auto_run(dest):
         if not _auto_wait_confirm(): _auto_abort_elev(); return
 
         # ④ 탑승: 전진 185 (자동 안무)
+        if not arm_safe:
+            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다")
+            _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(④ 탑승)")
+            _auto_abort_elev(); return
         _auto_set("④ 탑승", "탑승(전진) 중... 다 탔으면 '다음'", wait=True, phase="ride")
         _elev_scene(3)
         if not _auto_wait_confirm(): _auto_abort_elev(); return
@@ -1453,6 +1489,7 @@ def _auto_run(dest):
         # ⑤ 층 press: 인식자세 → 목적층 자동선택 → 정렬 → '다음'에 누르기
         _auto_set("⑤ 층선택", f"인식 자세 + {dest_floor}층 버튼 자동 선택·정렬 중...",
                   phase="floor")
+        arm_safe = False                        # 인식자세 = 팔이 뻗는다
         _elev_scene(4)                          # place=cab + 인식자세
         _elev_select(dest_floor)                # 층버튼 자동 선택
         if _elev_wait_ready():
@@ -1460,14 +1497,25 @@ def _auto_run(dest):
         else:
             _auto_set("⑤ 층선택", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
         if not _auto_wait_confirm(): _auto_abort_elev(); return
-        _elev_press()                           # 다음 → 층버튼 누르기
+        if not _elev_press():                   # 다음 → 층버튼 누르기
+            _auto_notify("누르기 명령을 보내지 못해 멈췄습니다")
+            _auto_set("오류", "누르기 전송 실패 — 여정 중단")
+            _auto_abort_elev(); return
         _auto_set("⑤ 층선택", f"{dest_floor}층 버튼 누르는 중... (팔 복귀까지 대기)")
-        _elev_wait_press_done()                 # 눌림+팔복귀 완료까지 대기
+        if not _elev_wait_press_done():         # 눌림+팔복귀 완료까지 대기
+            _auto_notify("누르기를 확인하지 못해 멈췄습니다")
+            _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
+            _auto_abort_elev(); return
+        arm_safe = True                         # 유일한 release 지점 (2/2)
 
         # 엘베 이동 대기 → ⑥ 하차: 후진 186 (자동 안무)
         _auto_set("이동중", f"{dest_floor}층 이동 중 — 도착·하차 준비되면 '다음'",
                   wait=True, phase="moving")
         if not _auto_wait_confirm(): _auto_abort_elev(); return
+        if not arm_safe:
+            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다")
+            _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(⑥ 하차)")
+            _auto_abort_elev(); return
         _auto_set("⑥ 하차", "하차(후진) 중...", phase="exit")
         _elev_scene(5)
         time.sleep(3)
