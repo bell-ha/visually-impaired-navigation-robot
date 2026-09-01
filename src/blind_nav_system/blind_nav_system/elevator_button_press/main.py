@@ -1271,6 +1271,7 @@ def status():
                    authority=bool(s.get("authority", False)),
                    lease_expired=bool(s.get("lease_expired")),
                    camera_missing=(_n._camera_missing_check() if _n is not None else None),
+                   arm_ext=s.get("arm_ext"),   # 팔 뻗기 현재값 — UI 슬라이더 동기화용
                    obs=(_n._obs if _n is not None else None),   # 고립 관측(A5) 캐시 — 판정은 _obs_tick이 함
                    obs_age=_obs_age(_n),   # 위 캐시를 잰 지 몇 초 됐나(이 프로세스 안에서 계산)
                    clear_f=clear_f, clear_b=clear_b,
@@ -1607,10 +1608,68 @@ def lift_ctrl():
     node = _node_ref[0]
     if node is None:
         return jsonify(ok=False, lift=pos, error="node 없음"), 503
+    # 다른 이동 진입점과 같은 관문 — 여기만 빠져 있어서 제어권 없이도 팔이
+    # 올라갔다. 리스를 안 쥔 쪽이 관절을 움직이면 소유자가 둘이 된다.
+    if not _authority_ok():
+        return jsonify(ok=False, lift=pos,
+                       error="제어권 없음 — 대시보드(8080)에서 엘리베이터 제어권을 부여하세요"), 403
     ok = node.set_lift(pos)
     if not ok:
         return jsonify(ok=False, lift=pos, error="모션 명령 실패(액션서버 없음/고립 가능)")
     return jsonify(ok=True, lift=pos)
+
+ARM_EXT_STEP_MAX = 0.05   # 한 번의 수동 명령으로 허용하는 최대 이동(m)
+
+@app.route("/arm_ext", methods=["POST"])
+def arm_ext_ctrl():
+    """팔 뻗기(wrist_extension) 수동 조정 — 매핑용 근접 촬영.
+
+    팔이 사람·패널 코앞에서 움직이므로 관문을 전부 지난 뒤에만 움직인다.
+    한 번에 갈 수 있는 거리는 서버가 자른다 — 브라우저가 보낸 목표값을 그대로
+    믿으면 슬라이더가 튀거나 오조작 한 번에 팔이 끝까지 나간다. 현재값을 아는
+    쪽은 서버이므로 상한도 서버가 강제한다."""
+    node = _node_ref[0]
+    if node is None:
+        return jsonify(ok=False, error="node 없음"), 503
+    if not _authority_ok():
+        return jsonify(ok=False,
+                       error="제어권 없음 — 대시보드(8080)에서 엘리베이터 제어권을 부여하세요"), 403
+    with state_lock:
+        pressing = state["pressing"]
+        cur = state.get("arm_ext")
+    if pressing:
+        return jsonify(ok=False, error="누르기 진행 중 — 팔 수동조작 불가"), 409
+    # 베이스와 상호배타: 자동 안무·정렬이 도는 중에 팔을 움직이면 두 명령이
+    # 겹쳐 궤적이 선점되고, 무엇보다 사람이 예측할 수 없는 합성 동작이 된다.
+    if getattr(node, "_step_busy", False) or getattr(node, "_nudging", False):
+        return jsonify(ok=False, error="베이스 이동/정렬 진행 중 — 팔 수동조작 불가"), 409
+    if cur is None:
+        # 현재값을 모르면 한 걸음 상한을 강제할 수 없다 — 모르면 안 움직인다.
+        return jsonify(ok=False, error="팔 위치 미수신(joint_states) — 상한을 강제할 수 없어 거부"), 409
+    try:
+        target = float((request.json or {}).get("arm_ext"))
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="arm_ext 값이 숫자가 아님"), 400
+    target = max(ARM_EXT_MIN, min(ARM_EXT_MAX, target))     # 절대 안전범위
+    capped = target
+    if abs(target - cur) > ARM_EXT_STEP_MAX:                # 1회 이동 상한
+        capped = cur + (ARM_EXT_STEP_MAX if target > cur else -ARM_EXT_STEP_MAX)
+        capped = max(ARM_EXT_MIN, min(ARM_EXT_MAX, capped))
+    node._dlog(f"[ARM] 수동 뻗기: {cur:.3f}→{capped:.3f}m"
+               + (f" (요청 {target:.3f} — 1회 {ARM_EXT_STEP_MAX*100:.0f}cm 상한으로 자름)"
+                  if capped != target else ""))
+    # 비블로킹 전송(_move_joint_wait는 완료까지 최대 8초 붙잡아 UI가 굳는다).
+    # 덤으로 _send_single_joint가 _last_motion_ts를 갱신하므로, 팔이 막 움직인
+    # 직후의 스냅샷은 기존 정착 게이트에 그대로 걸린다(선명한 사진 + 낡은 좌표
+    # 짝짓기 방지) — 따로 배선하지 않는다.
+    ok = node._send_single_joint(ARM_JOINT, capped, duration_sec=2)
+    if not ok:
+        return jsonify(ok=False, arm_ext=capped, requested=target,
+                       error="모션 명령 실패(액션서버 없음/고립 가능)")
+    # ok는 "goal을 보냈다"까지지 "그 위치에 도달했다"가 아니다 — 실제 위치는
+    # joint_states로 확인한다(전송성공≠완료).
+    return jsonify(ok=True, arm_ext=capped, requested=target,
+                   capped=(capped != target))
 
 @app.route("/press", methods=["POST"])
 def press():
