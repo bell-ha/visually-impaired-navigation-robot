@@ -608,7 +608,8 @@ HTML = """
       fetch('/layout', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({rows})})
         .then(r => r.json())
-        .then(d => { if (d.ok) buildPalette(d.rows); else alert(d.error); });
+        .then(d => { if (d.ok) buildPalette(d.rows); else flashMotionErr(d.error); })
+        .catch(() => flashMotionErr('앱 응답 없음'));
     }
     function loadLayout() {
       fetch('/layout').then(r => r.json()).then(d => {
@@ -771,6 +772,9 @@ HTML = """
       return LABEL_COLORS[s % LABEL_COLORS.length];
     }
     // 모션 명령 실패를 짧게 알리는 비침습 토스트 (슬라이더는 자주 쏘므로 alert 대신)
+    // ★불변식: 이 페이지에 블로킹 모달(alert/confirm)을 두지 않는다. 모달은 JS를
+    // 멈춰서 그 동안 Esc(=/step_stop, keydown 핸들러)가 안 먹는다 — 팔이 패널 앞에서
+    // 움직이는 중에 뜨면 중단키를 뺏긴다. 실패 통지는 전부 이 토스트로.
     let _motionErrTimer = null;
     function flashMotionErr(msg) {
       let el = document.getElementById('motion-err-toast');
@@ -828,8 +832,9 @@ HTML = """
     }
     function doPress() {
       fetch('/press', {method:'POST'}).then(r => r.json()).then(d => {
-        if (!d.ok) alert('누르기 거부: ' + d.error);
-      });
+        if (!d.ok) flashMotionErr('누르기 거부: ' + d.error);
+      })
+      .catch(() => flashMotionErr('앱 응답 없음'));
     }
     function setWristForward() {
       const pitch = -0.02, yaw = 0.03;   // WRIST_PITCH/YAW_DEFAULT와 일치
