@@ -1421,6 +1421,28 @@ def _auto_notify(msg: str, voice: bool = True, stow_hint: bool = False):
         _log("AUTO", f"음성 전달 실패(iface 없음/죽음): {msg}")
 
 
+# /press 거부 사유별 처방. 문자열은 엘베앱 start_press()가 돌려주는 그대로이고
+# 수치가 섞인 사유(정렬 어긋남·너무 멂·아직 접근 완료 전)가 있어 부분일치로 본다.
+#   RETRY_WAIT : 시간이 지나면 저절로 풀리는 것 — 기다렸다가 한 번 더
+#   RETRY_HELP : 사람이 조준을 고쳐야 풀리는 것 — 운영자 개입 후 한 번 더
+# 여기 없는 사유는 전부 중단이다(분류를 못 하면 계속 갈 근거가 없다).
+_PRESS_RETRY_WAIT = ("인식이 멈춰 있음", "버튼 관측이 오래됨", "아직 접근 완료 전")
+_PRESS_RETRY_HELP = ("CENTERED 상태가 아님", "정렬 어긋남")
+_PRESS_WAIT_SEC   = 4.0     # 재인식·접근이 한 번 더 돌 만큼만. 길게 잡으면 사용자가 방치된다
+
+
+def _auto_sleep(sec: float) -> bool:
+    """취소를 존중하는 대기. 취소되면 False.
+    time.sleep 한 방으로 자면 그 동안 '취소'가 안 먹는다 — 사람이 멈추라고 한
+    뒤에도 로봇이 다음 동작으로 넘어가는 게 제일 나쁘다."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < sec:
+        if _AUTO["cancel"]:
+            return False
+        time.sleep(0.2)
+    return not _AUTO["cancel"]
+
+
 def _press_or_pass() -> bool:
     """누르기 시도. 여정을 계속해도 되면 True, 중단해야 하면 False.
 
@@ -1447,8 +1469,41 @@ def _press_or_pass() -> bool:
         # 일이 아니라 정상 진행이므로 음성 없이 통과시킨다.
         _log("AUTO", f"누르기 거부({why})지만 엘베앱 상태는 진행 중 — 통과")
         return True
+
+    # ── 사유별 처방 — 재시도는 통틀어 한 번뿐이다(직선 코드, 반복 없음) ──
+    if any(k in why for k in _PRESS_RETRY_WAIT):
+        # 재인식·자동 접근이 한 번 더 돌면 풀리는 사유 — 사람 손이 필요 없다.
+        _auto_notify("잠시만 기다려 주세요")
+        _auto_set("재시도", f"누르기 대기 후 재시도: {why}")
+        if not _auto_sleep(_PRESS_WAIT_SEC):
+            _auto_notify("여정을 멈췄습니다", stow_hint=True)
+            _auto_set("오류", "취소됨 — 여정 중단")
+            return False
+    elif any(k in why for k in _PRESS_RETRY_HELP):
+        # 조준이 어긋난 것 — 운영자가 엘베UI에서 맞춰줘야 풀린다.
+        # 베이스를 움직이면 정렬이 통째로 날아가므로 그러지 말라고 못박는다.
+        _auto_notify("버튼 위치를 다시 맞추고 있습니다. 잠시만 기다려 주세요")
+        _auto_set("재시도",
+                  f"누르기 거부: {why} — 베이스는 움직이지 말고 엘베UI 조준트림(⇧)·"
+                  "lift(+/-)로 맞춘 뒤 '다음'", wait=True)
+        if not _auto_wait_confirm():
+            _auto_notify("여정을 멈췄습니다", stow_hint=True)
+            _auto_set("오류", "취소됨 — 여정 중단")
+            return False
+    else:
+        _auto_notify("누르기 명령을 보내지 못해 멈췄습니다", stow_hint=True)
+        _auto_set("오류", f"누르기 거부: {why} — 여정 중단")
+        return False
+
+    ok2, reason2 = _elev_press()      # 재시도는 여기 한 번뿐
+    if ok2:
+        return True
+    st2 = _elev_status()
+    if st2 is not None and (st2.get("pressing") or st2.get("scene_next_ok")):
+        _log("AUTO", f"재시도 거부({reason2 or '사유 없음'})지만 엘베앱 상태는 진행 중 — 통과")
+        return True
     _auto_notify("누르기 명령을 보내지 못해 멈췄습니다", stow_hint=True)
-    _auto_set("오류", f"누르기 거부: {why} — 여정 중단")
+    _auto_set("오류", f"재시도도 거부: {reason2 or '사유 없음'} — 여정 중단")
     return False
 
 
