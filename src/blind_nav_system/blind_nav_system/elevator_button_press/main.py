@@ -822,7 +822,12 @@ HTML = """
         .then(d => setTgl('align-tgl', d.enabled, false, 'align-state'));
     }
     function togglePlace() {
-      fetch('/place', {method:'POST'});   // 라벨/팔레트는 poll()이 서버 상태로 동기화
+      // 라벨/팔레트는 poll()이 서버 상태로 동기화. 다만 lift 선이동은 poll에
+      // 안 나오므로(모드만 바뀌고 팔은 그대로) 실패를 여기서 직접 알린다.
+      fetch('/place', {method:'POST'})
+        .then(r => r.json())
+        .then(d => { if (d.lift_ok === false) flashMotionErr('규정 높이 이동 실패'); })
+        .catch(() => flashMotionErr('앱 응답 없음'));
     }
     function setGripper(open) {
       fetch('/gripper', {method:'POST', headers:{'Content-Type':'application/json'},
@@ -1394,10 +1399,14 @@ def _set_place(pl, send_lift=True):
     """장소 모드 설정 (hall/cab). 바뀔 때만 타겟 해제 + lift 규정 높이 선이동.
     /place 토글과 여정 단계(①⑤ 자동 모드)가 공유하는 단일 경로.
     send_lift=False면 lift goal 생략 — 호출측이 자세 goal에 lift를 합쳐 보낼 때
-    (goal을 따로 쏘면 단일-goal 서버가 앞의 것을 선점·유실시키므로)."""
+    (goal을 따로 쏘면 단일-goal 서버가 앞의 것을 선점·유실시키므로).
+
+    반환: lift 선이동 결과. None=시도 안 함(모드 그대로/생략/이미 그 높이),
+    True=goal 전송됨, False=못 보냄. 지금까지 이 결과는 버려져서, lift가 안
+    움직여도 화면엔 아무 표시가 없었다(모드만 바뀌고 팔은 그대로)."""
     with state_lock:
         if state["place"] == pl:
-            return
+            return None
         state["place"] = pl
         state["target_text"] = None
         state["phase"]       = "SELECT"
@@ -1414,15 +1423,25 @@ def _set_place(pl, send_lift=True):
         if send_lift and (cur_lift is None or abs(cur_lift - prior) > 0.03):
             node._dlog(f"[MODE] 규정 높이 선이동: lift "
                        f"{('%.2f' % cur_lift) if cur_lift is not None else '?'}→{prior:.2f}")
-            node._send_goal(["joint_lift"], [prior])
+            sent = node._send_goal(["joint_lift"], [prior])
+            if not sent:
+                node._dlog("[MODE] ⛔ 규정 높이 선이동 실패 — lift 명령이 안 나갔다")
+            return sent
+        return None      # 생략(send_lift=False) 또는 이미 그 높이 — 시도 안 함
+    # ROS 노드가 없으면 모드만 바뀌고 lift는 못 간다 — 시도했어야 하는데 못 간
+    # 것이므로 False(=실패)다. None(=시도 안 함)으로 뭉뚱그리지 않는다.
+    return False if send_lift else None
 
 @app.route("/place", methods=["POST"])
 def place_toggle():
     """장소 모드 토글: 홀(밖, 호출 ▲▼) ↔ 차내(안, 층 숫자). 전환 시 타겟 해제."""
     with state_lock:
         pl = "cab" if state["place"] == "hall" else "hall"
-    _set_place(pl)
-    return jsonify(ok=True, place=pl)
+    lift_ok = _set_place(pl)
+    # ok는 장소 토글의 성공 여부다 — 토글 자체는 진짜 성공했으니 뒤집지 않는다.
+    # lift가 갔는지는 별개 사실이라 별개 필드로 알린다(전송성공≠동작완료:
+    # lift_ok=True도 "goal을 보냈다"까지이고 "그 높이에 도달했다"는 아니다).
+    return jsonify(ok=True, place=pl, lift_ok=lift_ok)
 
 # ── 여정 단계 + 조종 패드 (리허설 티칭용) ──────────────────────
 SCENES = ["① 호출 press", "② 문앞 정렬", "③ 문 열림 대기",
