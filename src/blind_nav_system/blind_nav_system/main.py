@@ -1326,9 +1326,13 @@ def _elev_select(text):
     return bool(r and r.get("ok", True))
 
 def _elev_press():
-    """누르기 실행(POST /press). 성공 시 True."""
+    """누르기 실행(POST /press). (성공여부, 사유) 반환.
+
+    사유를 버리면 "왜 거부됐는지"가 여기서 끊긴다 — 거부 대부분은 고장이 아니라
+    "지금은 안 된다"라서, 사유를 봐야 기다릴 일인지 멈출 일인지 가른다.
+    사유는 응답이 없을 때 None."""
     r = _elev_post("/press", {}, timeout=15)
-    return bool(r and r.get("ok"))
+    return bool(r and r.get("ok")), (r or {}).get("error")
 
 def _elev_wait_ready(timeout=45):
     """정렬 완료(centered && press_ready) 대기 — 취소 존중. 성공 True / 타임아웃·취소 False."""
@@ -1385,7 +1389,7 @@ _ARM_STOW_NOTE = ("팔이 뻗은 상태일 수 있음 — 대시보드 '팔 수�
                   "넣은 뒤 밀거나 수동주행할 것")
 
 
-def _auto_notify(msg: str, voice: bool = True):
+def _auto_notify(msg: str, voice: bool = True, stow_hint: bool = False):
     """여정 거부·중단을 알린다. 조용히 멈추면 그게 또 무증상 실패다.
 
     운영자 로그는 언제나 남기고, voice=True면 같은 문장을 음성으로도 보낸다 —
@@ -1393,23 +1397,59 @@ def _auto_notify(msg: str, voice: bool = True):
 
     왜 이제 음성이 되나: interface에 낭독 전용 /say 명령을 뒀다. 별도
     kind='say' 이벤트라 사용자 발화(text)로 오인되지 않고, _handle_text의
-    상태 게이트(NAV·LOCKED에서 즉시 return)를 타지 않는다. 낭독은 후진 안내
-    (backup_warn)와 똑같이 데몬 스레드에서 tts.say를 직접 부른다 —
-    _say()는 동기 호출에 AudioGate를 몇 초 닫아버려서, 그동안 버튼·당김·취소
-    같은 이벤트가 막힌다(모달이 Esc를 막던 것과 같은 결함).
+    상태 게이트(NAV·LOCKED에서 즉시 return)를 타지 않는다. 낭독은 이벤트 루프
+    스레드가 아니라 데몬 스레드에서 돈다 — 루프에서 동기로 재생하면 재생이
+    끝날 때까지 버튼·당김·취소가 처리되지 않는다(모달이 Esc를 막던 것과 같은
+    결함). 막는 것은 AudioGate가 아니라 루프 스레드를 물고 있는 동기 재생이다.
+    그 스레드 안에서는 _say를 쓴다 — AudioGate가 재생 동안 마이크를 막아
+    TTS 소리를 로봇이 자기 발화로 되받는 것을 방지한다.
 
     voice=False는 운영자 전용 통보다 — 시각장애인이 할 수 없는 조치(팔 수납)를
-    음성으로 읽어주면 도움이 안 된다.
+    음성으로 읽어주면 도움이 안 된다. stow_hint=True면 그 수납 안내를 운영자
+    로그에만 덧붙인다(중단 지점은 팔이 뻗어 있을 수 있는 자리라서).
 
     _write 반환으로 전달 실패는 로그에 남지만, 성공해도 "stdin에 썼다"까지지
     "들렸다"는 아니다(전송성공≠완료)."""
+    if not msg.strip():
+        return          # 빈 통보는 화면에도 음성에도 의미가 없다
     _log("AUTO", f"🚨 여정 중단 통보: {msg}")
+    if stow_hint:
+        _log("AUTO", f"↳ 운영자 안내: {_ARM_STOW_NOTE}")
     if not voice:
         return
     if not _write("iface", f"/say {msg}"):
         _log("AUTO", f"음성 전달 실패(iface 없음/죽음): {msg}")
-    # 운영자 전용 후속 안내 — 같은 헬퍼를 음성 없이 한 번 더 탄다.
-    _auto_notify(_ARM_STOW_NOTE, voice=False)
+
+
+def _press_or_pass() -> bool:
+    """누르기 시도. 여정을 계속해도 되면 True, 중단해야 하면 False.
+
+    /press 거부가 곧 실패는 아니다 — "이미 누르기 진행 중"처럼 거부와 동시에
+    실제로는 누르기가 돌고 있는 경우가 있어서, 사유만 보고 끊으면 멀쩡히 눌리는
+    중인 여정을 죽인다. 그래서 거부 뒤에는 반드시 상태를 한 번 물어보고,
+    진행 중(pressing)이거나 이미 끝났으면(scene_next_ok) 그대로 완료 대기로
+    넘긴다. 상태조차 못 물으면 팔이 어떤 자세인지 알 방법이 없으므로 중단한다
+    — 모르면 안 움직인다.
+
+    여기서는 아무것도 움직이지 않는다. 팔 복귀 확인(arm_safe)은 여전히
+    _elev_wait_press_done()만 풀 수 있다(S1 불변식)."""
+    ok, reason = _elev_press()
+    if ok:
+        return True
+    why = reason or "사유 없음"
+    st = _elev_status()
+    if st is None:
+        _auto_notify("누르기 명령을 보내지 못해 멈췄습니다", stow_hint=True)
+        _auto_set("오류", f"누르기 거부({why}) + 엘베앱 상태 조회 실패 — 여정 중단")
+        return False
+    if st.get("pressing") or st.get("scene_next_ok"):
+        # 거부는 됐지만 실제로는 눌리는 중이거나 이미 끝났다 — 사용자에게 알릴
+        # 일이 아니라 정상 진행이므로 음성 없이 통과시킨다.
+        _log("AUTO", f"누르기 거부({why})지만 엘베앱 상태는 진행 중 — 통과")
+        return True
+    _auto_notify("누르기 명령을 보내지 못해 멈췄습니다", stow_hint=True)
+    _auto_set("오류", f"누르기 거부: {why} — 여정 중단")
+    return False
 
 
 def _auto_run(dest):
@@ -1419,7 +1459,8 @@ def _auto_run(dest):
     # 자세를 직접 못 잰다 — 엘베앱이 주는 "누르기+팔복귀+그리퍼열기 완료" 신호가
     # 유일한 근거다. 그래서 이 래치를 푸는 곳은 아래 단 두 곳(press_done True)뿐이고,
     # 다른 데서 True로 만들면 근거 없는 안전 주장이 된다.
-    arm_safe = True     # 여정 시작 = 수납 상태 가정
+    arm_safe = True     # 여정 시작 시점의 "가정" — 잰 값이 아니다. 직전에
+                        # 운영자가 팔을 뻗어둔 채 여정을 시작하면 이 가정은 틀린다.
     try:
         with _auto_lock:
             _AUTO.update(active=True, dest=dest, cancel=False, phase="", mode="")
@@ -1474,7 +1515,10 @@ def _auto_run(dest):
 
         # ① 호출 press: 인식자세 → 호출버튼(상/하행) 자동선택 → 정렬 → '다음'에 누르기
         _auto_set("① 호출", f"인식 자세 + {dir_txt} 버튼 자동 선택·정렬 중...", phase="call")
-        arm_safe = False                        # 인식자세 = 팔이 뻗는다
+        # 인식자세 자체는 lift·손목만 잡고 arm_extension은 건드리지 않는다.
+        # 팔이 실제로 뻗는 것은 그 뒤 자동 접근·서보와 누르기 시퀀스다 —
+        # 여기서 내려두는 건 "이 지점부터는 수납을 장담 못 한다"는 뜻이다.
+        arm_safe = False
         _elev_scene(0)                          # place=hall + 인식자세(블로킹)
         _elev_select("^" if up else "s")        # 호출버튼 자동 선택 (^=상행 s=하행)
         if _elev_wait_ready():
@@ -1482,21 +1526,19 @@ def _auto_run(dest):
         else:
             _auto_set("① 호출", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
         if not _auto_wait_confirm(): _auto_abort_elev(); return
-        if not _elev_press():                   # 다음 → 호출버튼 누르기
-            _auto_notify("누르기 명령을 보내지 못해 멈췄습니다")
-            _auto_set("오류", "누르기 전송 실패 — 여정 중단")
+        if not _press_or_pass():                # 다음 → 호출버튼 누르기
             _auto_abort_elev(); return
         _auto_set("① 호출", "호출 버튼 누르는 중... (팔 복귀까지 대기)")
         # 눌림+팔복귀+그리퍼열기 완료까지 대기 — 이게 True여야 이동해도 안전하다.
         if not _elev_wait_press_done():
-            _auto_notify("누르기를 확인하지 못해 멈췄습니다")
+            _auto_notify("누르기를 확인하지 못해 멈췄습니다", stow_hint=True)
             _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
             _auto_abort_elev(); return
         arm_safe = True                         # 유일한 release 지점 (1/2)
 
         # ② 문앞 정렬: 전진 56.5 + 우회전 90° (자동 안무)
         if not arm_safe:
-            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다")
+            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(② 문앞정렬)")
             _auto_abort_elev(); return
         _auto_set("② 문앞정렬", "문 앞으로 정렬 중(전진·회전)... 완료되면 '다음'",
@@ -1511,7 +1553,7 @@ def _auto_run(dest):
 
         # ④ 탑승: 전진 185 (자동 안무)
         if not arm_safe:
-            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다")
+            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(④ 탑승)")
             _auto_abort_elev(); return
         _auto_set("④ 탑승", "탑승(전진) 중... 다 탔으면 '다음'", wait=True, phase="ride")
@@ -1521,7 +1563,7 @@ def _auto_run(dest):
         # ⑤ 층 press: 인식자세 → 목적층 자동선택 → 정렬 → '다음'에 누르기
         _auto_set("⑤ 층선택", f"인식 자세 + {dest_floor}층 버튼 자동 선택·정렬 중...",
                   phase="floor")
-        arm_safe = False                        # 인식자세 = 팔이 뻗는다
+        arm_safe = False                        # 씬0과 같은 이유(위 주석 참고)
         _elev_scene(4)                          # place=cab + 인식자세
         _elev_select(dest_floor)                # 층버튼 자동 선택
         if _elev_wait_ready():
@@ -1529,13 +1571,11 @@ def _auto_run(dest):
         else:
             _auto_set("⑤ 층선택", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
         if not _auto_wait_confirm(): _auto_abort_elev(); return
-        if not _elev_press():                   # 다음 → 층버튼 누르기
-            _auto_notify("누르기 명령을 보내지 못해 멈췄습니다")
-            _auto_set("오류", "누르기 전송 실패 — 여정 중단")
+        if not _press_or_pass():                # 다음 → 층버튼 누르기
             _auto_abort_elev(); return
         _auto_set("⑤ 층선택", f"{dest_floor}층 버튼 누르는 중... (팔 복귀까지 대기)")
         if not _elev_wait_press_done():         # 눌림+팔복귀 완료까지 대기
-            _auto_notify("누르기를 확인하지 못해 멈췄습니다")
+            _auto_notify("누르기를 확인하지 못해 멈췄습니다", stow_hint=True)
             _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
             _auto_abort_elev(); return
         arm_safe = True                         # 유일한 release 지점 (2/2)
@@ -1545,7 +1585,7 @@ def _auto_run(dest):
                   wait=True, phase="moving")
         if not _auto_wait_confirm(): _auto_abort_elev(); return
         if not arm_safe:
-            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다")
+            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(⑥ 하차)")
             _auto_abort_elev(); return
         _auto_set("⑥ 하차", "하차(후진) 중...", phase="exit")

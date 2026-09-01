@@ -1961,10 +1961,13 @@ class InterfaceApp:
                     daemon=True,
                 ).start()
             elif ev.kind == "say" and ev.text:
-                # 대시보드발 낭독 – 후진 안내와 같은 방식(상태 무관 즉시 TTS).
-                # 멈춘 이유는 어느 상태에서든 들려야 해서 상태로 거르지 않는다.
+                # 대시보드발 낭독 – 멈춘 이유는 어느 상태에서든 들려야 해서
+                # 상태로 거르지 않는다. 별도 스레드인 이유는 이 루프에서 동기로
+                # 재생하면 끝날 때까지 버튼·당김·취소가 처리되지 않기 때문이고,
+                # 그 안에서 _say를 쓰는 이유는 AudioGate가 재생 동안 마이크를
+                # 막아 TTS 소리를 로봇이 자기 발화로 되받지 않게 하기 때문이다.
                 threading.Thread(
-                    target=self.tts.say,
+                    target=self._say,
                     args=(ev.text,),
                     daemon=True,
                 ).start()
