@@ -1602,20 +1602,33 @@ def gripper_ctrl():
 
 @app.route("/lift", methods=["POST"])
 def lift_ctrl():
-    """팔 높이(joint_lift) 수동 조정."""
-    pos = float(request.json.get("lift", 0.6))
-    if not math.isfinite(pos):      # nan/inf는 아래 클램프를 그대로 통과한다
-        return jsonify(ok=False, error="lift 값이 유한한 숫자가 아님(nan/inf)"), 400
-    pos = max(0.15, min(1.10, pos))
+    """팔 높이(joint_lift) 수동 조정. /arm_ext와 같은 순서로 검사한다 —
+    관문 먼저, 값 파싱은 그 뒤. 파싱이 앞에 있으면 제어권도 없는 요청의
+    잘못된 값이 500을 내고, 프록시는 그걸 502로 덮어 원인이 사라진다."""
     node = _node_ref[0]
     if node is None:
-        return jsonify(ok=False, lift=pos, error="node 없음"), 503
+        return jsonify(ok=False, error="node 없음"), 503
     # 다른 이동 진입점과 같은 관문 — 여기만 빠져 있어서 제어권 없이도 팔이
     # 올라갔다. 리스를 안 쥔 쪽이 관절을 움직이면 소유자가 둘이 된다.
     if not _authority_ok():
-        return jsonify(ok=False, lift=pos,
+        return jsonify(ok=False,
                        error="제어권 없음 — 대시보드(8080)에서 엘리베이터 제어권을 부여하세요"), 403
+    try:
+        pos = float((request.json or {}).get("lift"))
+    except (TypeError, ValueError):
+        # 본문이 없거나 lift가 없으면 float(None)이 TypeError를 낸다 — 예전엔
+        # 이게 500으로 나가 프록시의 502에 가려졌다. 400으로 정직하게 말한다.
+        return jsonify(ok=False, error="lift 값이 숫자가 아님"), 400
+    if not math.isfinite(pos):
+        # nan은 아래 클램프를 그대로 통과해 최대 높이가 된다. /arm_ext와 달리
+        # 리프트에는 1회 이동 상한이 없어서 그대로 전 구간을 올라간다.
+        return jsonify(ok=False, error="lift 값이 유한한 숫자가 아님(nan/inf)"), 400
+    pos = max(0.15, min(1.10, pos))
     ok = node.set_lift(pos)
+    if ok:
+        # /arm_ext와 같은 표식 — 리프트도 3초짜리 궤적으로 팔뭉치를 옮긴다.
+        # 여기만 열어두면 팔과 바퀴 동시 이동 구멍이 그대로 남는다.
+        node._arm_cmd_ts = time.time()
     if not ok:
         return jsonify(ok=False, lift=pos, error="모션 명령 실패(액션서버 없음/고립 가능)")
     return jsonify(ok=True, lift=pos)
