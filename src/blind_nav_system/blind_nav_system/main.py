@@ -201,6 +201,18 @@ _ready = {"amcl": 0.0, "battery": 0.0, "handle": 0.0, "nav2": 0.0, "elev_app": 0
 #   _ready[key]=monotonic() = "마지막으로 물어본 시각"(폴러 건강),  _ready_val[key] = 판정결과(대상 건강).
 _ready_val = {"nav2": None, "elev_app": None, "gripper_camera": None}
 
+# ── 엘베 고립 관측(A5 B2) — 표시 전용 ─────────────────────────────────────────
+# 8/31의 signature: 엘베앱 프로세스는 살아서 /ping에 200을 주는데 ROS 쪽은
+# 그래프에서 사라져 있었다(앱은 "켜져 있음", 실제로는 아무 명령도 안 통함).
+# 함정: 정상 기동 때도 Flask(/ping)가 rclpy.init()보다 먼저 떠서 같은 창이
+# 매번 생긴다 — 유예 없이 판정하면 매 기동 100% 오발(늑대소년)이 된다.
+# 그래서 (1) 앱 기동 후 유예 (2) 연속 관측 두 조건을 모두 요구한다.
+_elev_started_mono = None    # 엘베앱을 spawn한 시각(=/ping 최초 성공이 아니라 기동 시각)
+_ELEV_ISO_GRACE    = 20.0    # 기동 유예(초) — _wait_elev_app_up(timeout=20.0)와 같은 값
+_ELEV_ISO_HITS     = 3       # 연속 관측 횟수 — 폴러 3초 주기라 약 9초
+_elev_iso_hits     = 0       # 연속 카운터(폴러 스레드 전용)
+_diag_st = None              # robot_diag.attach()가 돌려주는 상태 캐시(HB가 채움)
+
 # 측위 정지게이트: amcl은 update_min_d/a라 정지 중엔 /amcl_pose가 안 나온다 —
 # 이동명령 여부로 "미갱신=고장"과 "미갱신=정상(정지)"을 구분한다.
 _last_move_cmd = 0.0
@@ -339,6 +351,44 @@ def _query_lc(client):
         return {"status": "ok", "detail": "활성"}   # "정상"은 아님 — is_active는 내부 멈춤을 못 잡음
     return {"status": "bad", "detail": "비활성"}
 
+def _elev_isolated(ping_ok: bool) -> bool:
+    """엘베 고립 signature 판정 — "앱은 응답하는데 ROS 그래프엔 없다".
+
+    재료는 둘 다 대시보드가 이미 갖고 있는 것이다: /ping 결과(이 폴러)와
+    HB가 채워둔 없는노드 캐시(스핀 스레드). 여기선 캐시를 읽기만 한다 —
+    HB 콜백에 HTTP를 넣거나 이 스레드에서 그래프를 다시 질의하지 않는다.
+
+    ⚠ 정상 기동 때도 엘베앱은 Flask(/ping)를 먼저 띄우고 rclpy.init()을 나중에
+    한다 → "200인데 elevator_tracker 없음"이 매 기동 반드시 생긴다. 유예 없이
+    판정하면 100% 오발이라, 기동 후 20초 + 연속 3회를 모두 넘어야 고립이라 부른다.
+    반대로 오래 돌던 앱에서 사라진 것은 진짜 런타임 고립(8/31)이라 그대로 잡힌다."""
+    global _elev_iso_hits
+    miss = _diag_st.get("miss") if isinstance(_diag_st, dict) else None
+    started = _elev_started_mono
+    if (not ping_ok) or started is None or miss is None:
+        _elev_iso_hits = 0          # 재료가 없으면 판정 보류 (무소식을 정상으로 읽지 않음)
+        return False
+    if time.monotonic() - started < _ELEV_ISO_GRACE:
+        _elev_iso_hits = 0          # 기동 창 — 발견 중일 뿐이라 판정하지 않는다
+        return False
+    if "elevator_tracker" in miss:
+        _elev_iso_hits += 1
+    else:
+        _elev_iso_hits = 0
+    return _elev_iso_hits >= _ELEV_ISO_HITS
+
+
+def _obs_brief(obs) -> str:
+    """엘베앱 /status의 고립 관측(A5 B1)을 한 줄로 옮겨 적는다 — 표시 전용.
+    판정은 엘베앱이 이미 했고 여기선 문자열로 바꾸기만 한다(대시보드 재판정 금지)."""
+    if not isinstance(obs, dict):
+        return "관측 없음"
+    mark = {"ok": "정상", "stale": "끊김", "unknown": "미관측"}
+    return " · ".join(f"{lbl} {mark.get(obs.get(k), '미관측')}"
+                      for k, lbl in (("driver", "팔"), ("body", "몸체캠"),
+                                     ("depth", "depth")))
+
+
 def _readiness_poll_loop():
     order = {"bad": 0, "unknown": 1, "ok": 2}
     while True:
@@ -357,11 +407,20 @@ def _readiness_poll_loop():
                     # 리스 만료(deadman) 표면화 — 엘베가 스스로 권한을 내린 채
                     # 대기 중이면 "정상 응답"이 아니라 재부여가 필요한 상태
                     st = _elev_status(timeout=1.0)
-                    if st and st.get("lease_expired"):
+                    # 고립이 먼저 — 앱이 ROS에서 떨어져 있으면 리스 얘기는 의미가 없다
+                    if _elev_isolated(True):
+                        _ready_val["elev_app"] = {
+                            "status": "bad",
+                            "detail": "고립 — 앱은 응답하나 elevator_tracker 없음(ROS 단절)"}
+                    elif st and st.get("lease_expired"):
                         _ready_val["elev_app"] = {"status": "bad",
                                                   "detail": "엘베 리스 만료 — 제어권 재부여 필요"}
                     else:
-                        _ready_val["elev_app"] = {"status": "ok", "detail": "응답"}
+                        # 응답 = HTTP가 살아있다는 뜻까지다. 팔/카메라가 실제로 살아있는지는
+                        # 엘베앱이 낸 관측 결과를 그대로 옮겨 붙여 운영자가 보게 한다.
+                        _ready_val["elev_app"] = {
+                            "status": "ok",
+                            "detail": "응답 · " + _obs_brief(st.get("obs") if st else None)}
                     # 그리퍼 카메라 — "대기"로 속아 헛걸음시킨 사고 방지(엘베앱 /status의
                     # camera_missing 재사용, 엘베앱이 이미 기동 10초 유예까지 다 처리함)
                     cam_missing = st.get("camera_missing") if st else None
@@ -373,9 +432,11 @@ def _readiness_poll_loop():
                     else:
                         _ready_val["gripper_camera"] = {"status": "ok", "detail": "정상"}
                 else:
+                    _elev_isolated(False)   # 연속 카운터 리셋 — 비200은 고립 signature가 아니다
                     _ready_val["elev_app"] = {"status": "bad", "detail": f"HTTP {r.status_code}"}
                     _ready_val["gripper_camera"] = {"status": "unknown", "detail": "엘베앱 응답 없음"}
             except Exception:
+                _elev_isolated(False)   # 연속 카운터 리셋 — 무응답은 고립 signature가 아니다
                 _ready_val["elev_app"] = {"status": "unknown", "detail": "무응답(미기동/접속거부)"}
                 _ready_val["gripper_camera"] = {"status": "unknown", "detail": "미기동"}
         except Exception:
@@ -389,7 +450,7 @@ def _readiness_poll_loop():
         time.sleep(3.0)
 
 def init_ros():
-    global _cmd_node, _cmd_pub, _map_client, _init_pub, _arm_client, _lc_loc_client, _lc_nav_client
+    global _cmd_node, _cmd_pub, _map_client, _init_pub, _arm_client, _lc_loc_client, _lc_nav_client, _diag_st
     if not _ROS_OK:
         return
     rclpy.init()
@@ -422,11 +483,17 @@ def init_ros():
     _lc_nav_client = _cmd_node.create_client(Trigger, "/lifecycle_manager_navigation/is_active")
     # 진단 계측 부착 (cmd_vel 퍼블리셔 수·엘리베이터 노드 존재 추적)
     if _diag is not None and _diaglog is not None:
-        _diag.attach(
+        # 이름은 런치 XML의 <node name=...> 문자 그대로 (추측 금지).
+        # 없는노드 목록은 로그 detail 문자열 재료로만 쓴다 — 픽토그램으로 승격하면
+        # 대시보드 자신이 그래프에서 고립됐을 때 전부 "없음"으로 보여 오탐이 된다.
+        _diag_st = _diag.attach(
             _cmd_node, _diaglog,
             cmd_vel_topic="/stretch/cmd_vel",
             own_node_name="main_web_cmdvel",
-            expected_nodes=["elevator_tracker"],
+            expected_nodes=["elevator_tracker", "rplidar", "camera",
+                            "gripper_camera", "safety_zone_left_back_tf",
+                            "map_server", "amcl",
+                            "lifecycle_manager_localization"],
         )
     def _spin_resilient():
         # 콜백 예외로 스핀이 죽어도 되살려 ROS 절반(pose·battery·load_map·initialpose)이
@@ -994,7 +1061,7 @@ def elevator_app_status():
 
 @app.route("/elevator_app", methods=["POST"])
 def elevator_app():
-    global _elev_lease_held, _lease_renewer_thread
+    global _elev_lease_held, _lease_renewer_thread, _elev_started_mono
     data    = request.json or {}
     desired = data.get("running")     # True=시작, False=종료, None=토글
     running = _elev_app_running()
@@ -1020,6 +1087,7 @@ def elevator_app():
         except Exception:
             pass
         _procs.pop("elevator", None)
+        _elev_started_mono = None   # 꺼진 앱에 고립 판정을 하지 않는다
         if _lease_renewer_thread is not None:
             _lease_renewer_thread.join(timeout=1.0)
             _lease_renewer_thread = None
@@ -1042,6 +1110,7 @@ def elevator_app():
         text=True, bufsize=1,
     )
     _procs["elevator"] = proc
+    _elev_started_mono = time.monotonic()   # 고립 판정 유예 기준(=기동 시각)
     threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
     # 앱만 켠다 — 제어권은 안 줌(엘베앱 켜기 ≠ 제어권 주기). 수동 사용 시 UI의
     # "제어권 부여" 토글로, 자동 여정 중엔 _auto_run이 _grant_elev_lease로 부여.
@@ -1233,6 +1302,7 @@ def _http_self(path, payload):
 
 def _auto_run(dest):
     """반자동 여정 상태머신 (백그라운드 스레드)."""
+    global _elev_started_mono
     try:
         with _auto_lock:
             _AUTO.update(active=True, dest=dest, cancel=False, phase="", mode="")
@@ -1274,6 +1344,7 @@ def _auto_run(dest):
                 [sys.executable, "-u", str(THIS_DIR / "elevator_button_press/main.py")],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             _procs["elevator"] = proc
+            _elev_started_mono = time.monotonic()   # 고립 판정 유예 기준(=기동 시각)
             threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
         if not _wait_elev_app_up(20):
             _auto_set("오류", "엘베앱 기동 실패"); return
