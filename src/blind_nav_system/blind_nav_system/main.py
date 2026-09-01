@@ -1307,6 +1307,56 @@ def snapshot_route():
         return jsonify(ok=False, error="엘베앱 응답 없음"), 502
     return jsonify(result)
 
+def _manual_arm_gate():
+    """팔 수동조작 공통 관문. 막을 이유가 있으면 (사유, HTTP코드), 없으면 None.
+
+    셋 다여야 실제로 움직인다: 엘베앱이 떠 있고, 제어권 리스를 쥐고 있고,
+    자동 여정 중이 아니다. 하나라도 아니면 눌러도 아무 일이 안 일어나는데,
+    화면이 그걸 안 알려주면 "슬라이더가 고장났다"로 읽힌다 — 조용히 안 되는
+    조작기를 하나 더 만드는 셈이라 사유를 그대로 돌려준다.
+    자동 여정 중인지는 대시보드만 아는 사실이라 여기서 막는다(엘베앱은 모른다)."""
+    if _AUTO.get("active"):
+        return "자동 여정 중 — 여정을 멈춘 뒤 조작하세요", 409
+    if not _elev_app_running():
+        return "엘베앱 꺼짐 — 엘리베이터 앱을 먼저 켜세요", 409
+    if not _elev_lease_held:
+        return "제어권 없음 — 대시보드에서 제어권을 부여하세요", 403
+    return None
+
+
+@app.route("/manual_lift", methods=["POST"])
+def manual_lift():
+    """팔 높이 수동 조정 프록시 — 실제 이동·범위 제한은 엘베앱 /lift가 한다."""
+    blocked = _manual_arm_gate()
+    if blocked:
+        return jsonify(ok=False, error=blocked[0]), blocked[1]
+    result = _elev_post("/lift", {"lift": (request.json or {}).get("lift")}, timeout=5)
+    if result is None:
+        return jsonify(ok=False, error="엘베앱 응답 없음"), 502
+    return jsonify(result)
+
+
+@app.route("/manual_arm_ext", methods=["POST"])
+def manual_arm_ext():
+    """팔 뻗기 수동 조정 프록시 — 1회 이동 상한·안전범위는 엘베앱 /arm_ext가
+    강제한다(현재값을 아는 쪽이 거기다). 여기서 다시 자르지 않는다."""
+    blocked = _manual_arm_gate()
+    if blocked:
+        return jsonify(ok=False, error=blocked[0]), blocked[1]
+    result = _elev_post("/arm_ext", {"arm_ext": (request.json or {}).get("arm_ext")}, timeout=5)
+    if result is None:
+        return jsonify(ok=False, error="엘베앱 응답 없음"), 502
+    return jsonify(result)
+
+
+@app.route("/manual_arm_state")
+def manual_arm_state():
+    """팔 컨트롤 활성 여부 + 이유 — UI가 비활성 사유를 그대로 보여주게."""
+    blocked = _manual_arm_gate()
+    return jsonify(ok=True, enabled=(blocked is None),
+                   reason=("" if blocked is None else blocked[0]))
+
+
 def _elev_status(timeout=3):
     """엘베앱 상태(/status) 조회 — dict 또는 None. ready=정렬완료, door_open 등 포함."""
     try:
