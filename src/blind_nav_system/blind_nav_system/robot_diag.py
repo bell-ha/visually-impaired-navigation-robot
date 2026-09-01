@@ -160,6 +160,11 @@ class DiagLogger:
                 self.log("SNAP", f"{k}={v}")
 
 
+# 기동 직후엔 DDS가 아직 참가자를 발견하는 중이라 기대 노드가 전부 없는 것처럼
+# 보인다 — 그 창에서 낸 경보는 매 기동 오발이 된다(카메라 미수신 유예와 같은 이유).
+NODE_MISS_GRACE = 10.0   # 없는노드 판정 기동 유예(초)
+
+
 def attach(node, logger, cameras=None, cmd_vel_topic=None,
            authority_getter=None, phase_getter=None,
            own_node_name=None, expected_nodes=None,
@@ -175,7 +180,7 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
     """
     cameras = cameras or {}
     st = {"last": {}, "alive": {}, "pubcount": None, "ghost": None,
-          "last_snap": 0.0}
+          "last_snap": 0.0, "t0": time.time(), "miss": None}
     now = time.time
 
     # 카메라 프레시니스 구독 (진단 전용)
@@ -234,6 +239,28 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
                 else:
                     logger.log("NODE", f"'{own_node_name}' 참가자 {dup}개 (정상)")
                 st["ghost"] = dup
+        # ⑤ 없는노드 전이 — 10초마다 무조건 찍던 것을 "바뀔 때 1회"로.
+        # 매번 같은 줄이 반복되면 정작 사라진 순간이 로그 속에 묻힌다.
+        # 기동 직후엔 아직 발견 중이라 전부 없는 것처럼 보이므로 유예를 둔다.
+        if expected_nodes and t - st["t0"] > NODE_MISS_GRACE:
+            try:
+                names = node.get_node_names()
+            except Exception:
+                names = None
+            if names is not None:
+                miss = tuple(n for n in expected_nodes if n not in names)
+                if miss != st["miss"]:
+                    st["miss"] = miss
+                    if miss:
+                        # 자기 노드조차 안 보이면 상대가 죽은 게 아니라 내 그래프가
+                        # 고립된 것 — "이 노드들이 죽었다"로 읽으면 오판한다.
+                        blind = (own_node_name is not None
+                                 and own_node_name not in names)
+                        note = (f" (자기 노드 '{own_node_name}'도 그래프 미검출 "
+                                "— 목록 신뢰불가)") if blind else ""
+                        logger.log("NODE", f"없는노드={list(miss)}{note}")
+                    else:
+                        logger.log("NODE", "없는노드 없음 — 기대 노드 전부 보임")
         # ④ 주기 스냅샷 (전체 상태 한 줄)
         if t - st["last_snap"] >= snap_period:
             st["last_snap"] = t
@@ -257,16 +284,12 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
                 nodes = node.get_node_names()
             except Exception:
                 nodes = []
-            missing = ""
-            if expected_nodes:
-                miss = [n for n in expected_nodes if n not in nodes]
-                if miss:
-                    missing = f" 없는노드={miss}"
+            # 없는노드 목록은 ⑤(전이시 1회)로 옮겼다 — 여기선 총 노드 수만 남긴다.
             logger.log("HB",
                        f"cams[{' '.join(cam_ages)}] shm={shm_count()} "
                        f"authority={_safe_call(authority_getter)} "
                        f"phase={_safe_call(phase_getter)}{extra} "
-                       f"nodes={len(nodes)}{missing}")
+                       f"nodes={len(nodes)}")
       except Exception as _e:
         # HB 콜백이 어떤 이유로든 예외를 내도 executor(spin)를 죽이면 안 됨
         try:
