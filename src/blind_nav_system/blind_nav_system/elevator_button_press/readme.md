@@ -161,13 +161,14 @@ python3 ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/blind_n
 - **한계 실측**: 모니터/태블릿에 띄운 패널은 모아레+정반사로 특정 버튼 오독 — 무광 인쇄물 권장.
   화살표 글자는 판독 불가 → 위치 휴리스틱으로 우회
 
-설치·모델 다운로드·단독 테스트는 종전과 동일:
+설치·모델 다운로드는 종전과 동일:
 
 ```bash
 cd ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system
 python3 -m venv --system-site-packages venv && source venv/bin/activate && pip install -r requirements.txt
 # frozen model 2개는 Google Drive에서 ocr-rcnn-v2/.../frozen_model/ 에 다운로드 (gdown)
-# 단독 추론: python3 elevator_button_press/ocr_rcnn_infer.py --image <img>
+# 단독 추론 스크립트(ocr_rcnn_infer.py)는 삭제됨 — 추론은 main.py가 띄우는
+# ocr_rcnn_server.py(stdin/stdout, 모델 1회 로딩)를 통해서만 돈다.
 ```
 
 ---
