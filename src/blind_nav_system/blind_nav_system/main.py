@@ -1351,10 +1351,18 @@ def manual_arm_ext():
 
 @app.route("/manual_arm_state")
 def manual_arm_state():
-    """팔 컨트롤 활성 여부 + 이유 — UI가 비활성 사유를 그대로 보여주게."""
+    """팔 컨트롤 활성 여부 + 이유 + 현재 관절값 — UI가 비활성 사유를 그대로
+    보여주고, 슬라이더를 실제 위치에 맞추는 데 쓴다. 값은 엘베앱이 재는 것을
+    그대로 옮길 뿐이고 여기서 판정하지 않는다(못 물으면 None)."""
     blocked = _manual_arm_gate()
+    lift = arm_ext = None
+    if _elev_app_running():
+        st = _elev_status(timeout=1.0)
+        if st:
+            lift, arm_ext = st.get("lift"), st.get("arm_ext")
     return jsonify(ok=True, enabled=(blocked is None),
-                   reason=("" if blocked is None else blocked[0]))
+                   reason=("" if blocked is None else blocked[0]),
+                   lift=lift, arm_ext=arm_ext)
 
 
 def _elev_status(timeout=3):

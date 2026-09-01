@@ -257,6 +257,47 @@
         <div></div>
       </div>
       <button class="btn btn-danger" style="margin-top:10px;font-size:0.9rem" onclick="emergencyStop()">■ 비상 정지</button>
+
+      <!-- 🦾 매핑용 근접 촬영: 팔 높이·뻗기 수동. 슬라이더/넛지는 목표값만 바꾸고
+           실제 이동은 「적용」에서만 일어난다(끌다가 팔이 따라 움직이면 위험).
+           1회 이동 상한(5cm)·안전범위는 엘베앱이 강제한다 — 화면은 값을 보낼 뿐. -->
+      <div id="arm-manual" style="margin-top:10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:8px 10px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+          <b style="font-size:0.8rem">🦾 팔 조작 <span style="font-weight:400;color:var(--text-dim)">(매핑용 근접 촬영)</span></b>
+          <span id="arm-manual-reason" style="font-size:0.7rem;color:var(--warn)"></span>
+        </div>
+        <div style="display:flex;gap:14px;margin-top:8px;align-items:flex-start">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+            <span style="font-size:0.7rem;color:var(--text-dim)">높이</span>
+            <input type="range" id="arm-lift-slider" min="0.15" max="1.10" step="0.01" value="0.60"
+                   style="writing-mode:vertical-lr;direction:rtl;-webkit-appearance:slider-vertical;width:24px;height:110px">
+            <input type="number" id="arm-lift-val" min="0.15" max="1.10" step="0.01" value="0.60"
+                   style="width:62px;background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.75rem;text-align:center">
+            <div style="display:flex;gap:4px">
+              <button class="btn btn-neutral btn-sm" id="arm-lift-minus" onclick="armNudge('lift',-0.01)">−1cm</button>
+              <button class="btn btn-neutral btn-sm" id="arm-lift-plus"  onclick="armNudge('lift', 0.01)">+1cm</button>
+            </div>
+            <button class="btn btn-primary btn-sm" id="arm-lift-apply" onclick="armApply('lift')">적용</button>
+          </div>
+          <div style="flex:1;display:flex;flex-direction:column;gap:4px">
+            <span style="font-size:0.7rem;color:var(--text-dim)">뻗기</span>
+            <input type="range" id="arm-ext-slider" min="0" max="0.50" step="0.01" value="0"
+                   style="width:100%">
+            <div style="display:flex;gap:4px;align-items:center">
+              <input type="number" id="arm-ext-val" min="0" max="0.50" step="0.01" value="0"
+                     style="width:62px;background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 4px;font-size:0.75rem;text-align:center">
+              <button class="btn btn-neutral btn-sm" id="arm-ext-minus" onclick="armNudge('ext',-0.01)">−1cm</button>
+              <button class="btn btn-neutral btn-sm" id="arm-ext-plus"  onclick="armNudge('ext', 0.01)">+1cm</button>
+              <button class="btn btn-primary btn-sm" id="arm-ext-apply" onclick="armApply('ext')">적용</button>
+            </div>
+            <div style="font-size:0.68rem;color:var(--text-dim);line-height:1.5">
+              슬라이더·넛지는 목표값만 바꿉니다 — <b>「적용」을 눌러야 움직입니다</b>.
+              한 번에 5cm까지만 나갑니다(그 이상은 서버가 자릅니다).
+            </div>
+            <div id="arm-manual-result" style="font-size:0.7rem;color:var(--text-dim);min-height:1.2em"></div>
+          </div>
+        </div>
+      </div>
       <div id="kbd-help" style="margin-top:10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:0.72rem;color:var(--text-dim);line-height:1.7">
         ⌨️ <b style="color:var(--text)">키보드 단축키</b><br>
         방향키 ↑↓←→ : 이동 토글 (같은 키 다시 누르면 정지)<br>
@@ -634,6 +675,84 @@ function takeSnapshot() {
     .catch(() => { result.style.color = 'var(--bad)'; result.textContent = '❌ 요청 실패'; })
     .finally(() => _updateSnapshotBtn());
 }
+
+// 🦾 팔 수동 조작 — 이동은 「적용」에서만. 값 동기화는 드래그·입력 중엔 건너뛴다
+// (끌고 있는 슬라이더를 폴링이 되돌리면 손을 떼는 순간 엉뚱한 큰 값이 적용된다).
+const ARM_CTRLS = ['arm-lift-slider','arm-lift-val','arm-lift-minus','arm-lift-plus','arm-lift-apply',
+                   'arm-ext-slider','arm-ext-val','arm-ext-minus','arm-ext-plus','arm-ext-apply'];
+function _armIds(kind) {
+  return kind === 'lift' ? ['arm-lift-slider','arm-lift-val'] : ['arm-ext-slider','arm-ext-val'];
+}
+function _armHeld(el) {
+  return !!el && (document.activeElement === el || el.dataset.dragging === '1');
+}
+function _armSync(kind, v) {
+  if (v === null || v === undefined) return;
+  const [sid, vid] = _armIds(kind);
+  const sl = document.getElementById(sid), va = document.getElementById(vid);
+  if (!sl || !va) return;
+  if (_armHeld(sl) || _armHeld(va)) return;   // 사용자가 잡고 있으면 덮어쓰지 않는다
+  sl.value = v;
+  va.value = Number(v).toFixed(2);
+}
+function armNudge(kind, delta) {
+  const [sid, vid] = _armIds(kind);
+  const sl = document.getElementById(sid), va = document.getElementById(vid);
+  const lo = parseFloat(sl.min), hi = parseFloat(sl.max);
+  const v = Math.max(lo, Math.min(hi, (parseFloat(va.value) || 0) + delta));
+  sl.value = v; va.value = v.toFixed(2);      // 값만 바꾼다 — 모션은 「적용」에서만
+}
+function armApply(kind) {
+  const [, vid] = _armIds(kind);
+  const v = parseFloat(document.getElementById(vid).value);
+  const res = document.getElementById('arm-manual-result');
+  if (!isFinite(v)) { res.style.color = 'var(--bad)'; res.textContent = '❌ 값이 숫자가 아님'; return; }
+  const url  = kind === 'lift' ? '/manual_lift' : '/manual_arm_ext';
+  const body = kind === 'lift' ? {lift: v} : {arm_ext: v};
+  res.style.color = 'var(--text-dim)';
+  res.textContent = '전송 중...';
+  fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { res.style.color = 'var(--bad)'; res.textContent = '❌ ' + (d.error || '실패'); return; }
+      res.style.color = 'var(--ok)';
+      // "보냈다"까지만 말한다 — 도달 여부는 아래 값 표시가 따라오는지로 본다
+      const to = (d.arm_ext !== undefined ? d.arm_ext : d.lift);
+      res.textContent = d.capped
+        ? `보냄 — 1회 상한으로 ${Number(to).toFixed(2)}m까지만 (다시 적용하면 더 갑니다)`
+        : `보냄 (${Number(to).toFixed(2)}m) — 실제 도달은 값 표시로 확인`;
+    })
+    .catch(() => { res.style.color = 'var(--bad)'; res.textContent = '❌ 요청 실패(대시보드 응답 없음)'; });
+}
+function pollArmState() {
+  fetch('/manual_arm_state').then(r => r.json()).then(d => {
+    const why = document.getElementById('arm-manual-reason');
+    // 왜 안 되는지 안 보이면 "슬라이더가 고장났다"로 읽힌다 — 사유를 그대로 띄운다
+    if (why) why.textContent = d.enabled ? '' : (d.reason || '사용 불가');
+    ARM_CTRLS.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.disabled = !d.enabled;
+      el.style.opacity = d.enabled ? '1' : '0.5';
+    });
+    _armSync('lift', d.lift);
+    _armSync('ext',  d.arm_ext);
+  }).catch(() => {});
+}
+['arm-lift-slider','arm-ext-slider'].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  // 드래그 중 표시 — 폴링이 값을 되돌리지 못하게 (focus만으론 터치·펜에서 샌다)
+  el.addEventListener('pointerdown', () => { el.dataset.dragging = '1'; });
+  el.addEventListener('pointerup',   () => { el.dataset.dragging = '0'; });
+  el.addEventListener('pointercancel', () => { el.dataset.dragging = '0'; });
+  el.addEventListener('input', () => {
+    const vid = id === 'arm-lift-slider' ? 'arm-lift-val' : 'arm-ext-val';
+    document.getElementById(vid).value = Number(el.value).toFixed(2);   // 값칸만 갱신
+  });
+});
+pollArmState();
+setInterval(pollArmState, 3000);
 
 // 엘베 제어권 수동 부여/회수 — 자동 여정은 _auto_run이 자체 관리, 이건 수동 정렬 등 UI용
 let elevAuthorityGranted = false;
