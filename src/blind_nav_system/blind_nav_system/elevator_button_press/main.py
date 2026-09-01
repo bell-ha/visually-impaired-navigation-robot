@@ -776,7 +776,9 @@ HTML = """
     // 멈춰서 그 동안 Esc(=/step_stop, keydown 핸들러)가 안 먹는다 — 팔이 패널 앞에서
     // 움직이는 중에 뜨면 중단키를 뺏긴다. 실패 통지는 전부 이 토스트로.
     let _motionErrTimer = null;
-    function flashMotionErr(msg) {
+    // ms: 표시 시간(기본 2.5초). 토스트는 엘리먼트·타이머를 하나만 쓰므로
+    // 뒤에 온 것이 앞의 것을 덮는다 — 단발·고중요도 통지는 더 길게 준다.
+    function flashMotionErr(msg, ms) {
       let el = document.getElementById('motion-err-toast');
       if (!el) {
         el = document.createElement('div');
@@ -790,7 +792,7 @@ HTML = """
       el.textContent = '⚠ ' + msg;
       el.style.display = 'block';
       if (_motionErrTimer) clearTimeout(_motionErrTimer);
-      _motionErrTimer = setTimeout(() => { el.style.display = 'none'; }, 2500);
+      _motionErrTimer = setTimeout(() => { el.style.display = 'none'; }, ms || 2500);
     }
     function selectButton(text) {
       fetch('/select', {method:'POST',
@@ -837,7 +839,9 @@ HTML = """
     }
     function doPress() {
       fetch('/press', {method:'POST'}).then(r => r.json()).then(d => {
-        if (!d.ok) flashMotionErr('누르기 거부: ' + d.error);
+        // 누르기 거부는 단발이고 놓치면 안 되는 통지 — 슬라이더 토스트에
+        // 곧바로 덮이지 않게 문구를 구분하고 더 오래 띄운다.
+        if (!d.ok) flashMotionErr('누르기 거부 — ' + d.error, 6000);
       })
       .catch(() => flashMotionErr('앱 응답 없음'));
     }
