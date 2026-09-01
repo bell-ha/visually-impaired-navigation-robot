@@ -144,6 +144,9 @@ def _write(name: str, cmd: str) -> bool:
     p = _procs.get(name)
     if not (p and p.poll() is None):
         return False
+    # 줄 단위 프로토콜이라 개행이 섞이면 뒷부분이 별개 줄로 들어간다 —
+    # 통보문이 두 동강 나면서 뒤쪽이 "사용자 발화"로 오인될 수 있다.
+    cmd = cmd.replace("\n", " ").replace("\r", " ")
     try:
         p.stdin.write(cmd + "\n")
         p.stdin.flush()
@@ -1375,27 +1378,38 @@ def _http_self(path, payload):
         _log("AUTO", f"{path} 호출 실패: {e}")
         return False
 
-def _auto_notify(msg: str):
-    """여정 거부·중단을 사용자(음성)와 운영자(로그) 양쪽에 알린다.
-    조용히 멈추면 그게 또 무증상 실패다.
+# 중단 지점은 전부 팔이 뻗어 있을 수 있는 자리인데 자동 수납은 하지 않는다
+# (그리퍼 선행 닫기가 패널·문틀에 걸린다). 그 상태로 밀거나 수동주행하면
+# 막으려던 충돌이 사람 손으로 다시 난다 — 운영자에게만 알린다.
+_ARM_STOW_NOTE = ("팔이 뻗은 상태일 수 있음 — 대시보드 '팔 수납'(/stow_arm)으로 "
+                  "넣은 뒤 밀거나 수동주행할 것")
 
-    msg 하나를 두 채널에 같이 쓴다 — 화면과 음성이 갈라지면 둘 중 뭘 믿을지
-    모르게 된다. 음성은 "왜 멈췄나"까지만이다.
 
-    팔 수납 안내는 운영자 채널에만 붙인다: 중단 지점은 전부 팔이 뻗어 있을 수
-    있는 자리인데 자동 수납은 하지 않는다(그리퍼 선행 닫기가 패널·문틀에 걸린다).
-    그 상태로 밀거나 수동주행하면 막으려던 충돌이 사람 손으로 다시 난다.
-    시각장애인은 수납을 할 수 없으니 이 안내를 음성에 넣지 않는다.
+def _auto_notify(msg: str, voice: bool = True):
+    """여정 거부·중단을 알린다. 조용히 멈추면 그게 또 무증상 실패다.
 
-    interface stdin은 한 줄이 한 명령이라 개행이 섞이면 프로토콜이 깨진다 —
-    보내기 전에 공백으로 접는다. 전달 성공은 "stdin에 썼다"까지지 "들렸다"가
-    아니다(전송성공≠완료)."""
-    line = " ".join(msg.split())
-    sent = _write("iface", f"/say {line}")
-    _log("AUTO", f"🚨 여정 중단 통보: {msg} — 팔이 뻗은 상태일 수 있다. "
-                 "대시보드 '팔 수납'(/stow_arm)으로 넣은 뒤 밀거나 수동주행할 것")
-    if not sent:
-        _log("AUTO", f"음성통보 실패(인터페이스 없음/죽음): {msg}")
+    운영자 로그는 언제나 남기고, voice=True면 같은 문장을 음성으로도 보낸다 —
+    화면과 음성이 갈라지면 어느 쪽을 믿을지 모르게 되므로 문장을 공유한다.
+
+    왜 이제 음성이 되나: interface에 낭독 전용 /say 명령을 뒀다. 별도
+    kind='say' 이벤트라 사용자 발화(text)로 오인되지 않고, _handle_text의
+    상태 게이트(NAV·LOCKED에서 즉시 return)를 타지 않는다. 낭독은 후진 안내
+    (backup_warn)와 똑같이 데몬 스레드에서 tts.say를 직접 부른다 —
+    _say()는 동기 호출에 AudioGate를 몇 초 닫아버려서, 그동안 버튼·당김·취소
+    같은 이벤트가 막힌다(모달이 Esc를 막던 것과 같은 결함).
+
+    voice=False는 운영자 전용 통보다 — 시각장애인이 할 수 없는 조치(팔 수납)를
+    음성으로 읽어주면 도움이 안 된다.
+
+    _write 반환으로 전달 실패는 로그에 남지만, 성공해도 "stdin에 썼다"까지지
+    "들렸다"는 아니다(전송성공≠완료)."""
+    _log("AUTO", f"🚨 여정 중단 통보: {msg}")
+    if not voice:
+        return
+    if not _write("iface", f"/say {msg}"):
+        _log("AUTO", f"음성 전달 실패(iface 없음/죽음): {msg}")
+    # 운영자 전용 후속 안내 — 같은 헬퍼를 음성 없이 한 번 더 탄다.
+    _auto_notify(_ARM_STOW_NOTE, voice=False)
 
 
 def _auto_run(dest):
