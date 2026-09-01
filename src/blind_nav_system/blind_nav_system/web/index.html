@@ -258,9 +258,10 @@
       </div>
       <button class="btn btn-danger" style="margin-top:10px;font-size:0.9rem" onclick="emergencyStop()">■ 비상 정지</button>
 
-      <!-- 🦾 매핑용 근접 촬영: 팔 높이·뻗기 수동. 슬라이더/넛지는 목표값만 바꾸고
-           실제 이동은 「적용」에서만 일어난다(끌다가 팔이 따라 움직이면 위험).
-           1회 이동 상한(5cm)·안전범위는 엘베앱이 강제한다 — 화면은 값을 보낼 뿐. -->
+      <!-- 🦾 매핑용 근접 촬영: 팔 높이·뻗기 수동.
+           슬라이더는 값만 바꾸고 실제 이동은 「적용」에서만(끌다가 팔이 따라
+           움직이면 위험). ±1cm 넛지는 누르는 즉시 이동 — 미세조정용이라 한 걸음이
+           작고, 1회 이동 상한(5cm)·안전범위는 엘베앱이 강제한다. -->
       <div id="arm-manual" style="margin-top:10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:8px 10px">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
           <b style="font-size:0.8rem">🦾 팔 조작 <span style="font-weight:400;color:var(--text-dim)">(매핑용 근접 촬영)</span></b>
@@ -291,7 +292,8 @@
               <button class="btn btn-primary btn-sm" id="arm-ext-apply" onclick="armApply('ext')">적용</button>
             </div>
             <div style="font-size:0.68rem;color:var(--text-dim);line-height:1.5">
-              슬라이더·넛지는 목표값만 바꿉니다 — <b>「적용」을 눌러야 움직입니다</b>.
+              슬라이더는 값만 바꿉니다 — <b>「적용」을 눌러야 움직입니다</b>.
+              <b>±1cm 버튼은 누르는 즉시 움직입니다.</b>
               한 번에 5cm까지만 나갑니다(그 이상은 서버가 자릅니다).
             </div>
             <div id="arm-manual-result" style="font-size:0.7rem;color:var(--text-dim);min-height:1.2em"></div>
@@ -695,18 +697,32 @@ function _armSync(kind, v) {
   sl.value = v;
   va.value = Number(v).toFixed(2);
 }
+// 넛지는 누르는 즉시 그만큼 움직인다 — 값을 고르고 「적용」을 또 누르는 건
+// 1cm 미세조정에 맞지 않는다. 한 걸음이 1cm이고 서버가 1회 5cm로 자르므로,
+// 연타해도 한 번에 크게 나가지 않는다. 슬라이더는 코스 이동(값 선택 후 적용),
+// 넛지는 즉시 미세 이동 — 두 조작기의 역할이 다르다.
 function armNudge(kind, delta) {
   const [sid, vid] = _armIds(kind);
   const sl = document.getElementById(sid), va = document.getElementById(vid);
   const lo = parseFloat(sl.min), hi = parseFloat(sl.max);
-  const v = Math.max(lo, Math.min(hi, (parseFloat(va.value) || 0) + delta));
-  sl.value = v; va.value = v.toFixed(2);      // 값만 바꾼다 — 모션은 「적용」에서만
+  const base = parseFloat(va.value);
+  if (!isFinite(base)) return;
+  const v = Math.max(lo, Math.min(hi, base + delta));
+  sl.value = v; va.value = v.toFixed(2);
+  _armSend(kind, v);
 }
 function armApply(kind) {
   const [, vid] = _armIds(kind);
   const v = parseFloat(document.getElementById(vid).value);
+  if (!isFinite(v)) {
+    const res = document.getElementById('arm-manual-result');
+    res.style.color = 'var(--bad)'; res.textContent = '❌ 값이 숫자가 아님';
+    return;
+  }
+  _armSend(kind, v);
+}
+function _armSend(kind, v) {
   const res = document.getElementById('arm-manual-result');
-  if (!isFinite(v)) { res.style.color = 'var(--bad)'; res.textContent = '❌ 값이 숫자가 아님'; return; }
   const url  = kind === 'lift' ? '/manual_lift' : '/manual_arm_ext';
   const body = kind === 'lift' ? {lift: v} : {arm_ext: v};
   res.style.color = 'var(--text-dim)';
