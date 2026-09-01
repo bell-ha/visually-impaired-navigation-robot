@@ -761,6 +761,24 @@ HTML = """
       let s = 0; for (const c of t) s += c.charCodeAt(0);
       return LABEL_COLORS[s % LABEL_COLORS.length];
     }
+    // 모션 명령 실패를 짧게 알리는 비침습 토스트 (슬라이더는 자주 쏘므로 alert 대신)
+    let _motionErrTimer = null;
+    function flashMotionErr(msg) {
+      let el = document.getElementById('motion-err-toast');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'motion-err-toast';
+        el.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);'
+          + 'background:#c0392b;color:#fff;padding:8px 16px;border-radius:6px;'
+          + 'font-weight:bold;font-size:15px;z-index:9999;box-shadow:0 2px 8px rgba(0,0,0,.4);'
+          + 'max-width:80%;text-align:center;';
+        document.body.appendChild(el);
+      }
+      el.textContent = '⚠ ' + msg;
+      el.style.display = 'block';
+      if (_motionErrTimer) clearTimeout(_motionErrTimer);
+      _motionErrTimer = setTimeout(() => { el.style.display = 'none'; }, 2500);
+    }
     function selectButton(text) {
       fetch('/select', {method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -795,7 +813,8 @@ HTML = """
     }
     function setGripper(open) {
       fetch('/gripper', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({open})});
+        body: JSON.stringify({open})})
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
     }
     function doPress() {
       fetch('/press', {method:'POST'}).then(r => r.json()).then(d => {
@@ -809,7 +828,8 @@ HTML = """
       document.getElementById('yaw-slider').value = yaw;
       document.getElementById('yaw-val').value = yaw.toFixed(2);
       // 손목 각도 + 팔 완전 수납까지 한 번에 (홈 포즈)
-      fetch('/wrist_forward', {method:'POST'});
+      fetch('/wrist_forward', {method:'POST'})
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
     }
     function aimTrim(sx, sy, reset=false) {
       const st = parseFloat(document.getElementById('trim-step').value);
@@ -888,20 +908,23 @@ HTML = """
       const v = parseFloat(document.getElementById('pitch-val').value);
       fetch('/wrist_pitch', {method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({pitch: v})});
+        body: JSON.stringify({pitch: v})})
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
     }
     function applyYaw() {
       const v = parseFloat(document.getElementById('yaw-val').value);
       fetch('/wrist_yaw', {method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({yaw: v})});
+        body: JSON.stringify({yaw: v})})
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
     }
     let liftSynced = false;
     function applyLift() {
       const v = parseFloat(document.getElementById('lift-val').value);
       fetch('/lift', {method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({lift: v})});
+        body: JSON.stringify({lift: v})})
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
     }
     function poll() {
       fetch('/status').then(r => r.json()).then(s => {
