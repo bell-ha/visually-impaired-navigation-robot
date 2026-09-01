@@ -813,7 +813,8 @@ HTML = """
     function setGripper(open) {
       fetch('/gripper', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({open})})
-        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); })
+        .catch(()=>flashMotionErr('앱 응답 없음'));
     }
     function doPress() {
       fetch('/press', {method:'POST'}).then(r => r.json()).then(d => {
@@ -828,7 +829,8 @@ HTML = """
       document.getElementById('yaw-val').value = yaw.toFixed(2);
       // 손목 각도 + 팔 완전 수납까지 한 번에 (홈 포즈)
       fetch('/wrist_forward', {method:'POST'})
-        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); })
+        .catch(()=>flashMotionErr('앱 응답 없음'));
     }
     function aimTrim(sx, sy, reset=false) {
       const st = parseFloat(document.getElementById('trim-step').value);
@@ -908,14 +910,16 @@ HTML = """
       fetch('/wrist_pitch', {method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({pitch: v})})
-        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); })
+        .catch(()=>flashMotionErr('앱 응답 없음'));
     }
     function applyYaw() {
       const v = parseFloat(document.getElementById('yaw-val').value);
       fetch('/wrist_yaw', {method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({yaw: v})})
-        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); })
+        .catch(()=>flashMotionErr('앱 응답 없음'));
     }
     let liftSynced = false;
     function applyLift() {
@@ -923,7 +927,8 @@ HTML = """
       fetch('/lift', {method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({lift: v})})
-        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); });
+        .then(r=>r.json()).then(d=>{ if(!d.ok) flashMotionErr(d.error||'모션 명령 실패'); })
+        .catch(()=>flashMotionErr('앱 응답 없음'));
     }
     function poll() {
       fetch('/status').then(r => r.json()).then(s => {
