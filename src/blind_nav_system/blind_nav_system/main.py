@@ -442,25 +442,31 @@ def _readiness_poll_loop():
                         _elev_started_mono = time.monotonic()
                         _log("MAIN", "엘베앱 기동시각 미상(외부 기동/대시보드 재시작) "
                                      "→ 지금부터 고립 유예 재시작")
-                    # 고립이 먼저 — 앱이 ROS에서 떨어져 있으면 리스 얘기는 의미가 없다
-                    if _elev_isolated(True):
-                        _ready_val["elev_app"] = {
-                            "status": "bad",
-                            "detail": "고립 — 앱은 응답하나 elevator_tracker 없음(ROS 단절)"}
-                    elif st and st.get("lease_expired"):
-                        _ready_val["elev_app"] = {"status": "bad",
-                                                  "detail": "엘베 리스 만료 — 제어권 재부여 필요"}
+                    # 세 신호는 서로 다른 것을 본다: 고립=ROS 그래프 단절,
+                    # 리스만료=제어권, obs=엘베앱이 본 자기 의존성(팔/카메라).
+                    # 어느 하나라도 나쁘면 bad로 올리고(하나가 다른 하나를 가리지
+                    # 않게), 앞머리 문구는 고립 > 리스만료 순으로 하나만 고른 뒤
+                    # 관측 상태는 항상 뒤에 병기한다.
+                    obs  = st.get("obs") if st else None
+                    iso  = _elev_isolated(True)
+                    leas = bool(st and st.get("lease_expired"))
+                    # obs에 stale이 하나라도 있으면 픽토그램 승격 — 문자열로만
+                    # 적어두면 팔이 "끊김"인데 바는 초록이라 아무도 안 본다.
+                    obs_stale = isinstance(obs, dict) and any(
+                        obs.get(k) == "stale" for k in ("driver", "body", "depth"))
+                    if iso:
+                        head = "고립 — 앱은 응답하나 elevator_tracker 없음(ROS 단절)"
+                    elif leas:
+                        head = "엘베 리스 만료 — 제어권 재부여 필요"
                     else:
-                        # 응답 = HTTP가 살아있다는 뜻까지다. 팔/카메라가 실제로 살아있는지는
-                        # 엘베앱이 낸 관측 결과를 그대로 옮겨 붙여 운영자가 보게 한다.
-                        # 자기고립이면 고립 여부를 "정상"이라 말할 수 없다 —
-                        # 모른다고 적는다(무소식을 정상으로 읽지 않기).
+                        # 응답 = HTTP가 살아있다는 뜻까지다. 자기고립이면 고립 여부를
+                        # "정상"이라 말할 수 없으니 모른다고 적는다.
                         head = ("응답(고립 판정 불가 — 대시보드도 그래프 미검출)"
                                 if _diag_fresh() and _diag_st.get("blind")
                                 else "응답")
-                        _ready_val["elev_app"] = {
-                            "status": "ok",
-                            "detail": head + " · " + _obs_brief(st.get("obs") if st else None)}
+                    _ready_val["elev_app"] = {
+                        "status": "bad" if (iso or leas or obs_stale) else "ok",
+                        "detail": head + " · " + _obs_brief(obs)}
                     # 그리퍼 카메라 — "대기"로 속아 헛걸음시킨 사고 방지(엘베앱 /status의
                     # camera_missing 재사용, 엘베앱이 이미 기동 10초 유예까지 다 처리함)
                     cam_missing = st.get("camera_missing") if st else None
