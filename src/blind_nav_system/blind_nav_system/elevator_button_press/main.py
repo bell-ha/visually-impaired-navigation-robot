@@ -2425,7 +2425,9 @@ class ElevatorTracker(Node):
         # 파일에 남긴다. 디스크 I/O는 반드시 state_lock '밖'에서(디스크 정체 시
         # 앱 전체가 락에 묶여 동결되던 지점 — 반복 사고). _diaglog는 모듈 전역.
         if _diaglog:
-            try: _diaglog.log("DEC", msg)
+            # echo=False: _dlog가 이미 get_logger().info로 터미널에 찍는다.
+            # echo 기본 True면 print까지 나가 같은 줄이 대시보드에 2번 뜬다.
+            try: _diaglog.log("DEC", msg, echo=False)
             except Exception: pass
 
     def _may_explore(self) -> bool:
