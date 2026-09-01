@@ -135,14 +135,21 @@ def _capture(proc: subprocess.Popen, name: str):
             continue
         _log(name, line)
 
-def _write(name: str, cmd: str):
+def _write(name: str, cmd: str) -> bool:
+    """자식 프로세스 stdin에 한 줄 보낸다.
+
+    반환은 "썼다"까지지 "상대가 처리했다"가 아니다. False = 프로세스가 없거나
+    죽었거나 쓰다 실패 — 지금까지 이걸 조용히 삼켜서, 인터페이스가 죽어 있어도
+    호출부는 보낸 줄 알았다. 기존 호출부는 반환을 안 쓰므로 동작은 그대로다."""
     p = _procs.get(name)
-    if p and p.poll() is None:
-        try:
-            p.stdin.write(cmd + "\n")
-            p.stdin.flush()
-        except Exception:
-            pass
+    if not (p and p.poll() is None):
+        return False
+    try:
+        p.stdin.write(cmd + "\n")
+        p.stdin.flush()
+        return True
+    except Exception:
+        return False
 
 def start_subprocesses():
     iface = subprocess.Popen(
@@ -1336,7 +1343,9 @@ def _elev_wait_ready(timeout=45):
 def _elev_wait_press_done(timeout=30):
     """누르기 완료 대기 — press 씬(0/4)의 scene_next_ok(press_ok_ts>scene_ts) True까지.
     이게 True면 '버튼 눌림 + 팔 복귀 + 그리퍼 열기'까지 끝난 상태라 이동해도 안전.
-    취소 존중. 완료 True / 타임아웃·취소 False(그래도 흐름은 계속)."""
+    취소 존중. 완료 True / 타임아웃·취소 False.
+    ※ False면 _auto_run은 흐름을 계속하지 않고 여정을 중단한다(S1) — 팔이
+    복귀했는지 확인할 다른 수단이 없어서, 모르면 베이스를 안 움직인다."""
     t0 = time.time()
     while time.time() - t0 < timeout:
         with _auto_lock:
@@ -1367,17 +1376,26 @@ def _http_self(path, payload):
         return False
 
 def _auto_notify(msg: str):
-    """여정 거부·중단을 남긴다. 조용히 멈추면 그게 또 무증상 실패다.
+    """여정 거부·중단을 사용자(음성)와 운영자(로그) 양쪽에 알린다.
+    조용히 멈추면 그게 또 무증상 실패다.
 
-    ⚠ 지금은 운영자 로그까지만 간다 — 시각장애인 음성 통보는 아직 통로가 없다.
-    interface는 stdin으로 슬래시 명령만 받고(/goto·/button…), 그 밖의 줄은
-    "사용자 발화"(text 이벤트)로 처리한다. 여정 중 상태(NAV/LOCKED)에서는
-    _handle_text가 그대로 return이라 한 마디도 안 나오고, READY 입력 단계였다면
-    이 문장을 목적지 발화로 해석해 엉뚱한 동작을 할 수 있다. 그래서 여기서
-    _write("iface", msg)를 하지 않는다 — 말한다고 착각하게 만드는 코드는
-    무증상 실패를 하나 더 만드는 것이다.
-    음성까지 가려면 interface에 낭독 전용 명령(/say)이 필요하다(별건)."""
-    _log("AUTO", f"🚨 여정 중단 통보: {msg} (운영자 화면·로그만 — 음성 통로 없음)")
+    msg 하나를 두 채널에 같이 쓴다 — 화면과 음성이 갈라지면 둘 중 뭘 믿을지
+    모르게 된다. 음성은 "왜 멈췄나"까지만이다.
+
+    팔 수납 안내는 운영자 채널에만 붙인다: 중단 지점은 전부 팔이 뻗어 있을 수
+    있는 자리인데 자동 수납은 하지 않는다(그리퍼 선행 닫기가 패널·문틀에 걸린다).
+    그 상태로 밀거나 수동주행하면 막으려던 충돌이 사람 손으로 다시 난다.
+    시각장애인은 수납을 할 수 없으니 이 안내를 음성에 넣지 않는다.
+
+    interface stdin은 한 줄이 한 명령이라 개행이 섞이면 프로토콜이 깨진다 —
+    보내기 전에 공백으로 접는다. 전달 성공은 "stdin에 썼다"까지지 "들렸다"가
+    아니다(전송성공≠완료)."""
+    line = " ".join(msg.split())
+    sent = _write("iface", f"/say {line}")
+    _log("AUTO", f"🚨 여정 중단 통보: {msg} — 팔이 뻗은 상태일 수 있다. "
+                 "대시보드 '팔 수납'(/stow_arm)으로 넣은 뒤 밀거나 수동주행할 것")
+    if not sent:
+        _log("AUTO", f"음성통보 실패(인터페이스 없음/죽음): {msg}")
 
 
 def _auto_run(dest):
