@@ -1512,8 +1512,11 @@ def gripper_ctrl():
     """그리퍼 수동 열기/닫기 (테스트·튜닝용)."""
     do_open = bool((request.json or {}).get("open", True))
     node = _node_ref[0]
-    if node:
-        node.set_gripper(GRIPPER_OPEN_M if do_open else GRIPPER_CLOSE_M)
+    if node is None:
+        return jsonify(ok=False, open=do_open, error="node 없음"), 503
+    ok = node.set_gripper(GRIPPER_OPEN_M if do_open else GRIPPER_CLOSE_M)
+    if not ok:
+        return jsonify(ok=False, open=do_open, error="모션 명령 실패(액션서버 없음/고립 가능)")
     return jsonify(ok=True, open=do_open)
 
 @app.route("/lift", methods=["POST"])
@@ -1522,8 +1525,11 @@ def lift_ctrl():
     pos = float(request.json.get("lift", 0.6))
     pos = max(0.15, min(1.10, pos))
     node = _node_ref[0]
-    if node:
-        node.set_lift(pos)
+    if node is None:
+        return jsonify(ok=False, lift=pos, error="node 없음"), 503
+    ok = node.set_lift(pos)
+    if not ok:
+        return jsonify(ok=False, lift=pos, error="모션 명령 실패(액션서버 없음/고립 가능)")
     return jsonify(ok=True, lift=pos)
 
 @app.route("/press", methods=["POST"])
@@ -1624,10 +1630,13 @@ def wrist_forward():
     """홈 포즈: 손목 전방 + 팔 완전 수납 — 반드시 '한 번의 목표'로 묶어 전송.
     (따로 보내면 컨트롤러가 이전 목표를 선점·취소해 마지막 것만 실행됨)"""
     node = _node_ref[0]
-    if node:
-        node._send_goal(
-            ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll", ARM_JOINT],
-            [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, 0.0, ARM_EXT_MIN])
+    if node is None:
+        return jsonify(ok=False, error="node 없음"), 503
+    ok = node._send_goal(
+        ["joint_wrist_pitch", "joint_wrist_yaw", "joint_wrist_roll", ARM_JOINT],
+        [WRIST_PITCH_DEFAULT, WRIST_YAW_DEFAULT, 0.0, ARM_EXT_MIN])
+    if not ok:
+        return jsonify(ok=False, error="모션 명령 실패(액션서버 없음/고립 가능)")
     return jsonify(ok=True)
 
 @app.route("/wrist_pitch", methods=["POST"])
@@ -1635,8 +1644,11 @@ def wrist_pitch():
     pitch = float(request.json.get("pitch", 0.0))
     pitch = max(-1.57, min(0.5, pitch))
     node = _node_ref[0]
-    if node:
-        node.set_wrist_pitch(pitch)
+    if node is None:
+        return jsonify(ok=False, pitch=pitch, error="node 없음"), 503
+    ok = node.set_wrist_pitch(pitch)
+    if not ok:
+        return jsonify(ok=False, pitch=pitch, error="모션 명령 실패(액션서버 없음/고립 가능)")
     return jsonify(ok=True, pitch=pitch)
 
 @app.route("/wrist_yaw", methods=["POST"])
@@ -1644,8 +1656,11 @@ def wrist_yaw():
     yaw = float(request.json.get("yaw", 0.0))
     yaw = max(-2.88, min(1.67, yaw))
     node = _node_ref[0]
-    if node:
-        node.set_wrist_yaw(yaw)
+    if node is None:
+        return jsonify(ok=False, yaw=yaw, error="node 없음"), 503
+    ok = node.set_wrist_yaw(yaw)
+    if not ok:
+        return jsonify(ok=False, yaw=yaw, error="모션 명령 실패(액션서버 없음/고립 가능)")
     return jsonify(ok=True, yaw=yaw)
 
 def _camera_info_dict(msg):
@@ -4111,6 +4126,7 @@ class ElevatorTracker(Node):
                 # actual=누르기 전 위치 → shortfall이 커서 "막힘=닿음"으로 오판하고
                 # "✅ 누르기 완료"를 잘못 선언한다(뿌리B). 다른 실패분기와 동일하게 복귀+중단.
                 st("❌ 누르기 실패 — 복귀")
+                self._dlog("[PRESS] ⛔ 누르기 실패 — 이동 안 됨(사용자 미도달)")
                 self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
                 return
             time.sleep(0.4)
@@ -4141,11 +4157,13 @@ class ElevatorTracker(Node):
             with state_lock:
                 state["pressing"] = False
 
-    def _send_single_joint(self, joint_name: str, position: float, duration_sec: int = 2):
+    def _send_single_joint(self, joint_name: str, position: float, duration_sec: int = 2) -> bool:
+        """단일 관절 목표 전송. 전송 성공 True / 액션서버 없어 유실되면 False.
+        (_send_goal과 같은 정직화 계약 — 조용한 실패를 호출부가 알 수 있게 bool 반환)"""
         self._last_motion_ts = time.time()   # [A안] 수동 조작도 이동 — 관측 기억 무효화
         if not self.action_client.wait_for_server(timeout_sec=1.0):
-            self.get_logger().error("Action server not available")
-            return
+            self._dlog(f"[GOAL] ⛔ 액션서버 없음(1.0s) — 명령 유실: {joint_name}")
+            return False
         goal = FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = [joint_name]
         pt = JointTrajectoryPoint()
@@ -4154,18 +4172,19 @@ class ElevatorTracker(Node):
         goal.trajectory.points = [pt]
         self.action_client.send_goal_async(goal)
         self._dlog(f"{joint_name} -> {position:.2f} rad")
+        return True
 
-    def set_wrist_pitch(self, pitch: float):
-        self._send_single_joint("joint_wrist_pitch", pitch)
+    def set_wrist_pitch(self, pitch: float) -> bool:
+        return self._send_single_joint("joint_wrist_pitch", pitch)
 
-    def set_lift(self, lift: float):
-        self._send_single_joint("joint_lift", lift, duration_sec=3)
+    def set_lift(self, lift: float) -> bool:
+        return self._send_single_joint("joint_lift", lift, duration_sec=3)
 
-    def set_gripper(self, aperture_m: float):
-        self._send_single_joint(GRIPPER_JOINT, aperture_m, duration_sec=2)
+    def set_gripper(self, aperture_m: float) -> bool:
+        return self._send_single_joint(GRIPPER_JOINT, aperture_m, duration_sec=2)
 
-    def set_wrist_yaw(self, yaw: float):
-        self._send_single_joint("joint_wrist_yaw", yaw)
+    def set_wrist_yaw(self, yaw: float) -> bool:
+        return self._send_single_joint("joint_wrist_yaw", yaw)
 
     def _send_goal(self, joint_names, positions) -> bool:
         """관절 목표 전송. 전송 성공 True / 액션서버 없어 유실되면 False.
