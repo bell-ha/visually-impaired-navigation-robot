@@ -106,6 +106,16 @@ GRIPPER_INFO_TOPICS = [
 ]
 BODY_INFO_TOPIC = "/camera/camera/color/camera_info"
 
+# ── 고립 관측(A5) — 주기 샘플 상수 ────────────────────────────────────────────
+# 지금까지 드라이버 도달성·프레임 도착에 대한 "주기적" 관측이 하나도 없었다.
+# 있던 건 명령을 쏜 순간에만 남는 사후 로그뿐 — 아무것도 안 누르는 동안 팔이
+# 죽었는지 알 방법이 없었다(8/31 무증상 실패의 정확한 구멍). 여기는 관측·표시
+# 전용이고, 이 값으로 재시작·복구 같은 행동을 하지 않는다.
+OBS_PERIOD      = 1.0    # 샘플 주기(초)
+OBS_STALE_SEC   = 5.0    # body/depth/드라이버 공통 신선도 한계 — 신호별 하드코딩 금지
+OBS_BOOT_GRACE  = 10.0   # 기동 직후 유예(초) — 그전 미관측은 unknown(ok로 새면 안 됨)
+OBS_NODES_EVERY = 5      # 노드이름 그래프질의 주기(틱) — detail 문자열 전용
+
 # ── 스냅샷 TF 프레임명 — 2026-08-28 실측 확정 (오케 6e) ─────────────────────────
 # 그리퍼 [-0.029,-0.341,0.604] / 몸체 [0.045,-0.003,1.322] (base_link 기준, 실측 대조).
 # ★함정: 그리퍼 camera_info의 header.frame_id가 "camera_color_optical_frame"(몸체 것)으로
@@ -1234,6 +1244,7 @@ def status():
                    authority=bool(s.get("authority", False)),
                    lease_expired=bool(s.get("lease_expired")),
                    camera_missing=(_n._camera_missing_check() if _n is not None else None),
+                   obs=(_n._obs if _n is not None else None),   # 고립 관측(A5) 캐시 — 판정은 _obs_tick이 함
                    clear_f=clear_f, clear_b=clear_b,
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
                    door_base=s.get("door_base"))
@@ -1934,6 +1945,19 @@ class ElevatorTracker(Node):
         self._last_grip_frame_mono = None
         self._camera_missing_logged = False
 
+        # ── 고립 관측(A5) — 드라이버 도달성 + body/depth 프레임 신선도 주기 샘플 ──
+        # 판정은 전부 _obs_tick 안에서만 하고 /status는 이 캐시를 읽기만 한다.
+        # 관측·표시 전용 — 여기서 재시작/리스/누르기 같은 행동은 하지 않는다.
+        self._last_body_frame_mono = None
+        self._last_depth_frame_mono = None
+        self._obs_ticks = 0
+        self._obs_nodes = None
+        self._obs = {"driver": "unknown", "body": "unknown",
+                     "depth": "unknown", "detail": "관측 시작 전"}
+        # 관측 전용 신규 타이머 — 위(L1907)의 비활성 손목 초기화 타이머와 무관하며
+        # 어떤 관절도 움직이지 않는다(server_is_ready·monotonic 차·캐시 기록뿐).
+        self.create_timer(OBS_PERIOD, self._obs_tick)
+
         for t in GRIPPER_INFO_TOPICS:
             self.create_subscription(CameraInfo, t, self._on_grip_info, qos_profile_sensor_data)
         self.create_subscription(CameraInfo, BODY_INFO_TOPIC, self._on_body_info,
@@ -1946,6 +1970,75 @@ class ElevatorTracker(Node):
 
     def _on_body_info(self, msg):
         self._body_color_info = msg
+
+    def _obs_tick(self):
+        """고립 관측 샘플(A5) — 드라이버 액션서버 도달성 + body/depth 프레임 신선도.
+
+        왜 주기 샘플인가: 지금까지 도달성 확인은 명령을 쏘는 순간에만 일어났다.
+        그래서 아무 조작도 안 하는 동안 드라이버가 사라져도 화면은 멀쩡했고,
+        누르기를 시켜본 뒤에야 알았다(8/31 무증상 실패).
+
+        판정은 이 콜백 '한 곳'에서만 하고 /status는 결과 캐시를 읽기만 한다 —
+        라우트 안에서 판정을 돌리면 폴링 빈도에 따라 판정 시점이 흔들린다.
+        관측·표시 전용: 재시작·리스·누르기 등 어떤 행동도 하지 않는다.
+        스핀 스레드에서 돌므로 값싼 호출만 쓴다(wait_for_server 같은 대기 금지)."""
+        now = time.monotonic()
+        booting = (now - self._boot_mono) <= OBS_BOOT_GRACE
+
+        def fresh(last):
+            # 미관측(기동 유예 중 아직 한 장도 못 받음)은 unknown — ok로 새면 안 된다.
+            if last is None:
+                return "unknown" if booting else "stale"
+            return "ok" if (now - last) <= OBS_STALE_SEC else "stale"
+
+        body  = fresh(self._last_body_frame_mono)
+        depth = fresh(self._last_depth_frame_mono)
+
+        # server_is_ready()는 이미 발견된 그래프를 즉시 조회만 한다(대기 없음).
+        # _send_goal이 쓰는 바로 그 핸들이라, 여기 ok면 명령이 갈 상대가 있다는 뜻.
+        # 단 "명령이 도달한다"까지이고 "관절이 실제로 움직였다"는 아니다.
+        try:
+            ready = self.action_client.server_is_ready()
+        except Exception:
+            ready = None
+        if ready is None:
+            driver = "unknown"
+        elif ready:
+            driver = "ok"
+        else:
+            driver = "unknown" if booting else "stale"   # 기동 직후는 DDS 발견 전일 뿐
+
+        # 노드 수는 detail 문자열 재료로만 쓴다 — 판정·트리거로 승격하지 않는다
+        # (대시보드 쪽이 자기고립되면 전부 0으로 보여 오탐이 되는 구조라 폐기한 방식).
+        self._obs_ticks += 1
+        if self._obs_ticks % OBS_NODES_EVERY == 1:
+            try:
+                self._obs_nodes = len(self.get_node_names())
+            except Exception:
+                self._obs_nodes = None
+
+        def age(last):
+            return "—" if last is None else f"{now - last:.1f}s"
+        detail = (f"노드 {self._obs_nodes if self._obs_nodes is not None else '?'}개 · "
+                  f"body {age(self._last_body_frame_mono)} · "
+                  f"depth {age(self._last_depth_frame_mono)} · 한계 {OBS_STALE_SEC:.0f}s")
+
+        prev = self._obs
+        # 통째 교체(부분 수정 아님) — 읽는 쪽은 참조 하나만 잡으면 일관된 스냅샷이 된다.
+        self._obs = {"driver": driver, "body": body, "depth": depth, "detail": detail}
+
+        # 전이할 때만 1회 로그(_camera_missing_check의 🚨 패턴) — 매 초 찍으면 로그가
+        # 묻혀 정작 사고 때 안 보인다. state_lock은 잡지 않는다(_dlog는 디스크 I/O).
+        for key, label in (("driver", "드라이버 액션서버"),
+                           ("body", "body 카메라"), ("depth", "depth 프레임")):
+            was, is_ = prev.get(key), self._obs[key]
+            if was == is_:
+                continue
+            if is_ == "stale":
+                self._dlog(f"🚨 {label} 관측 끊김 — {OBS_STALE_SEC:.0f}초 이상 "
+                           f"무응답/무수신 (관측만 함, 자동복구 없음)")
+            elif was == "stale" and is_ == "ok":
+                self._dlog(f"✅ {label} 관측 복구")
 
     def _camera_missing_check(self) -> bool:
         """그리퍼 카메라 미수신 감지 — 기동 10초 유예 후, 프레임을 한 번도
@@ -1992,6 +2085,9 @@ class ElevatorTracker(Node):
             # (회전 후 프레임을 저장하면 몸체는 rot_body 기본값 자체가 0이 아니라 상시 불일치).
             self._last_body_raw = raw
             self._last_body_stamp = msg.header.stamp
+            # 프레임 "도착" 시각 — 신선도 판정에 header.stamp를 쓰면 발행측 시계·
+            # 정지한 스탬프에 속는다. 도착 기준 monotonic만 쓴다(고립 관측용).
+            self._last_body_frame_mono = time.monotonic()
             with state_lock:
                 rot = state["rot_body"]
             raw = _rotate_steps(raw, rot)
@@ -2461,6 +2557,9 @@ class ElevatorTracker(Node):
             # 스냅샷용 — 회전 적용 "전" 센서 네이티브(#P6, grip color·camera_info와 축 일치).
             # 거리 샘플링용 self._depth_frame(회전 적용본, 아래)과는 별개 경로.
             depth_native = arr.copy()
+            # 도착 시각(고립 관측용) — _depth_lock '밖' 단순 대입. float 대입은
+            # GIL 원자라 락이 필요 없고, 락 범위를 넓히면 depth 경로가 더 잘 막힌다.
+            self._last_depth_frame_mono = time.monotonic()
             # color와 동일한 회전 적용 → 거리 샘플링 좌표계 일치
             with state_lock:
                 rot = state["rot_grip"]
