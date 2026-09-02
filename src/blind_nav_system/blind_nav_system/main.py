@@ -1180,8 +1180,13 @@ def elevator_app():
         return jsonify(ok=True, running=True)
 
     # 시작 (경로는 __file__ 기준이라 cwd 무관, 부모 env(ROS·FastDDS) 상속)
+    # photo=True면 사진모드 — OCR 서버 없이 카메라만. 기본은 지금 그대로(플래그 없음).
+    # 여정(_auto_run)이 직접 띄우는 경로는 이 라우트를 지나지 않으므로 영향 없다.
+    argv = [sys.executable, "-u", str(THIS_DIR / "elevator_button_press/main.py")]
+    if data.get("photo"):
+        argv.append("--no-ocr")
     proc = subprocess.Popen(
-        [sys.executable, "-u", str(THIS_DIR / "elevator_button_press/main.py")],
+        argv,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True, bufsize=1,
@@ -1192,7 +1197,9 @@ def elevator_app():
     # 앱만 켠다 — 제어권은 안 줌(엘베앱 켜기 ≠ 제어권 주기). 수동 사용 시 UI의
     # "제어권 부여" 토글로, 자동 여정 중엔 _auto_run이 _grant_elev_lease로 부여.
     threading.Thread(target=_wait_elev_app_up, daemon=True).start()
-    _log("MAIN", f"엘리베이터 앱 시작 PID={proc.pid} (제어권은 별도 부여 필요)")
+    _log("MAIN", f"엘리베이터 앱 시작 PID={proc.pid} (제어권은 별도 부여 필요)"
+                 + (" — 사진모드(--no-ocr): 버튼 인식 없음, 여정 불가"
+                    if data.get("photo") else ""))
     return jsonify(ok=True, running=True)
 
 # ── 반자동 엘리베이터 여정 오케스트레이터 ──────────────────────────────────────────
@@ -1933,6 +1940,15 @@ def auto_goto():
         return jsonify(ok=False, error="목적지 없음"), 400
     if _manual_mode:
         return jsonify(ok=False, error="수동 모드 — 자동 모드로 전환하세요")
+    # 사진모드 엘베앱으로 여정을 돌리면 detections가 영원히 비어 _elev_wait_ready가
+    # 45s 타임아웃 → /press 거부 → 재시도도 거부 → 여정 중단이다. fail-closed라
+    # 물리 사고는 없지만 arm_safe가 False로 남아 이후 베이스 이동이 전부 거부된다 —
+    # 시각장애인이 팔 나온 채 홀에 발이 묶인다. 시작 전에 막는다.
+    if _elev_app_running():
+        _st = _elev_status(timeout=1.0)
+        if _st and _st.get("no_ocr"):
+            return jsonify(ok=False, error="사진모드에서는 여정을 시작할 수 없습니다 "
+                                           "— 엘베앱을 정상 모드로 다시 켜세요"), 409
     threading.Thread(target=_auto_run, args=(dest,), daemon=True).start()
     return jsonify(ok=True, dest=dest)
 

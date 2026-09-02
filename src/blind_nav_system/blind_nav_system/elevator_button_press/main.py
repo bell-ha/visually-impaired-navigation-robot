@@ -78,6 +78,12 @@ def start_infer_server():
 # 추론 소요 집계 로그 주기(초). 매 추론마다 찍으면 초당 2줄이라 로그가 익사한다.
 INFER_LOG_PERIOD = 10.0
 
+# 사진모드(--no-ocr): 카메라만 보고 싶을 때 OCR 서버를 아예 띄우지 않는다.
+# 프로세스 시작 인자로 고정한다 — 런타임 토글이 아니다. 앱을 껐다 켜는 것이
+# 곧 전환 수단이고, "절반만 먹는 CPU"(샘플링·스로틀)는 간헐적으로 nav을 막아
+# 지금보다 진단이 어려워진다. 끄거나 켜거나 둘 중 하나다.
+_no_ocr = False
+
 
 def infer_image(image_path: str) -> list:
     with _infer_lock:
@@ -1275,6 +1281,7 @@ def status():
                    authority=bool(s.get("authority", False)),
                    lease_expired=bool(s.get("lease_expired")),
                    camera_missing=(_n._camera_missing_check() if _n is not None else None),
+                   no_ocr=_no_ocr,   # 사진모드 — 대시보드가 여정 시작을 막는 근거
                    infer_ms=s.get("infer_ms"),        # 마지막 추론 소요(ms)
                    infer_boxes=s.get("infer_boxes"),  # 그때 검출된 박스 수
                    arm_ext=s.get("arm_ext"),   # 팔 뻗기 현재값 — UI 슬라이더 동기화용
@@ -3129,7 +3136,8 @@ class ElevatorTracker(Node):
             state["jpeg_frame"] = jpeg.tobytes()
 
         # OCR 추론은 백그라운드 스레드에서 (이전 추론 중이면 건너뜀)
-        if not self._processing:
+        # 사진모드면 추론 서버 자체가 없다 — 부르면 _infer_proc이 None이라 터진다.
+        if not _no_ocr and not self._processing:
             self._processing = True
             threading.Thread(
                 target=self._run_inference, args=(frame.copy(),), daemon=True
@@ -4601,7 +4609,12 @@ class ElevatorTracker(Node):
 
 
 def main():
-    if not start_infer_server():
+    global _no_ocr
+    _no_ocr = "--no-ocr" in _sys.argv      # --standalone과 같은 방식(플래그 하나)
+    if _no_ocr:
+        print("사진모드: OCR 서버를 띄우지 않습니다 (--no-ocr) — 카메라 확인 전용.",
+              flush=True)
+    elif not start_infer_server():
         print("추론 서버 시작 실패. 종료합니다.")
         return
 
