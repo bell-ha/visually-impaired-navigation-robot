@@ -13,11 +13,7 @@
   <!-- 사람 있음 -->
   <arg name="params_file" default="/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/config/nav2_params_human.yaml"/>
 
-  <!-- 부팅 시 적재할 지도. 대시보드 main.py의 _FLOOR_MAPS와 반드시 같은 파일을
-       가리켜야 한다 — 한쪽만 바꾸면 UI의 층 표시와 실제 적재 지도가 어긋난다
-       (여기가 all.yaml이면 부팅 직후 지도엔 캐빈이 없는데 UI는 "5층"이라 말한다).
-       all_with_cabin.yaml = all.pgm + 엘베 캐빈. 원본 all.yaml은 되돌릴 근거로 남겨둠. -->
-  <arg name="map" default="/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/all_with_cabin.yaml"/>
+  <arg name="map" default="/home/hello-robot/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/all.yaml"/>
 
   <!-- Nav2(네비게이션 파트) 시작을 localization보다 살짝 늦춰서 TF/맵 준비 레이스를 줄임 -->
   <arg name="nav_start_delay" default="5.0"/>
