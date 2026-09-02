@@ -77,6 +77,9 @@ def start_infer_server():
 
 # 추론 소요 집계 로그 주기(초). 매 추론마다 찍으면 초당 2줄이라 로그가 익사한다.
 INFER_LOG_PERIOD = 10.0
+# 라이다 섹터 구성 집계 주기(초). _clearance는 이동 중 15Hz로 불린다 — 매 호출
+# 로그는 금지, 창 집계만.
+SCAN_LOG_PERIOD = 10.0
 
 # 사진모드(--no-ocr): 카메라만 보고 싶을 때 OCR 서버를 아예 띄우지 않는다.
 # 프로세스 시작 인자로 고정한다 — 런타임 토글이 아니다. 앱을 껐다 켜는 것이
@@ -1288,6 +1291,9 @@ def status():
                    arm_ext=s.get("arm_ext"),   # 팔 뻗기 현재값 — UI 슬라이더 동기화용
                    obs=(_n._obs if _n is not None else None),   # 고립 관측(A5) 캐시 — 판정은 _obs_tick이 함
                    obs_age=_obs_age(_n),   # 위 캐시를 잰 지 몇 초 됐나(이 프로세스 안에서 계산)
+                   # 직전 _clearance 호출의 섹터 구성(계측 전용, 판정과 무관).
+                   # s는 이 라우트 첫머리에서 복사하므로 한 폴링 뒤처진 값이다.
+                   clearance_stat=s.get("clearance_stat"),
                    clear_f=clear_f, clear_b=clear_b,
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
                    door_base=s.get("door_base"))
@@ -2272,14 +2278,85 @@ class ElevatorTracker(Node):
         30°는 0.95m에서 좌우 55cm씩 퍼져 문 옆 벽을 계속 잡는다."""
         s = self._scan
         if s is None:
+            try:
+                self._scan_note(direction, half_ang)   # 스캔 없음도 표본이다
+            except Exception:
+                pass
             return None
         r = np.asarray(s.ranges, dtype=float)
         ang = s.angle_min + np.arange(len(r)) * s.angle_increment
         base_ang = (ang + LASER_YAW_OFFSET + np.pi) % (2 * np.pi) - np.pi
         target = 0.0 if direction > 0 else np.pi
         diff = np.abs((base_ang - target + np.pi) % (2 * np.pi) - np.pi)
-        m = (diff < half_ang) & np.isfinite(r) & (r > SELF_HIT_MIN)
-        return float(r[m].min()) if m.any() else 99.0
+        sector = diff < half_ang
+        m = sector & np.isfinite(r) & (r > SELF_HIT_MIN)
+        val = float(r[m].min()) if m.any() else 99.0
+        # 계측은 판정 뒤에, 그리고 판정에 절대 영향을 주지 않는다 — 여기서 예외가
+        # 나도 반환값은 위에서 이미 정해졌고 아래 try가 삼킨다.
+        try:
+            self._scan_note(direction, half_ang, r, sector, val)
+        except Exception:
+            pass
+        return val
+
+    def _scan_note(self, direction, half_ang, r=None, sector=None, ret=None):
+        """_clearance 한 번이 본 섹터의 구성을 세어 둔다. 판정에는 일절 영향 없음.
+
+        왜 필요한가: 원시 ranges가 지금 어디에도 안 찍혀서 "레이가 왜 폐기되는지"를
+        아무도 모른다. LaserScan 규격은 range_min 미만을 무효로 두는데, 드라이버에
+        따라 그것을 inf가 아니라 0.0으로 싣는 구현이 있다 — 이 라이다가 실제로 뭘
+        싣는지 모르는 채로는 "열린 공간(inf)"과 "센서가 못 봄(0.0/NaN)"을 구분할 수
+        없고, 그 구분 없이 임계를 만지면 다음 판단이 전부 추측이 된다. 재고 나서 고친다.
+
+        _clearance는 이동 중 15Hz로 불리므로 매 호출 로그는 금지다 — 10초 창 집계만.
+        문 감지(±10°)는 같은 함수를 쓰지만 다른 자다. 두 자를 섞으면 숫자가 무의미해져
+        버킷을 나눈다."""
+        key = ("전" if direction > 0 else "후") + ("(문)" if half_ang < GUARD_HALF_ANG else "")
+        if r is None:
+            st = {"total": 0, "finite": 0, "inf": 0, "nan": 0, "zero": 0,
+                  "below_self": 0, "ret": None}
+        else:
+            rs  = r[sector]
+            fin = np.isfinite(rs)
+            st = {"total":      int(rs.size),
+                  "finite":     int(np.count_nonzero(fin)),
+                  "inf":        int(np.count_nonzero(np.isinf(rs))),
+                  "nan":        int(np.count_nonzero(np.isnan(rs))),
+                  "zero":       int(np.count_nonzero(rs == 0.0)),
+                  # 0.0(무효 표기 가능성)과 "가깝지만 진짜 반환"을 갈라 센다
+                  "below_self": int(np.count_nonzero(fin & (rs > 0.0)
+                                                     & (rs <= SELF_HIT_MIN))),
+                  "ret":        ret}
+        st["dir"] = key
+        st["half_ang"] = round(float(half_ang), 4)
+        with state_lock:
+            state["clearance_stat"] = st
+
+        w = getattr(self, "_scan_win", None)
+        if w is None:
+            w = self._scan_win = {"t0": time.monotonic(), "b": {}}
+        b = w["b"].setdefault(key, {"n": 0, "total": 0, "finite": 0, "inf": 0,
+                                    "nan": 0, "zero": 0, "below_self": 0,
+                                    "r99": 0, "rnone": 0})
+        b["n"] += 1
+        for k in ("total", "finite", "inf", "nan", "zero", "below_self"):
+            b[k] += st[k]
+        if st["ret"] is None:
+            b["rnone"] += 1
+        elif st["ret"] >= 99.0:
+            b["r99"] += 1
+        now = time.monotonic()
+        if now - w["t0"] >= SCAN_LOG_PERIOD:
+            # 먼저 새 창으로 교체한다 — 다른 스레드(/status 폴링)가 쓰는 동안
+            # 옛 dict를 순회하면 "changed size during iteration"이 난다.
+            self._scan_win = {"t0": now, "b": {}}
+            for k, v in w["b"].items():
+                n = v["n"] or 1
+                self._dlog(f"[SCAN] {k} {v['n']}회 — 섹터 {v['total'] / n:.0f}개: "
+                           f"유효 {v['finite'] / n:.1f} · inf {v['inf'] / n:.1f} · "
+                           f"NaN {v['nan'] / n:.1f} · 0.0 {v['zero'] / n:.1f} · "
+                           f"자기몸(≤{SELF_HIT_MIN}m) {v['below_self'] / n:.1f} "
+                           f"— 반환 99.0 {v['r99']}회 / None {v['rnone']}회")
 
     def _set_align_note(self, msg):
         with state_lock:
