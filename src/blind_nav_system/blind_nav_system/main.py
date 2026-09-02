@@ -1429,6 +1429,7 @@ _EXIT_TOL_CM    = 1.0     # 도달 허용 오차
 _EXIT_STALL_SEC = 10.0    # 이만큼 진행이 없으면 실패
 _EXIT_MAX_SEC   = 60.0    # 절대 상한(무한대기 방지 백스톱)
 _EXIT_POLL_SEC  = 0.4
+_EXIT_MISS_MAX  = 2       # /status 무응답이 이만큼 연속되면 앱이 죽은 것으로 본다
 
 # ⑥ 하차가 끝나지 않은 채 여정이 끊긴 상태 — finally가 리스를 되돌리지 못하게 막는다.
 # 해제는 /elevator_app {running:false} 한 곳에서만 (거기서 리스도 물리적으로 소멸).
@@ -1449,20 +1450,29 @@ def _elev_wait_exit_done():
     last_prog = t0
     best = None          # 지금까지 진행한 최대 거리(cm, 절대값)
     cur  = None          # 마지막으로 읽은 누적 진행량 — 실패 통보에 그대로 실린다
+    miss = 0             # /status 연속 무응답 횟수
     while True:
         if _AUTO["cancel"]:
             return "cancel", cur
         st = _elev_status(timeout=1.0)
         if st is None:
-            return "noapp", cur      # 앱이 죽었다 — 타임아웃까지 헛돌 이유가 없다
-        v = (st.get("scene_acc") or {}).get("fwd_cm")
-        if isinstance(v, (int, float)):
-            cur = float(v)
-            if abs(cur - _EXIT_TARGET_CM) <= _EXIT_TOL_CM:
-                return "done", cur
-            if best is None or abs(cur) - best > 0.5:   # 0.5cm = 진행으로 칠 최소량
-                best = abs(cur)
-                last_prog = time.monotonic()
+            # 1회 표본으로 단정하지 않는다. noapp은 stall과 달리 _rescue_hold를
+            # 세우지 않아 finally가 리스를 반납하는데, 일시적 끊김에 오탐하면
+            # 이 함수가 지키려던 구조용 조종 패드를 그대로 잃는다.
+            # 그렇다고 60초 상한까지 헛돌지도 않는다 — 2회(≈0.8s)면 충분하다.
+            miss += 1
+            if miss >= _EXIT_MISS_MAX:
+                return "noapp", cur
+        else:
+            miss = 0
+            v = (st.get("scene_acc") or {}).get("fwd_cm")
+            if isinstance(v, (int, float)):
+                cur = float(v)
+                if abs(cur - _EXIT_TARGET_CM) <= _EXIT_TOL_CM:
+                    return "done", cur
+                if best is None or abs(cur) - best > 0.5:   # 0.5cm = 진행으로 칠 최소량
+                    best = abs(cur)
+                    last_prog = time.monotonic()
         now = time.monotonic()
         if now - last_prog >= _EXIT_STALL_SEC:
             return "stall", cur
@@ -1661,7 +1671,12 @@ def _press_or_pass() -> bool:
 
 def _auto_run(dest):
     """반자동 여정 상태머신 (백그라운드 스레드)."""
-    global _elev_started_mono
+    global _elev_started_mono, _rescue_hold
+    # 지난 여정의 구조 유지 플래그를 물려받지 않는다 — 앱을 끄지 않고 새 여정을
+    # 시작하면 True인 채 상속돼 이번 여정의 finally도 반납을 건너뛴다(가드가 계속
+    # 꺼진 채 남는 #91 재발). 이건 해제(release)가 아니라 진입 시 상태 위생이고,
+    # 실제 해제 지점은 여전히 /elevator_app {running:false} 한 곳뿐이다.
+    _rescue_hold = False
     # 팔이 수납돼 있다고 볼 수 있는가. 대시보드는 /joint_states를 안 보므로 팔
     # 자세를 직접 못 잰다 — 엘베앱이 주는 "누르기+팔복귀+그리퍼열기 완료" 신호가
     # 유일한 근거다. 그래서 이 래치를 푸는 곳은 아래 단 두 곳(press_done True)뿐이고,
