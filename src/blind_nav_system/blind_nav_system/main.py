@@ -1426,7 +1426,15 @@ def _elev_wait_press_done(timeout=30):
 # ⑥ 하차(후진 186cm) 완료 판정용. 목표값은 엘베앱 SCENE_MOVES[5]와 같은 수치다.
 _EXIT_TARGET_CM = -186.0
 _EXIT_TOL_CM    = 1.0     # 도달 허용 오차
-_EXIT_STALL_SEC = 10.0    # 이만큼 진행이 없으면 실패
+_EXIT_STALL_SEC = 10.0    # 첫 진행이 기록된 뒤, 이만큼 진행이 없으면 실패
+# 첫 진행이 기록되기 전에만 쓰는 유예. scene_acc는 스텝이 '끝나야' 갱신되므로
+# (엘베앱 _manual_trans 말미) 그 전까지는 정상 동작 중에도 진행이 0으로 보인다.
+# 최악 합(엘베앱 main.py): 이전 안무 스레드 종료 대기 3.0s(L2525) + 이동자세
+# _goal_done 대기 5.0s(L2531) + 첫 50cm 스텝 자체 타임아웃 8.5s
+# (abs(0.5)/BOARD_SPEED 0.20 * 3.0 + 1.0, L2412) = 16.5s. 여기에 여유 3.5s.
+# 정상값은 5~6s지만 스핀이 굶으면 5.0s 상한을 다 쓴다 — 오판이 가장 잘 나는
+# 조건(nav+엘베 과부하)에서 나므로 최악 합으로 잡는다.
+_EXIT_START_GRACE = 20.0
 _EXIT_MAX_SEC   = 60.0    # 절대 상한(무한대기 방지 백스톱)
 _EXIT_POLL_SEC  = 0.4
 _EXIT_MISS_MAX  = 2       # /status 무응답이 이만큼 연속되면 앱이 죽은 것으로 본다
@@ -1459,7 +1467,9 @@ def _elev_wait_exit_done():
             # 1회 표본으로 단정하지 않는다. noapp은 stall과 달리 _rescue_hold를
             # 세우지 않아 finally가 리스를 반납하는데, 일시적 끊김에 오탐하면
             # 이 함수가 지키려던 구조용 조종 패드를 그대로 잃는다.
-            # 그렇다고 60초 상한까지 헛돌지도 않는다 — 2회(≈0.8s)면 충분하다.
+            # 그렇다고 60초 상한까지 헛돌지도 않는다 — 2회면 충분하다. 비용은
+            # 최악 ≈2.4s(무응답이 _elev_status timeout 1.0s를 다 쓸 때 1.0+0.4+1.0),
+            # 포트가 닫혀 즉시 거부되면 ≈0.4s다.
             miss += 1
             if miss >= _EXIT_MISS_MAX:
                 return "noapp", cur
@@ -1474,7 +1484,10 @@ def _elev_wait_exit_done():
                     best = abs(cur)
                     last_prog = time.monotonic()
         now = time.monotonic()
-        if now - last_prog >= _EXIT_STALL_SEC:
+        # best > 0.5 = 실제 진행이 한 번이라도 기록됨. 첫 폴링에서 0.0을 읽은 것은
+        # 진행이 아니므로 그때까지는 유예를 쓴다.
+        limit = _EXIT_STALL_SEC if (best is not None and best > 0.5) else _EXIT_START_GRACE
+        if now - last_prog >= limit:
             return "stall", cur
         if now - t0 >= _EXIT_MAX_SEC:
             return "timeout", cur
@@ -1512,6 +1525,19 @@ def _exit_failed(reason: str, cur):
     통보에는 형용사가 아니라 숫자를 싣는다 — 구조하러 오는 사람에게 필요한 건
     '완료되지 않았다'가 아니라 '186cm 중 몇 cm까지 나왔나'다."""
     global _rescue_hold
+    # 무엇보다 먼저 바퀴를 멈춘다. 구코드는 3초 뒤 리스를 반납해 엘베앱
+    # _revoke_authority가 _step_abort + Twist() 정지를 대신 해줬다 — 우연히
+    # 멈추고 있었던 것이다. 리스를 유지하는 이 경로에는 그 회수가 없으므로
+    # 명시적으로 멈추지 않으면 안무 스레드가 남은 후진을 계속한다.
+    # "로봇이 걸쳐 있으니 도움을 요청하세요"라고 통보한 뒤 로봇이 계속
+    # 움직이면, 구조하러 온 사람이 움직이는 로봇을 만난다 — 사람을 태운 채로.
+    # noapp도 예외를 두지 않는다: noapp은 연속 2회 무응답에서 나온 '추정'이지
+    # 사망 증명이 아니다. 앱이 살아 있는데 느렸던 경우가 정확히 멈춰야 할
+    # 경우이고, 정말 죽었으면 POST가 실패할 뿐 해가 없다.
+    stopped = _elev_post("/step_stop", {}, timeout=3) is not None
+    _log("AUTO", "⑥ 하차 실패 → 베이스 정지 요청 " +
+                 ("전송됨(_step_abort) — 안무·현재 스텝 중단"
+                  if stopped else "🚨 전송 실패 — 로봇이 계속 움직일 수 있다"))
     moved = f"{abs(cur):.0f}cm" if isinstance(cur, float) else "확인 불가"
     why   = _EXIT_WHY.get(reason, reason)
     if reason != "noapp":
