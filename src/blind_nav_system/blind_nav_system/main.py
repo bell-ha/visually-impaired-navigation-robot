@@ -1137,7 +1137,7 @@ def elevator_app_status():
 
 @app.route("/elevator_app", methods=["POST"])
 def elevator_app():
-    global _elev_lease_held, _lease_renewer_thread, _elev_started_mono
+    global _elev_lease_held, _lease_renewer_thread, _elev_started_mono, _rescue_hold
     data    = request.json or {}
     desired = data.get("running")     # True=시작, False=종료, None=토글
     running = _elev_app_running()
@@ -1171,6 +1171,7 @@ def elevator_app():
         # 이 라우트를 지나므로 여기 한 곳만 리셋하면 죽은 앱에 finally가 재POST해
         # 가짜 🚨를 내는 것도 자연히 없어짐(_elev_lease_held=False라 no-op)
         _elev_lease_held = False
+        _rescue_hold     = False   # 구조용 리스 유지의 유일한 해제 지점
         _log("MAIN", "엘리베이터 앱 종료 + 제어권 회수 → 주행(nav) 복귀")
         return jsonify(ok=True, running=False)
 
@@ -1421,6 +1422,99 @@ def _elev_wait_press_done(timeout=30):
             return True
         time.sleep(0.3)
     return False
+
+# ⑥ 하차(후진 186cm) 완료 판정용. 목표값은 엘베앱 SCENE_MOVES[5]와 같은 수치다.
+_EXIT_TARGET_CM = -186.0
+_EXIT_TOL_CM    = 1.0     # 도달 허용 오차
+_EXIT_STALL_SEC = 10.0    # 이만큼 진행이 없으면 실패
+_EXIT_MAX_SEC   = 60.0    # 절대 상한(무한대기 방지 백스톱)
+_EXIT_POLL_SEC  = 0.4
+
+# ⑥ 하차가 끝나지 않은 채 여정이 끊긴 상태 — finally가 리스를 되돌리지 못하게 막는다.
+# 해제는 /elevator_app {running:false} 한 곳에서만 (거기서 리스도 물리적으로 소멸).
+_rescue_hold = False
+
+
+def _elev_wait_exit_done():
+    """⑥ 하차(후진 186cm)를 '진행량'으로 확인. (사유, 진행cm) 반환.
+
+    사유: "done"=목표 도달 / "stall"=무진행 / "timeout"=절대상한 /
+          "cancel"=사용자 취소 / "noapp"=엘베앱 상태 조회 불가
+
+    /scene은 안무 스레드를 start한 뒤 즉시 ok를 돌려준다 — 접수이지 완료가 아니다.
+    상수 총시간으로 대신할 수도 없다: _manual_step 한 스텝의 자체 타임아웃만
+    50cm 최악 8.5s라 총합이 ~40s까지 늘어난다(25~30s 상수는 정상 완주를 실패로
+    오판한다). 그래서 '얼마나 걸렸나'가 아니라 '진행이 멎었나'로 본다."""
+    t0 = time.monotonic()
+    last_prog = t0
+    best = None          # 지금까지 진행한 최대 거리(cm, 절대값)
+    cur  = None          # 마지막으로 읽은 누적 진행량 — 실패 통보에 그대로 실린다
+    while True:
+        if _AUTO["cancel"]:
+            return "cancel", cur
+        st = _elev_status(timeout=1.0)
+        if st is None:
+            return "noapp", cur      # 앱이 죽었다 — 타임아웃까지 헛돌 이유가 없다
+        v = (st.get("scene_acc") or {}).get("fwd_cm")
+        if isinstance(v, (int, float)):
+            cur = float(v)
+            if abs(cur - _EXIT_TARGET_CM) <= _EXIT_TOL_CM:
+                return "done", cur
+            if best is None or abs(cur) - best > 0.5:   # 0.5cm = 진행으로 칠 최소량
+                best = abs(cur)
+                last_prog = time.monotonic()
+        now = time.monotonic()
+        if now - last_prog >= _EXIT_STALL_SEC:
+            return "stall", cur
+        if now - t0 >= _EXIT_MAX_SEC:
+            return "timeout", cur
+        time.sleep(_EXIT_POLL_SEC)
+
+
+_EXIT_WHY = {"stall":   "후진이 멈췄습니다",
+             "timeout": "제한 시간을 넘겼습니다",
+             "cancel":  "취소되었습니다",
+             "noapp":   "엘리베이터 앱 응답이 없습니다"}
+
+
+def _exit_failed(reason: str, cur):
+    """⑥ 하차 미완료 — 여기서 여정을 끊고, 사람이 로봇을 빼낼 수단을 남긴다.
+
+    _auto_abort_elev()를 부르지 않는다: 그건 엘베앱을 종료시켜 조종 패드·상태·
+    유일한 구조 경로를 통째로 없앤다. 하차 실패는 '정리하고 끝낼' 상황이 아니라
+    '사람이 개입해 로봇을 빼내야 할' 상황이다.
+
+    리스도 반납하지 않는다(noapp 제외). 반납하면 authority=False가 되어 엘베앱
+    패드의 /step_move가 _manual_step 첫 줄에서 거부된다 — 문턱에 낀 로봇을 빼낼
+    유일한 수단이 사라진다. 회수 상태에서 가드가 돌아오는 것은 안전 이득이 아니다:
+    라이다 가드는 별도 브레이크가 아니라 _manual_step 안의 여유거리 검사일 뿐이라
+    authority가 False면 검사할 이동 자체가 없다.
+
+    가드는 따로 복원하지도 않는다 — 리스 유지 = 하트비트(2s) 유지인데, 엘베앱
+    /authority POST가 하트비트마다 guard_off=True로 되돌린다. 하트비트를 멈추면
+    deadman(LEASE_TTL 6s)이 제어권을 회수해 구조 경로가 사라진다. 가드보다
+    구조 경로가 우선이다.
+
+    noapp만 예외다: 앱이 죽었으면 리스는 이미 물리적으로 소멸했고, 여기서
+    _rescue_hold를 세우면 하트비트가 살아남아 앱 재기동 시 조용히 재부여하는
+    유령 갱신이 된다. 그 경우엔 finally의 정상 반납 경로로 보낸다.
+
+    통보에는 형용사가 아니라 숫자를 싣는다 — 구조하러 오는 사람에게 필요한 건
+    '완료되지 않았다'가 아니라 '186cm 중 몇 cm까지 나왔나'다."""
+    global _rescue_hold
+    moved = f"{abs(cur):.0f}cm" if isinstance(cur, float) else "확인 불가"
+    why   = _EXIT_WHY.get(reason, reason)
+    if reason != "noapp":
+        _rescue_hold = True
+    _auto_notify(f"하차가 끝나지 않았습니다 — 186cm 중 {moved}만 후진했습니다. "
+                 f"{why}. 로봇이 엘리베이터에 걸쳐 있을 수 있으니 도움을 요청하세요")
+    _log("AUTO", f"⑥ 하차 미완료({reason}) 진행 {moved}/186cm — "
+                 + ("제어권 유지(구조용 조종 패드 보존) — 엘베앱 종료 시 해제"
+                    if reason != "noapp" else "앱 응답 없음 — 리스는 이미 소멸"))
+    _auto_set("오류", f"🚨 하차 미완료({reason}) — 186cm 중 {moved} · 여정 중단"
+                      + (" · 제어권 유지, 엘베앱 조종 패드로 빼낼 것"
+                         if reason != "noapp" else ""))
+
 
 def _auto_abort_elev():
     """여정 취소 시 안전 정리: 엘베앱 종료(→제어권 회수→가드 복구)."""
@@ -1703,7 +1797,15 @@ def _auto_run(dest):
             _auto_abort_elev(); return
         _auto_set("⑥ 하차", "하차(후진) 중...", phase="exit")
         _elev_scene(5)
-        time.sleep(3)
+        # 상수 대기로 넘기면(#92) 후진 186cm가 10초 넘게 걸리는 동안 리스가 반납돼
+        # 이동이 통째로 거부되고, 그 실패가 여기로 전파될 길이 없어 사람을 태운 채
+        # 캐빈/문턱에서 /switch_map·/goto로 넘어간다. 씬 ①②③④와 ⑥직전이 전부
+        # 확인 대기를 거치는데 이 한 자리만 상수였다.
+        ex_reason, ex_cm = _elev_wait_exit_done()
+        if ex_reason != "done":
+            # 지도전환·AMCL 초기화·앱 종료·목적지 주행은 하나도 실행하지 않는다.
+            _exit_failed(ex_reason, ex_cm)
+            return
 
         # 리스 반납 — 지도전환·AMCL초기화·목적지주행은 가드(라이다 충돌가드)가
         # 켜진 상태로 시작해야 함. 앱 종료(8단계)까지 리스를 끌고 가지 않는다.
@@ -1734,7 +1836,13 @@ def _auto_run(dest):
         # 최종 보루 — 위 정상 반납(하차 직후)을 못 탄 모든 이탈 경로(예외·취소·
         # 좌표없음 등)에서 리스가 켜진 채 방치되면 가드가 계속 꺼져 있다.
         try:
-            if _elev_lease_held and not _grant_elev_lease(False, "여정 종료(finally)"):
+            if _rescue_hold:
+                # ⑥ 하차 미완료 — 반납하면 엘베앱 패드가 첫 줄에서 거부돼 문턱에 낀
+                # 로봇을 빼낼 수단이 사라진다. 해제는 /elevator_app {running:false}
+                # 한 곳에서만 (거기서 리스도 물리적으로 소멸).
+                _log("ELEVLEASE", "구조 대기 — 제어권 유지(하차 미완료). "
+                                  "엘베앱 종료 시 해제됨")
+            elif _elev_lease_held and not _grant_elev_lease(False, "여정 종료(finally)"):
                 _log("ELEVLEASE", "🚨 최후보루 반납 실패")
         except Exception:
             pass
