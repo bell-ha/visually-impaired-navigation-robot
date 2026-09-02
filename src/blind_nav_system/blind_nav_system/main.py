@@ -278,13 +278,27 @@ def _obstacle_decision_cb(msg):
 
 # ── 지도(층) 전환 ─────────────────────────────────────────────────────────────
 # 같은 건물 = 같은 구조 = 같은 좌표계 (floor4.pgm은 all.pgm의 동일 사본, origin 동일)
+# 전 층이 같은 파일인 것은 버그가 아니다.
+#   ① 승강로는 모든 층에서 같은 (x, y)에 있으므로 캐빈도 모든 층에서 같은 자리다.
+#   ② 원래도 같은 그림이었다 — floor1.yaml·floor2.yaml은 이미 all.pgm을 가리켰고,
+#      floor3.pgm·floor4.pgm은 all.pgm의 바이트 단위 복사본이다(md5 동일 확인).
+#      따라서 이 통합으로 잃는 정보가 없다.
+#   ③ 같은 내용이 3파일로 흩어져 있으면 한쪽만 고쳤을 때 조용히 어긋난다 —
+#      한 파일로 모으면 그 미러 드리프트 위험이 사라진다.
+# 층별로 지도가 실제로 달라지면 그때 다시 갈라야 한다. 옛 파일(all.yaml·
+# floor1~4.yaml·floor3.pgm·floor4.pgm)은 되돌릴 근거로 남겨 두었다.
 _FLOOR_MAPS = {
-    "5": str((THIS_DIR / "../maps/all.yaml").resolve()),
-    "4": str((THIS_DIR / "../maps/floor4.yaml").resolve()),
-    "3": str((THIS_DIR / "../maps/floor3.yaml").resolve()),
-    "2": str((THIS_DIR / "../maps/floor2.yaml").resolve()),
-    "1": str((THIS_DIR / "../maps/floor1.yaml").resolve()),
+    "5": str((THIS_DIR / "../maps/all_with_cabin.yaml").resolve()),
+    "4": str((THIS_DIR / "../maps/all_with_cabin.yaml").resolve()),
+    "3": str((THIS_DIR / "../maps/all_with_cabin.yaml").resolve()),
+    "2": str((THIS_DIR / "../maps/all_with_cabin.yaml").resolve()),
+    "1": str((THIS_DIR / "../maps/all_with_cabin.yaml").resolve()),
 }
+# ⚠ 런치(stretch_robot_process.launch.xml L16)의 map 인자는 아직 all.yaml이다.
+#    즉 부팅 직후 map_server에 올라간 지도에는 캐빈이 없고, /switch_map을 한 번
+#    거쳐야 all_with_cabin.yaml이 올라간다. 이 변수는 "런치가 5층 지도로 떴다"는
+#    뜻이지 "캐빈 포함 지도가 올라가 있다"는 뜻이 아니다 — 둘을 같게 만들려면
+#    런치 인자도 바꿔야 하는데, 그건 이 변경의 범위가 아니다.
 _current_floor = "5"   # 런치 기본 지도 = all.yaml(5층)
 _map_client = None     # /map_server/load_map 서비스 클라이언트
 _init_pub   = None     # /initialpose 퍼블리셔 (AMCL 재정위치용)
