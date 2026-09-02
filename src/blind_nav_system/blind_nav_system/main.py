@@ -294,12 +294,11 @@ _FLOOR_MAPS = {
     "2": str((THIS_DIR / "../maps/all_with_cabin.yaml").resolve()),
     "1": str((THIS_DIR / "../maps/all_with_cabin.yaml").resolve()),
 }
-# ⚠ 런치(stretch_robot_process.launch.xml L16)의 map 인자는 아직 all.yaml이다.
-#    즉 부팅 직후 map_server에 올라간 지도에는 캐빈이 없고, /switch_map을 한 번
-#    거쳐야 all_with_cabin.yaml이 올라간다. 이 변수는 "런치가 5층 지도로 떴다"는
-#    뜻이지 "캐빈 포함 지도가 올라가 있다"는 뜻이 아니다 — 둘을 같게 만들려면
-#    런치 인자도 바꿔야 하는데, 그건 이 변경의 범위가 아니다.
-_current_floor = "5"   # 런치 기본 지도 = all.yaml(5층)
+# ⚠ 런치(stretch_robot_process.launch.xml)의 map 인자와 위 _FLOOR_MAPS는 반드시
+#    같은 파일을 가리켜야 한다. 한쪽만 바꾸면 부팅 직후 적재된 지도와 UI의 층
+#    표시가 어긋난다 — 런치가 옛 지도를 올린 채 이 변수는 "5층"이라 말하고,
+#    사용자는 /switch_map을 한 번 태워야 실제 지도가 바뀐다.
+_current_floor = "5"   # 런치 기본 지도(5층) = all_with_cabin.yaml
 _map_client = None     # /map_server/load_map 서비스 클라이언트
 _init_pub   = None     # /initialpose 퍼블리셔 (AMCL 재정위치용)
 
