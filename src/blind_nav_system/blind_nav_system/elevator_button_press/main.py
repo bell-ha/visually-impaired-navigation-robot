@@ -75,6 +75,10 @@ def start_infer_server():
     return False
 
 
+# 추론 소요 집계 로그 주기(초). 매 추론마다 찍으면 초당 2줄이라 로그가 익사한다.
+INFER_LOG_PERIOD = 10.0
+
+
 def infer_image(image_path: str) -> list:
     with _infer_lock:
         _infer_proc.stdin.write(image_path + "\n")
@@ -1271,6 +1275,8 @@ def status():
                    authority=bool(s.get("authority", False)),
                    lease_expired=bool(s.get("lease_expired")),
                    camera_missing=(_n._camera_missing_check() if _n is not None else None),
+                   infer_ms=s.get("infer_ms"),        # 마지막 추론 소요(ms)
+                   infer_boxes=s.get("infer_boxes"),  # 그때 검출된 박스 수
                    arm_ext=s.get("arm_ext"),   # 팔 뻗기 현재값 — UI 슬라이더 동기화용
                    obs=(_n._obs if _n is not None else None),   # 고립 관측(A5) 캐시 — 판정은 _obs_tick이 함
                    obs_age=_obs_age(_n),   # 위 캐시를 잰 지 몇 초 됐나(이 프로세스 안에서 계산)
@@ -3129,6 +3135,31 @@ class ElevatorTracker(Node):
                 target=self._run_inference, args=(frame.copy(),), daemon=True
             ).start()
 
+    def _infer_note(self, ms, boxes):
+        """추론 1회 소요를 /status에 싣고, 약 10초마다 창 집계를 한 줄 남긴다.
+
+        추론 소요 T는 지금까지 코드 어디에도 안 찍혔다 — _last_infer는 시각만
+        갱신하고 로그도 /status도 없었다. T를 모르는 채로 T에 영향 주는 손잡이
+        (사진모드·스레드 상한·격리)를 돌리면 이후 판단이 전부 추측이 된다.
+        박스 수를 같이 싣는 이유: predict()는 검출 1회 + 박스마다 OCR 1회라
+        T가 박스 수에 비례한다. 빈 화면 T와 캐빈 T는 다른 수치다."""
+        with state_lock:
+            state["infer_ms"]    = int(round(ms))
+            state["infer_boxes"] = boxes
+        w = getattr(self, "_infer_win", None)
+        if w is None:
+            w = self._infer_win = {"t0": time.monotonic(), "n": 0,
+                                   "sum": 0.0, "max": 0.0, "box": 0}
+        w["n"]   += 1
+        w["sum"] += ms
+        w["box"] += boxes
+        w["max"]  = max(w["max"], ms)
+        now = time.monotonic()
+        if now - w["t0"] >= INFER_LOG_PERIOD:
+            self._dlog(f"[INFER] {w['n']}회 — 평균 {w['sum'] / w['n']:.0f}ms · "
+                       f"최대 {w['max']:.0f}ms · 평균 박스 {w['box'] / w['n']:.1f}개")
+            self._infer_win = {"t0": now, "n": 0, "sum": 0.0, "max": 0.0, "box": 0}
+
     def _run_inference(self, frame):
         try:
             # 디지털 줌: 중앙 crop → 2배 확대 → OCR → 좌표를 원본 기준으로 역변환
@@ -3220,8 +3251,12 @@ class ElevatorTracker(Node):
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
                 tmp = f.name
             cv2.imwrite(tmp, ocr_input)
+            _t_infer   = time.monotonic()
             detections = infer_image(tmp)
+            _infer_ms  = (time.monotonic() - _t_infer) * 1000.0
+            _infer_n   = len(detections)   # 필터 전 원본 개수 — T의 실제 비용 단위
             os.unlink(tmp)
+            self._infer_note(_infer_ms, _infer_n)
 
             # ── 2층 분리 ──
             # raw_dets: 전체 탐지(비숫자 "?" 포함) = "버튼처럼 생긴 것" — 패널 단서용.
