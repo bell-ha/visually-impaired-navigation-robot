@@ -415,6 +415,7 @@
 
     <div>
       <h2>시스템 프로세스</h2>
+      <div id="sys-note" style="margin-top:6px;font-size:12px;opacity:.75"></div>
       <div id="sys-proc-list" style="margin-top:6px">
         <div class="sys-proc-row" id="sysrow-launch">
           <span class="sys-dot" id="sysdot-launch"></span>
@@ -1027,35 +1028,75 @@ function escHtml(s) {
 const SYS_NAMES = ['launch','rviz','battery','free','home'];
 const sysState = Object.fromEntries(SYS_NAMES.map(n => [n, false]));
 
+// 시작 거부 사유 등 임시 안내. 모달을 쓰지 않는다 — alert는 이벤트 루프를 멈춰
+// 주행 중 cmdInterval(100ms)과 정지 키까지 같이 막는다(엘베앱 페이지의 "모달 금지"
+// 불변식과 같은 이유). 놓쳐도 화면에 남는 쪽이 낫다.
+let sysNoteHold = 0;
+function sysNote(msg, ms) {
+  const el = document.getElementById('sys-note');
+  if (!el) return;
+  el.textContent = msg;
+  sysNoteHold = Date.now() + (ms || 0);
+}
+
 function toggleSysProc(name) {
-  const running = sysState[name];
   fetch(`/sys_proc/${name}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({action: 'toggle'})
-  }).then(r => r.json()).then(d => updateSysProcUI(name, d.running));
+  }).then(r => r.json()).then(d => {
+    // fetch는 409에 reject하지 않는다 — 여기서 d.ok를 안 보면 거부가 침묵한다.
+    if (!d.ok) { sysNote('⚠ ' + (d.error || '실패'), 8000); pollSysProcStatus(); return; }
+    updateSysProcUI(name, {state: d.running ? 'mine' : 'off', running: d.running});
+  }).catch(() => {});
 }
 
-function updateSysProcUI(name, running) {
+// st = {state, running, pid}. state = mine / external / unknown / off
+function updateSysProcUI(name, st) {
+  st = st || {};
+  const state   = st.state || (st.running ? 'mine' : 'off');
+  const running = !!st.running;
   sysState[name] = running;
   const dot = document.getElementById('sysdot-' + name);
   const btn = document.getElementById('sysbtn-' + name);
   if (!dot || !btn) return;
   const oneShot = ['battery','free','home'].includes(name);
-  if (running) {
-    dot.classList.add('on');
+  dot.classList.toggle('on', running);
+  if (state === 'external') {
+    // 오류가 아니라 소유권 정보다 — 정상 상태이고, 다만 내가 끌 수 없다.
+    btn.textContent = '외부 실행 중';
+    btn.className = 'btn btn-neutral btn-sm';
+    btn.disabled = true;
+    btn.title = 'PID ' + (st.pid || '?') + ' — 이 대시보드가 띄운 게 아닙니다. 끄려면 터미널에서.';
+  } else if (state === 'unknown') {
+    btn.textContent = '확인 중';
+    btn.className = 'btn btn-neutral btn-sm';
+    btn.disabled = true;
+    btn.title = '실행 여부를 확인하지 못했습니다 — 이중 기동을 막으려고 시작을 보류합니다';
+  } else if (running) {
     btn.textContent = '종료';
     btn.className = 'btn btn-danger btn-sm';
+    btn.disabled = false;
+    btn.title = '';
   } else {
-    dot.classList.remove('on');
     btn.className = oneShot ? 'btn btn-neutral btn-sm' : 'btn btn-primary btn-sm';
     btn.textContent = oneShot ? '실행' : '시작';
+    btn.disabled = false;
+    btn.title = '';
   }
 }
 
 function pollSysProcStatus() {
   fetch('/sys_proc_status').then(r => r.json()).then(d => {
-    SYS_NAMES.forEach(name => updateSysProcUI(name, d[name] || false));
+    SYS_NAMES.forEach(name => updateSysProcUI(name, d[name]));
+    const el = (Date.now() >= sysNoteHold) ? document.getElementById('sys-note') : null;
+    if (el) {
+      const ext = SYS_NAMES.filter(n => (d[n] || {}).state === 'external');
+      el.textContent = ext.length
+        ? '외부 실행 중: ' + ext.map(n => SYS_LABELS[n] + '(PID ' + d[n].pid + ')').join(' · ')
+          + ' — 이 대시보드가 띄운 게 아니라 여기서 끌 수 없습니다'
+        : '';
+    }
   }).catch(() => {});
 }
 pollSysProcStatus();
@@ -1106,6 +1147,8 @@ document.addEventListener('keydown', e => {
   if (e.shiftKey && digit && SYS_KEYS[digit]) {
     if (e.repeat) return;
     const name = SYS_KEYS[digit];
+    const _b = document.getElementById('sysbtn-' + name);
+    if (_b && _b.disabled) { sysNote('⚠ ' + (_b.title || '지금은 조작할 수 없습니다'), 6000); return; }
     if (sysState[name] && !confirm(`${SYS_LABELS[name]}을(를) 종료할까요?`)) return;
     toggleSysProc(name);
     e.preventDefault();

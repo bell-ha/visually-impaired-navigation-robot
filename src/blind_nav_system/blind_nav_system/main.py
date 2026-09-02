@@ -2112,12 +2112,140 @@ _SYS_PROC_DEFS = {
 }
 
 
+def _proc_zombie(pid) -> bool:
+    """좀비(Z)인가. os.kill(pid, 0)은 좀비에도 성공하므로 그것만으로는 못 가른다.
+    comm에 공백·괄호가 들어갈 수 있어 마지막 ')' 뒤부터 파싱한다(상태는 그 첫 필드)."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            tail = f.read().decode("utf-8", "replace").rsplit(")", 1)[-1].split()
+        return bool(tail) and tail[0] == "Z"
+    except Exception:
+        return False
+
+
 def _proc_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return True
     except (ProcessLookupError, OSError):
         return False
+    return not _proc_zombie(pid)
+
+
+# 외부(= 이 대시보드가 띄우지 않은) 프로세스 탐지. name → pid.
+# _sys_procs와 섞지 않는다 — 그건 Popen 핸들 dict이고 poll()에 의미가 있다.
+# 가짜 핸들을 섞으면 대시보드가 자기 상태에 대해 거짓말하는 구조가 하나 더 생긴다.
+# (나중에 종료를 지원하게 되면 여기서 PID를 꺼내 쓰면 된다.)
+_sys_ext: dict = {}
+
+_LAUNCH_XML = ("/home/hello-robot/GitHub/visually-impaired-navigation-robot/"
+               "src/blind_nav_system/launch/stretch_robot_process.launch.xml")
+
+# 탐지 대상은 launch·rviz 둘뿐이다. battery·free·home은 몇 초짜리 단발 스크립트라
+# "실행 중(외부)" 깜빡임만 만들고, 이중 기동 방지 대상도 아니다.
+# 표시(_SHOW)와 시작 게이트(_GATE)를 비대칭으로 둔다 — rviz 참고.
+_SYS_EXT_SHOW = {
+    "launch": (_LAUNCH_XML,),
+    # 표시는 자식 바이너리만 본다. 래퍼(ros2 run)만 보고 "실행 중"이라고 하면
+    # 렌더러가 죽어도 켜졌다고 말하게 된다 — 사용자가 보는 건 창이지 래퍼가 아니다.
+    "rviz":   ("/opt/ros/humble/lib/rviz2/rviz2",),
+}
+_SYS_EXT_GATE = {
+    "launch": (_LAUNCH_XML,),
+    # 시작 거부는 래퍼든 바이너리든 하나라도 있으면 한다(fail-closed). 이 비대칭이
+    # "렌더러만 죽어 꺼짐으로 보이는데 켜기를 눌러 래퍼 고아가 남는" 경로를 막는다.
+    "rviz":   ("/opt/ros/humble/lib/rviz2/rviz2", "ros2 run rviz2", "rviz2 rviz2"),
+}
+
+
+def _scan_sys_ext():
+    """/proc를 직접 읽어 외부 launch·rviz를 찾는다. (표시용, 게이트용) 둘 다 name→pid.
+
+    pgrep을 쓰지 않는다: 이 저장소는 pgrep -f가 자기 명령줄을 매치해 오판한 사고를
+    겪었다. /proc 순회는 os.getpid()만 건너뛰면 그 오판이 원천적으로 불가능하고
+    (패턴을 담은 명령줄 자체가 존재하지 않는다), 2초 폴링마다 fork하지도 않으며,
+    PID·cmdline·PGID를 한 번에 얻는다.
+
+    이 대시보드가 띄운 것은 PGID로 걸러낸다 — Popen이 start_new_session=True라
+    자식 세션의 PGID가 곧 그 Popen의 pid다. rviz처럼 프로세스가 둘인 경우도
+    부모·자식이 같은 PGID라 한 번에 빠진다.
+
+    순회 자체가 실패하면 (None, None)을 돌려준다 — 호출부가 '모름'을 알아야
+    시작을 막을 수 있다. 빈 dict(=아무것도 없음)와 구분되어야 한다."""
+    me = os.getpid()
+    mine = set()
+    for pr in list(_sys_procs.values()):
+        try:
+            if pr.poll() is None:
+                mine.add(pr.pid)          # start_new_session=True → pgid == pid
+        except Exception:
+            pass
+    try:
+        entries = [d for d in os.listdir("/proc") if d.isdigit()]
+    except Exception as e:
+        _log("SYS", f"/proc 순회 실패 — 외부 프로세스 판정 불가: {e}")
+        return None, None
+    show, gate = {}, {}
+    for d in entries:
+        try:
+            with open(f"/proc/{d}/cmdline", "rb") as f:
+                argv = [a for a in f.read().decode("utf-8", "replace").split("\0") if a]
+        except Exception:
+            continue          # 순회 도중 죽은 프로세스 — 정상이다
+        if not argv:
+            continue          # 커널 스레드
+        # 명령줄에 문자열이 '있는' 것과 그 프로세스'인' 것은 다르다. 실측에서
+        # 패턴을 인자로 담고 있던 남의 셸이 그대로 잡혔다 — pgrep -f를 못 쓰게 만든
+        # 그 함정이 /proc 순회에도 똑같이 있다(다른 세션이 이 문자열을 grep하기만
+        # 해도 걸린다). 그래서 argv[0]/argv[1]로 정체를 먼저 가른다.
+        is_rviz_bin = argv[0] == "/opt/ros/humble/lib/rviz2/rviz2"
+        is_ros2 = any(len(argv) > i + 1 and os.path.basename(argv[i]) == "ros2"
+                      and argv[i + 1] in ("launch", "run") for i in (0, 1))
+        if not (is_rviz_bin or is_ros2):
+            continue
+        cl = " ".join(argv)
+        hit_show = [n for n, pats in _SYS_EXT_SHOW.items() if any(x in cl for x in pats)]
+        hit_gate = [n for n, pats in _SYS_EXT_GATE.items() if any(x in cl for x in pats)]
+        if not hit_show and not hit_gate:
+            continue          # 흔한 경우 — 여기서 끝내 open을 한 번만 한다
+        pid = int(d)
+        if pid == me or _proc_zombie(pid):
+            continue
+        try:
+            if os.getpgid(pid) in mine:
+                continue      # 이 대시보드가 띄운 것 — 외부가 아니다
+        except Exception:
+            pass
+        for n in hit_show:
+            show.setdefault(n, pid)
+        for n in hit_gate:
+            gate.setdefault(n, pid)
+    return show, gate
+
+
+def _sys_start_gate(name):
+    """시스템 프로세스 시작 관문. 막을 이유가 있으면 (사유, HTTP코드), 없으면 None.
+    _manual_arm_gate와 같은 형식이다 — 조용히 안 되는 조작기를 하나 더 만들지 않는다.
+
+    이중 기동은 무해한 실수가 아니다: stretch_driver 2개(바디 락 충돌) +
+    rplidar 2개(같은 시리얼) + amcl/map_server 2개(TF 파손)다."""
+    global _sys_ext
+    pr = _sys_procs.get(name)
+    if pr and pr.poll() is None:
+        return f"이미 실행 중입니다 (PID {pr.pid})", 409
+    if name not in _SYS_EXT_GATE:
+        return None            # 단발 스크립트는 이중 기동 대상이 아니다
+    show, gate = _scan_sys_ext()
+    if gate is None:
+        # 모르면 막는다. 비대칭이 근거다 — 거짓 "안 돌고 있음"의 대가는 이중 기동
+        # (드라이버·라이다 중복, TF 파손)이고, 거짓 "돌고 있음"의 대가는 사용자가
+        # 한 번 확인하는 것뿐이다.
+        return "실행 여부를 확인하지 못해 시작하지 않습니다 — 잠시 후 다시 시도하세요", 409
+    _sys_ext = show
+    pid = gate.get(name)
+    if pid:
+        return (f"실행 중(외부) — PID {pid}, 이 대시보드가 띄운 게 아닙니다. "
+                "끄려면 터미널에서."), 409
+    return None
 
 
 def _stop_lidar_motor():
@@ -2255,6 +2383,11 @@ def sys_proc_ctrl(name):
     # 프로세스가 열 수 없어, 옛/새 프로세스가 서로 다른 섬으로 갈라진다
     # (2026-07-21 실측: 수동 전진 버튼 무반응 + 새 CLI에서 드라이버 노드 실종 사건)
 
+    blocked = _sys_start_gate(name)
+    if blocked:
+        _log("SYS", f"{defn['label']} 시작 거부 — {blocked[0]}")
+        return jsonify(ok=False, error=blocked[0]), blocked[1]
+
     try:
         proc = subprocess.Popen(
             defn["cmd"],
@@ -2272,10 +2405,25 @@ def sys_proc_ctrl(name):
 
 @app.route("/sys_proc_status")
 def sys_proc_status_route():
-    return jsonify({
-        name: bool(_sys_procs.get(name) and _sys_procs[name].poll() is None)
-        for name in _SYS_PROC_DEFS
-    })
+    """이름 → {state, running, pid}. state = mine(내가 띄움) / external(외부 실행 중)
+    / unknown(판정 실패) / off. '외부 실행 중'은 오류가 아니라 소유권 정보다 —
+    준비바에서 빨갛게 만들 것이 아니라 '내가 끌 수 없다'는 사실을 알리는 것이다."""
+    global _sys_ext
+    show, _gate = _scan_sys_ext()
+    if show is not None:
+        _sys_ext = show
+    out = {}
+    for name in _SYS_PROC_DEFS:
+        pr = _sys_procs.get(name)
+        if pr and pr.poll() is None:
+            out[name] = {"state": "mine", "running": True, "pid": pr.pid}
+        elif show is not None and show.get(name):
+            out[name] = {"state": "external", "running": True, "pid": show[name]}
+        elif show is None and name in _SYS_EXT_GATE:
+            out[name] = {"state": "unknown", "running": False, "pid": None}
+        else:
+            out[name] = {"state": "off", "running": False, "pid": None}
+    return jsonify(out)
 
 # 시각장애인 안내 로봇 관련 알려진 프로세스 이름 (정확히 일치)
 _ROBOT_PROC_NAMES = [
