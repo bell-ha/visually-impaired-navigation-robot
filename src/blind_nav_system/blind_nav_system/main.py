@@ -222,6 +222,11 @@ _ELEV_ISO_GRACE    = 20.0    # 기동 유예(초) — _wait_elev_app_up(timeout=
 _ELEV_ISO_HITS     = 3       # 연속 관측 횟수 — 폴러 3초 주기라 약 9초
 _elev_iso_hits     = 0       # 연속 카운터(폴러 스레드 전용)
 _diag_st = None              # robot_diag.attach()가 돌려주는 상태 캐시(HB가 채움)
+# 엘베앱이 어느 모드로 떠 있나(True=사진모드/False=정상/None=모름). UI가 모드를
+# 표시하려면 이 값이 필요한데, /status를 화면이 직접 부를 수는 없다(5000은 별
+# 오리진). 새 폴링은 만들지 않고 _readiness_poll_loop이 이미 받아오는 st에서
+# 주워 담는다 — 추가 HTTP 0건.
+_elev_no_ocr = None
 # 엘베앱 obs 캐시가 얼마나 오래됐으면 "모름"으로 볼지 — 엘베앱 OBS_STALE_SEC의
 # 미러(별도 프로세스라 상수를 직접 못 읽는다). 엘베앱 OBS_PERIOD=1s라 그보다
 # 훨씬 커야 GIL 경합에 깜빡이지 않는다. 저쪽 값을 바꾸면 여기도 같이 바꿀 것.
@@ -433,7 +438,7 @@ def _obs_brief(obs) -> str:
 
 
 def _readiness_poll_loop():
-    global _elev_started_mono
+    global _elev_started_mono, _elev_no_ocr
     order = {"bad": 0, "unknown": 1, "ok": 2}
     while True:
         try:
@@ -451,6 +456,7 @@ def _readiness_poll_loop():
                     # 리스 만료(deadman) 표면화 — 엘베가 스스로 권한을 내린 채
                     # 대기 중이면 "정상 응답"이 아니라 재부여가 필요한 상태
                     st = _elev_status(timeout=1.0)
+                    _elev_no_ocr = bool(st.get("no_ocr")) if st else None
                     if _elev_started_mono is None:
                         # 대시보드만 재시작했거나 앱을 밖에서 띄운 경우 — Popen을
                         # 우리가 안 해서 기동시각이 없다. 그대로 두면 고립 탐지가
@@ -1133,11 +1139,15 @@ def _grant_elev_lease(granted: bool, reason: str = "") -> bool:
 
 @app.route("/elevator_app_status")
 def elevator_app_status():
-    return jsonify(running=_elev_app_running(), authority=_elev_authority)
+    _run = _elev_app_running()
+    # 꺼져 있으면 모드는 '없음'이지 지난번 값이 아니다 — 화면이 옛 모드를 붙들고
+    # 있으면 그게 곧 거짓말이다.
+    return jsonify(running=_run, authority=_elev_authority,
+                   no_ocr=(_elev_no_ocr if _run else None))
 
 @app.route("/elevator_app", methods=["POST"])
 def elevator_app():
-    global _elev_lease_held, _lease_renewer_thread, _elev_started_mono, _rescue_hold
+    global _elev_lease_held, _lease_renewer_thread, _elev_started_mono, _rescue_hold, _elev_no_ocr
     data    = request.json or {}
     desired = data.get("running")     # True=시작, False=종료, None=토글
     running = _elev_app_running()
@@ -1172,6 +1182,7 @@ def elevator_app():
         # 가짜 🚨를 내는 것도 자연히 없어짐(_elev_lease_held=False라 no-op)
         _elev_lease_held = False
         _rescue_hold     = False   # 구조용 리스 유지의 유일한 해제 지점
+        _elev_no_ocr     = None    # 껐으니 모드도 모름 — 다음 기동이 다시 채운다
         _log("MAIN", "엘리베이터 앱 종료 + 제어권 회수 → 주행(nav) 복귀")
         return jsonify(ok=True, running=False)
 

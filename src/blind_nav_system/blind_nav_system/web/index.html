@@ -354,6 +354,16 @@
           </label>
         </div>
         <div class="toggle-row">
+          <span class="toggle-label" title="OCR을 아예 띄우지 않고 카메라만 본다. 켤 때 정해지며, 바꾸려면 앱을 끄고 다시 켜야 한다. 이 모드에서는 버튼 인식이 없어 여정을 시작할 수 없다.">📸 사진모드로 켜기</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="elev-photo-toggle">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="toggle-row">
+          <span class="toggle-label" id="elev-mode-note" style="opacity:.75">모드: 앱 꺼짐</span>
+        </div>
+        <div class="toggle-row">
           <span class="toggle-label" title="앱 실행과 별개 — 이동권(guard 해제). 수동 정렬 등에 사용">🔑 엘베 제어권</span>
           <label class="toggle-switch">
             <input type="checkbox" id="elev-authority-toggle" onchange="toggleElevAuthority()">
@@ -624,14 +634,21 @@ function queryPose() {
 // 엘리베이터 앱 on-demand 실행 (앱 실행 ≠ 제어권 — 제어권은 아래 toggleElevAuthority)
 let elevAppRunning = false;
 function toggleElevatorApp() {
-  const desired = document.getElementById('elev-app-toggle').checked;
+  const el = document.getElementById('elev-app-toggle');
+  const ph = document.getElementById('elev-photo-toggle');
+  const desired = el.checked;
+  // 사진모드는 '켤 때' 정해진다 — 서버가 실행 중 전환을 거부하므로(끄고 켜기)
+  // 끄는 요청에는 실어봐야 의미가 없지만, 서버가 무시하므로 그대로 보낸다.
   fetch('/elevator_app', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({running: desired})
+    body: JSON.stringify({running: desired, photo: !!(ph && ph.checked)})
   }).then(r => r.json()).then(d => {
-    elevAppRunning = d.running;
-    document.getElementById('elev-app-toggle').checked = elevAppRunning;
+    // 서버가 거부하면(모드 불일치 등) 사유를 보여준다. 안 보여주면 아무 일도
+    // 안 일어났는데 토글만 켜진 채 남아 화면이 거짓말을 한다.
+    if (!d.ok) alert('엘베앱 전환 실패: ' + (d.error || ''));
+    if (d.running !== undefined) elevAppRunning = d.running;
+    el.checked = elevAppRunning;   // 누른 대로가 아니라 서버가 말한 실제 값으로
   }).catch(() => {
-    document.getElementById('elev-app-toggle').checked = elevAppRunning;
+    el.checked = elevAppRunning;
   });
 }
 // 실제 서버 상태와 주기 동기화 (크래시·외부 종료 반영)
@@ -640,6 +657,16 @@ function _syncElevApp() {
     elevAppRunning = d.running;
     const t = document.getElementById('elev-app-toggle');
     if (t && document.activeElement !== t) t.checked = elevAppRunning;
+    // 지금 어느 모드로 떠 있나 — 모르면 "왜 인식이 안 되지"가 또 난다.
+    // no_ocr이 null이면 아직 못 읽은 것이지 정상 모드가 아니다(단정하지 않는다).
+    const m = document.getElementById('elev-mode-note');
+    if (m) m.textContent = !elevAppRunning ? '모드: 앱 꺼짐'
+      : d.no_ocr === true  ? '모드: 사진모드 — 버튼 인식 없음 · 여정 시작 불가'
+      : d.no_ocr === false ? '모드: 정상'
+      : '모드: 확인 중...';
+    // 켜져 있는 동안엔 모드를 못 바꾼다(끄고 다시 켜야 한다) — 서버 계약과 일치.
+    const p = document.getElementById('elev-photo-toggle');
+    if (p && document.activeElement !== p) p.disabled = elevAppRunning;
     _updateSnapshotBtn();
   }).catch(() => {});
 }
