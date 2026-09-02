@@ -278,6 +278,16 @@ def _obstacle_decision_cb(msg):
 
 # ── 지도(층) 전환 ─────────────────────────────────────────────────────────────
 # 같은 건물 = 같은 구조 = 같은 좌표계 (floor4.pgm은 all.pgm의 동일 사본, origin 동일)
+# [지도 교체 규약] 새 지도가 나오면 이 참조들을 고치지 말고, all.pgm 자체를
+# 갈아끼우고 옛것을 all_backup_YYYYMMDD.pgm으로 남긴다. 참조가 5곳(all.yaml·
+# floor1~4.yaml)이라 한 곳만 고치면 조용히 어긋난다 — 파일을 바꾸면 고칠 참조가
+# 0개가 되어 그 위험이 아예 없어진다. (2026-09-02 캐빈 병합을 그렇게 처리했다.)
+#
+# [동기화 경고] 런치(stretch_robot_process.launch.xml)의 map 인자와 아래
+# _FLOOR_MAPS는 반드시 같은 지도를 가리켜야 한다. 어긋나면 증상이 "지도가 안
+# 바뀐다"가 아니라 "UI는 5층이라는데 그 지도에 캐빈이 없다"로 나와 원인을 찾기
+# 어렵다. 지금은 양쪽 다 all.yaml을 보므로 일치한다 — 나중에 층별로 지도를 다시
+# 갈라놓게 되면 이 일치를 직접 지켜야 한다.
 _FLOOR_MAPS = {
     "5": str((THIS_DIR / "../maps/all.yaml").resolve()),
     "4": str((THIS_DIR / "../maps/floor4.yaml").resolve()),
