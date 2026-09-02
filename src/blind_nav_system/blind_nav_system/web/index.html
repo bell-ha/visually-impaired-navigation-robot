@@ -644,12 +644,25 @@ function toggleElevatorApp() {
   }).then(r => r.json()).then(d => {
     // 서버가 거부하면(모드 불일치 등) 사유를 보여준다. 안 보여주면 아무 일도
     // 안 일어났는데 토글만 켜진 채 남아 화면이 거짓말을 한다.
-    if (!d.ok) alert('엘베앱 전환 실패: ' + (d.error || ''));
+    // alert(모달)은 쓰지 않는다 — 모달은 JS 이벤트 루프를 멈춰서 주행 중
+    // cmdInterval(100ms)과 정지 계열 키까지 같이 막는다. 엘베앱 페이지에
+    // "모달 금지" 불변식이 생긴 이유가 그것이고, 같은 결함을 여기 새로
+    // 심을 이유가 없다. 아래 모드 줄에 띄우면 비블로킹이고 놓쳐도 남는다.
+    if (!d.ok) elevNote('⚠ 엘베앱 전환 실패 — ' + (d.error || ''), 6000);
     if (d.running !== undefined) elevAppRunning = d.running;
     el.checked = elevAppRunning;   // 누른 대로가 아니라 서버가 말한 실제 값으로
   }).catch(() => {
     el.checked = elevAppRunning;
   });
+}
+// 모드 줄에 임시 메시지를 띄운다 — 그 동안은 주기 동기화가 덮지 않는다.
+// (엘베앱 페이지의 flashMotionErr과 같은 방식: 문구 + 유지 시간)
+let elevNoteHold = 0;
+function elevNote(msg, ms) {
+  const m = document.getElementById('elev-mode-note');
+  if (!m) return;
+  m.textContent = msg;
+  elevNoteHold = Date.now() + (ms || 0);
 }
 // 실제 서버 상태와 주기 동기화 (크래시·외부 종료 반영)
 function _syncElevApp() {
@@ -659,7 +672,8 @@ function _syncElevApp() {
     if (t && document.activeElement !== t) t.checked = elevAppRunning;
     // 지금 어느 모드로 떠 있나 — 모르면 "왜 인식이 안 되지"가 또 난다.
     // no_ocr이 null이면 아직 못 읽은 것이지 정상 모드가 아니다(단정하지 않는다).
-    const m = document.getElementById('elev-mode-note');
+    const m = (Date.now() >= elevNoteHold)
+      ? document.getElementById('elev-mode-note') : null;   // 임시 사유 표시 중이면 덮지 않는다
     if (m) m.textContent = !elevAppRunning ? '모드: 앱 꺼짐'
       : d.no_ocr === true  ? '모드: 사진모드 — 버튼 인식 없음 · 여정 시작 불가'
       : d.no_ocr === false ? '모드: 정상'
