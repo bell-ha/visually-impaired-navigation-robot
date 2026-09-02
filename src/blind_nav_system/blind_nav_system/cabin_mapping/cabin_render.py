@@ -172,8 +172,15 @@ def main():
         return 1
     print(f"기록 {len(recs)}장 (헤더 {'있음' if header else '없음'})")
 
-    bxs = [r["pose_base"][0] for r in recs]
-    bys = [r["pose_base"][1] for r in recs]
+    # --use-amcl이면 박스도 AMCL 좌표계로 잡아야 한다 — 포즈는 AMCL인데 박스만
+    # 앵커 기준이면 AMCL이 튄 만큼 박스가 어긋난다. (라이다는 base 중심에서 몇 cm
+    # 안이라 박스 반변 1.5m 기준으로 그 차이는 무시할 수 있다.)
+    _pk = "pose_amcl" if args.use_amcl else "pose_base"
+    bxs = [r[_pk][0] for r in recs if r.get(_pk)]
+    bys = [r[_pk][1] for r in recs if r.get(_pk)]
+    if not bxs:
+        print(f"⛔ {_pk} 가 기록에 없다 — 박스 중심을 정할 수 없다.")
+        return 1
     if args.box_center:
         bx, by = [float(v) for v in args.box_center.split(",")]
         src = "지정(--box-center)"
@@ -195,13 +202,21 @@ def main():
     logodds = np.zeros((h, w), dtype=np.float32)
     sector = math.radians(args.sector_deg)
     n_beam = n_sector = n_box = n_short = 0
+    n_null = n_null_sector = n_tooclose = n_in_sector = 0
 
     for rec in recs:
         pl = rec.get("pose_amcl") if args.use_amcl else rec["pose_laser"]
         if pl is None:
             continue
         lx, ly, lyaw = pl
-        byaw = rec["pose_base"][2]
+        if args.use_amcl:
+            # 장착 오프셋 = pose_laser[2] - pose_base[2] (같은 순간의 두 기록이라
+            # 앵커가 상쇄된다). AMCL 포즈로 렌더하면서 앵커 기준 byaw를 그대로 쓰면
+            # AMCL이 δ만큼 틀어진 만큼 섹터 창이 통째로 돈다 — "AMCL이 얼마나
+            # 튀었나"를 보려고 켜는 옵션인데, 튀었을 때 정확히 그 비교가 오염된다.
+            byaw = wrap(lyaw - (rec["pose_laser"][2] - rec["pose_base"][2]))
+        else:
+            byaw = rec["pose_base"][2]
         # 라이다 장착 회전은 (lyaw - byaw)에 이미 들어 있다. 빔의 '로봇 정면 기준'
         # 각도 = wrap(lyaw + a - byaw) — 오프셋 상수를 손으로 넣지 않는 이유다.
         a0 = rec["angle_min"]
@@ -211,10 +226,22 @@ def main():
         r0 = h - 1 - int((ly - oy) / res)
         for i, rng in enumerate(rec["ranges"]):
             n_beam += 1
-            if rng is None or rng <= rec["range_min"]:
-                continue
             a = a0 + i * da
-            if abs(wrap(lyaw + a - byaw)) > sector:      # ① 섹터
+            in_sector = abs(wrap(lyaw + a - byaw)) <= sector       # ① 섹터
+            if in_sector:
+                n_in_sector += 1
+            if rng is None:
+                # 무효 반환(inf/NaN)을 세는 이유: 벽이 광택 스테인리스면 정반사로
+                # 반환 자체가 사라진다. 그러면 필터를 아무리 넓혀도 점유 셀이 안
+                # 생기는데, 원인을 모르면 파라미터만 바꾸며 시간을 버린다.
+                n_null += 1
+                if in_sector:
+                    n_null_sector += 1
+                continue
+            if rng <= rec["range_min"]:
+                n_tooclose += 1
+                continue
+            if not in_sector:
                 n_sector += 1
                 continue
             hit = rng < rmax
@@ -260,12 +287,19 @@ def main():
                 f"free_thresh: {yml.get('free_thresh', '0.196')}\n")
 
     print(f"빔 {n_beam} — 섹터에서 버림 {n_sector} · 박스에서 버림 {n_box} · "
-          f"최대사거리(미탐) {n_short}")
+          f"최대사거리(미탐) {n_short} · 최소사거리 미만 {n_tooclose}")
+    print(f"무효 반환(inf/null): 전체 {100.0 * n_null / max(n_beam, 1):.1f}%"
+          f" ({n_null}/{n_beam}) · "
+          f"섹터 안 {100.0 * n_null_sector / max(n_in_sector, 1):.1f}%"
+          f" ({n_null_sector}/{n_in_sector})")
     print(f"셀 변경: free {int(free.sum())} · occupied {int(occ.sum())}"
           + ("" if args.overwrite_known else "  (원본 unknown 셀만)"))
     print(f"출력: {pgm_out}\n      {yaml_out}")
     if int(occ.sum()) == 0:
-        print("⚠ 점유 셀이 하나도 안 생겼다 — 박스 중심/크기나 섹터를 의심하라.")
+        print("⚠ 점유 셀이 하나도 안 생겼다 — 박스 중심/크기나 섹터를 의심하라.\n"
+              "   또는 라이다 반환 자체가 없을 수 있다(광택 스테인리스 벽의 정반사).\n"
+              "   위 '무효 반환' 비율을 먼저 보라. 섹터 안 무효가 높으면 필터를 아무리\n"
+              "   넓혀도 점유 셀은 안 생긴다 — 파라미터가 아니라 관측의 문제다.")
     print("이 결과는 '캐빈이 이렇게 생겼다'를 눈으로 확인하는 용도다. 완성이 아니다.")
     return 0
 
