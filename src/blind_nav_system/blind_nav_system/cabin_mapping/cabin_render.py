@@ -14,7 +14,8 @@
        laser 기준으로 그대로 자르면 정확히 반대쪽(뒤)을 고르게 된다. 그래서
        capture가 pose_laser와 pose_base를 둘 다 남기고, 여기서 두 yaw의 차이로
        계산한다 — 오프셋 상수를 손으로 넣지 않는다.
-  ② 공간 박스 — 앵커 근처 ±box(m) 밖의 끝점은 전부 버린다. 각도 마스크는 사람
+  ② 공간 박스 — 박스 중심 ±box(m) 밖의 끝점은 전부 버린다. 중심 기본값은
+     '기록된 로봇 위치의 중앙값'이다(--box-center로 지정 가능). 각도 마스크는 사람
      행동(운영자가 어디 서 있나)에 의존하지만 박스는 의존하지 않는다. 홀·복도·
      운영자·문 밖 통행인을 각도와 무관하게 통째로 걷어낸다.
   ③ 로그오즈 누적 — 한두 장의 튄 관측으로 셀이 뒤집히지 않게 한다.
@@ -123,8 +124,9 @@ def main():
     ap.add_argument("--map", required=True, help="기존 맵 yaml (읽기 전용)")
     ap.add_argument("--out", required=True, help="출력 경로 접두사 (.pgm/.yaml이 붙는다)")
     ap.add_argument("--sector-deg", type=float, default=45.0, help="전방 섹터 반각(도)")
-    ap.add_argument("--box", type=float, default=1.5, help="앵커 기준 박스 반변(m)")
-    ap.add_argument("--box-center", default="", help="'x,y'로 박스 중심 지정(기본: 첫 포즈)")
+    ap.add_argument("--box", type=float, default=1.5, help="박스 반변(m)")
+    ap.add_argument("--box-center", default="",
+                    help="'x,y'로 박스 중심 지정 (기본: 기록된 로봇 위치의 중앙값)")
     ap.add_argument("--l-occ", type=float, default=0.85)
     ap.add_argument("--l-free", type=float, default=-0.40)
     ap.add_argument("--l-clamp", type=float, default=5.0)
@@ -170,12 +172,25 @@ def main():
         return 1
     print(f"기록 {len(recs)}장 (헤더 {'있음' if header else '없음'})")
 
+    bxs = [r["pose_base"][0] for r in recs]
+    bys = [r["pose_base"][1] for r in recs]
     if args.box_center:
         bx, by = [float(v) for v in args.box_center.split(",")]
+        src = "지정(--box-center)"
     else:
-        bx, by = recs[0]["pose_base"][0], recs[0]["pose_base"][1]
-    print(f"박스 중심 ({bx:+.3f}, {by:+.3f}) 반변 {args.box}m · "
+        # 첫 기록 위치가 아니라 '전체 기록의 중앙값'이다. 절차가 "문 앞에서 시작 →
+        # 캐빈으로 들어감"이라 첫 위치를 쓰면 박스가 캐빈을 반쯤 자른다 — 그리고
+        # 그건 다 찍고 렌더한 뒤에야 발견되는 종류의 실패다. 들어가서 회전하는
+        # 절차면 표본 대부분이 캐빈 안이라 중앙값이 캐빈 중심에 수렴한다.
+        # 평균이 아니라 중앙값인 이유: 문 앞 진입 구간이 이상치로 남아도 안 끌려간다.
+        bx, by = float(np.median(bxs)), float(np.median(bys))
+        src = "기록 중앙값"
+    print(f"박스 중심 ({bx:+.3f}, {by:+.3f}) [{src}] 반변 {args.box}m · "
           f"섹터 ±{args.sector_deg}° · 포즈 {'AMCL' if args.use_amcl else '앵커'}")
+    print(f"  기록된 로봇 위치 범위 x[{min(bxs):+.2f}, {max(bxs):+.2f}] "
+          f"y[{min(bys):+.2f}, {max(bys):+.2f}]  "
+          f"→ 박스 x[{bx - args.box:+.2f}, {bx + args.box:+.2f}] "
+          f"y[{by - args.box:+.2f}, {by + args.box:+.2f}]")
 
     logodds = np.zeros((h, w), dtype=np.float32)
     sector = math.radians(args.sector_deg)
