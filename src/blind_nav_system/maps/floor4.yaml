@@ -1,4 +1,4 @@
-image: floor4.pgm
+image: all.pgm
 resolution: 0.050000
 origin: [-77.200000, -50.000000, 0.000000]
 negate: 0
