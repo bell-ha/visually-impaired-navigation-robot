@@ -1282,7 +1282,8 @@ def status():
                    lease_expired=bool(s.get("lease_expired")),
                    camera_missing=(_n._camera_missing_check() if _n is not None else None),
                    no_ocr=_no_ocr,   # 사진모드 — 대시보드가 여정 시작을 막는 근거
-                   infer_ms=s.get("infer_ms"),        # 마지막 추론 소요(ms)
+                   infer_ms=s.get("infer_ms"),        # 마지막 추론 IPC 구간 소요(ms)
+                                                      # — crop·imwrite는 미포함
                    infer_boxes=s.get("infer_boxes"),  # 그때 검출된 박스 수
                    arm_ext=s.get("arm_ext"),   # 팔 뻗기 현재값 — UI 슬라이더 동기화용
                    obs=(_n._obs if _n is not None else None),   # 고립 관측(A5) 캐시 — 판정은 _obs_tick이 함
@@ -3152,6 +3153,10 @@ class ElevatorTracker(Node):
         박스 수를 같이 싣는 이유: predict()는 검출 1회 + 박스마다 OCR 1회라
         T가 박스 수에 비례한다. 빈 화면 T와 캐빈 T는 다른 수치다.
 
+        재는 구간은 infer_image() 호출, 즉 '추론 IPC 구간'뿐이다 — 디지털 줌
+        crop·resize·cv2.imwrite·unlink는 안 들어간다. 한 사이클이 3.0초 벽을
+        얼마나 먹는지는 이 값보다 크다. 숫자를 사이클 전체로 읽지 말 것.
+
         사진모드(--no-ocr)에서는 이 함수가 아예 안 불려 계측이 쌓이지 않는다
         (추론을 안 하므로). /status.infer_ms가 계속 비어 있는 것은 고장이 아니다 —
         T를 재려면 정상 모드로 켤 것."""
@@ -3168,7 +3173,8 @@ class ElevatorTracker(Node):
         w["max"]  = max(w["max"], ms)
         now = time.monotonic()
         if now - w["t0"] >= INFER_LOG_PERIOD:
-            self._dlog(f"[INFER] {w['n']}회 — 평균 {w['sum'] / w['n']:.0f}ms · "
+            self._dlog(f"[INFER] 추론 IPC 구간 {w['n']}회 — "
+                       f"평균 {w['sum'] / w['n']:.0f}ms · "
                        f"최대 {w['max']:.0f}ms · 평균 박스 {w['box'] / w['n']:.1f}개")
             self._infer_win = {"t0": now, "n": 0, "sum": 0.0, "max": 0.0, "box": 0}
 
