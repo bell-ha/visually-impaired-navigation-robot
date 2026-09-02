@@ -2308,25 +2308,39 @@ class ElevatorTracker(Node):
         싣는지 모르는 채로는 "열린 공간(inf)"과 "센서가 못 봄(0.0/NaN)"을 구분할 수
         없고, 그 구분 없이 임계를 만지면 다음 판단이 전부 추측이 된다. 재고 나서 고친다.
 
+        [새 결합 주의] 이 함수가 state_lock을 잡으므로, _clearance를 부르는
+        비상정지 감시 경로에 락 획득이 새로 들어갔다. 지금은 아무도 이 락을 오래
+        쥐지 않아 무해하다(디스크 I/O·publish는 전부 락 밖이라는 규율이 지켜져
+        있다). 하지만 앞으로 누가 락 안에서 느린 일을 하면 그 지연이 이동 중
+        감시 주기로 그대로 전파된다.
+
         _clearance는 이동 중 15Hz로 불리므로 매 호출 로그는 금지다 — 10초 창 집계만.
         문 감지(±10°)는 같은 함수를 쓰지만 다른 자다. 두 자를 섞으면 숫자가 무의미해져
         버킷을 나눈다."""
         key = ("전" if direction > 0 else "후") + ("(문)" if half_ang < GUARD_HALF_ANG else "")
         if r is None:
-            st = {"total": 0, "finite": 0, "inf": 0, "nan": 0, "zero": 0,
-                  "below_self": 0, "ret": None}
+            # 스캔이 없던 호출은 '섹터 0개'가 아니라 '표본이 아님'이다. 합계에
+            # 0을 더하면서 표본 수만 올리면 평균이 희석돼 "섹터가 절반으로
+            # 줄었다" 같은 잘못된 결론이 나온다 — 따로 세고 나눗셈에서 뺀다.
+            st = {"total": 0, "finite": 0, "valid": 0, "inf": 0, "nan": 0,
+                  "zero": 0, "below_self": 0, "ret": None, "noscan": 1}
         else:
             rs  = r[sector]
             fin = np.isfinite(rs)
+            # 버킷은 서로 배타로 센다 — valid + below_self + zero + inf + nan이
+            # total과 맞아떨어져야 읽는 사람이 대조할 수 있다. (finite는 zero와
+            # below_self를 포함하므로 로그에는 쓰지 않고 참고용으로만 남긴다.)
             st = {"total":      int(rs.size),
-                  "finite":     int(np.count_nonzero(fin)),
+                  "finite":     int(np.count_nonzero(fin)),   # 포함관계 있음 — 로그엔 안 씀
+                  "valid":      int(np.count_nonzero(fin & (rs > SELF_HIT_MIN))),
                   "inf":        int(np.count_nonzero(np.isinf(rs))),
                   "nan":        int(np.count_nonzero(np.isnan(rs))),
                   "zero":       int(np.count_nonzero(rs == 0.0)),
                   # 0.0(무효 표기 가능성)과 "가깝지만 진짜 반환"을 갈라 센다
                   "below_self": int(np.count_nonzero(fin & (rs > 0.0)
                                                      & (rs <= SELF_HIT_MIN))),
-                  "ret":        ret}
+                  "ret":        ret,
+                  "noscan":     0}
         st["dir"] = key
         st["half_ang"] = round(float(half_ang), 4)
         with state_lock:
@@ -2335,11 +2349,11 @@ class ElevatorTracker(Node):
         w = getattr(self, "_scan_win", None)
         if w is None:
             w = self._scan_win = {"t0": time.monotonic(), "b": {}}
-        b = w["b"].setdefault(key, {"n": 0, "total": 0, "finite": 0, "inf": 0,
-                                    "nan": 0, "zero": 0, "below_self": 0,
-                                    "r99": 0, "rnone": 0})
+        b = w["b"].setdefault(key, {"n": 0, "noscan": 0, "total": 0, "finite": 0,
+                                    "valid": 0, "inf": 0, "nan": 0, "zero": 0,
+                                    "below_self": 0, "r99": 0, "rnone": 0})
         b["n"] += 1
-        for k in ("total", "finite", "inf", "nan", "zero", "below_self"):
+        for k in ("noscan", "total", "finite", "valid", "inf", "nan", "zero", "below_self"):
             b[k] += st[k]
         if st["ret"] is None:
             b["rnone"] += 1
@@ -2347,16 +2361,23 @@ class ElevatorTracker(Node):
             b["r99"] += 1
         now = time.monotonic()
         if now - w["t0"] >= SCAN_LOG_PERIOD:
-            # 먼저 새 창으로 교체한다 — 다른 스레드(/status 폴링)가 쓰는 동안
-            # 옛 dict를 순회하면 "changed size during iteration"이 난다.
+            # 새 창으로 먼저 교체하고, 순회는 스냅샷(list)으로 한다. 교체만으로는
+            # 부족하다 — 이미 옛 dict 참조를 들고 setdefault 직전에 서 있던
+            # 스레드는 못 막는다. list(...)는 GIL 안 단일 연산이라 그 경합에서
+            # RuntimeError가 사라진다(카운트 lost update는 남지만 계측이라 허용).
             self._scan_win = {"t0": now, "b": {}}
-            for k, v in w["b"].items():
-                n = v["n"] or 1
-                self._dlog(f"[SCAN] {k} {v['n']}회 — 섹터 {v['total'] / n:.0f}개: "
-                           f"유효 {v['finite'] / n:.1f} · inf {v['inf'] / n:.1f} · "
-                           f"NaN {v['nan'] / n:.1f} · 0.0 {v['zero'] / n:.1f} · "
-                           f"자기몸(≤{SELF_HIT_MIN}m) {v['below_self'] / n:.1f} "
-                           f"— 반환 99.0 {v['r99']}회 / None {v['rnone']}회")
+            for k, v in list(w["b"].items()):
+                d = v["n"] - v["noscan"]      # 무스캔은 평균의 분모에서 뺀다
+                tail = (f" — 반환 99.0 {v['r99']}회 / None {v['rnone']}회")
+                if d <= 0:
+                    self._dlog(f"[SCAN] {k} {v['n']}회 — 전부 무스캔(스캔 없음)" + tail)
+                    continue
+                self._dlog(f"[SCAN] {k} {v['n']}회(무스캔 {v['noscan']}) — "
+                           f"섹터 {v['total'] / d:.0f}개: "
+                           f"유효>{SELF_HIT_MIN}m {v['valid'] / d:.1f} · "
+                           f"자기몸≤{SELF_HIT_MIN}m {v['below_self'] / d:.1f} · "
+                           f"0.0 {v['zero'] / d:.1f} · inf {v['inf'] / d:.1f} · "
+                           f"NaN {v['nan'] / d:.1f}" + tail)
 
     def _set_align_note(self, msg):
         with state_lock:
