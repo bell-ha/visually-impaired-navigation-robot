@@ -27,13 +27,15 @@ stretch_robot_home.py              # 로봇 원점 설정
 # 1단계: 드라이버
 ros2 launch stretch_core stretch_driver.launch.py mode:=navigation broadcast_odom_tf:=True
 
-# 2단계: LiDAR
+# 2단계: LiDAR  ★ angle_compensate 필수 (아래 "빔 수" 항목)
 ros2 run rplidar_ros rplidar_composition --ros-args \
   -p serial_port:=/dev/hello-lrf \
   -p serial_baudrate:=115200 \
-  -p frame_id:=laser
+  -p frame_id:=laser \
+  -p angle_compensate:=true
 
 # 3단계: SLAM Toolbox
+#   min_laser_range는 용도에 따라 갈라 쓴다 (아래 "min_laser_range" 항목)
 ros2 run slam_toolbox async_slam_toolbox_node --ros-args \
   -p odom_frame:=odom -p base_frame:=base_link \
   -p scan_topic:=/scan -p mode:=mapping \
@@ -45,12 +47,101 @@ ros2 run slam_toolbox async_slam_toolbox_node --ros-args \
   -p transform_timeout:=0.2
 
 # 4단계: RViz2 (시각화)
-ros2 run rviz2 rviz2
+ros2 run rviz2 rviz2 -d src/blind_nav_system/config/mapping/mapview.rviz
 
-# 5단계: 키보드 조종으로 공간 탐색
+# 5단계: 조종으로 공간 탐색 — 키보드 또는 게임패드(아래 2.1.4)
 ros2 run teleop_twist_keyboard teleop_twist_keyboard \
   --ros-args -r /cmd_vel:=/stretch/cmd_vel
 ```
+
+#### 2.1.1 ★ `angle_compensate:=true` — 없으면 맵이 통째로 안 만들어진다
+
+이걸 빼면 스캔마다 빔 수가 **950~956개로 들쭉날쭉**해지고, slam_toolbox가
+
+```
+contains N range readings, expected 942
+```
+
+를 내며 **모든 스캔을 거부한다.** 첫 장만 들어가고 그 뒤로 한 장도 안 쌓인다.
+켜면 **1080개로 고정**된다(2026-09-02 실측, 40샘플 전수 확인).
+
+**증상이 "맵이 안 커진다"로 나와서 원인을 찾기 어렵다** — 노드는 전부 정상으로
+보이고 에러도 로그 안쪽에만 찍힌다. 맵이 안 자라면 이것부터 의심하라.
+
+#### 2.1.2 `min_laser_range` — 좁은 공간에서는 낮춰야 한다
+
+| 용도 | 값 | 이유 |
+|---|---|---|
+| 복도·건물 전체 | `0.8` | 로봇 자기 몸·부속물을 걸러낸다 |
+| 엘리베이터 캐빈 등 좁은 공간 | `0.3` | 벽이 0.7~1.0m라 0.8이면 **벽이 통째로 버려진다** |
+
+좁은 공간을 찍을 때 0.8 그대로 두면 캐빈 안에서 아무것도 안 찍힌다.
+
+#### 2.1.3 운영자 배제 필터 — 뒤따르는 사람이 벽으로 찍히는 것 막기
+
+사람이 로봇을 따라다니며 맵핑하면 그 사람이 그대로 벽이 된다. 로봇 뒤 ±60°를
+잘라낸다.
+
+```bash
+ros2 run laser_filters scan_to_scan_filter_chain --ros-args \
+  --params-file src/blind_nav_system/config/mapping/laser_rear_cut.yaml
+# → SLAM 3단계의 scan_topic을 바꾼다:  -p scan_topic:=/scan_rear_cut
+```
+
+⚠ **`replace_with_nan: true`가 필수다.** 기본값(false)은 잘라낸 빔을
+`range_max + 1 = 13.0`으로 채우는데, SLAM의 `max_laser_range=15.0`이 그 값을
+**13m 거리의 벽으로 읽어 로봇 뒤에 가짜 원형 벽**을 만든다. 운영자를 지우려다
+훨씬 큰 가짜 구조물을 얻는다.
+
+⚠ **각도는 라이다 프레임 기준이다.** TF 실측 `base_link → laser = 180°`라
+**라이다 0° = 로봇 뒤**다. 부호를 뒤집으면 앞쪽을 지우고 **정확히 운영자만 남긴다.**
+
+#### 2.1.4 게임패드 조종
+
+키보드보다 훨씬 부드럽고, 맵핑 품질이 눈에 띄게 좋다.
+
+```bash
+ros2 run joy joy_node
+ros2 run teleop_twist_joy teleop_node --ros-args \
+  --params-file src/blind_nav_system/config/mapping/gamepad_xbox.yaml \
+  -r /cmd_vel:=/stretch/cmd_vel
+```
+
+LB(버튼 4)를 누르고 있어야 움직이는 데드맨이고, 속도는 0.25 m/s · 0.25 rad/s로
+낮춰 두었다(빠르면 스캔이 번진다).
+
+⛔ **`~/.local/bin/stretch_gamepad_teleop.py`는 절대 쓰지 마라.** stretch_body를
+직접 잡아 **로봇 바디 락과 시리얼을 물어서 런치의 stretch_driver를 죽인다.**
+오토스타트(`~/.config/autostart/hello_robot_gamepad_teleop.desktop`)에도 등록돼
+있으니, 맵핑 전에 떠 있지 않은지 확인하라.
+
+#### 2.1.5 기존 지도에 이어 찍기 — 지금은 "새로 찍고 이미지 정합"이다
+
+기존 `all.pgm`은 `.posegraph`가 없어 **slam_toolbox 재개가 불가능하다.** 그래서
+지금 방법은 새로 SLAM을 돌린 뒤 이미지 수준에서 겹치는 것이다.
+
+2026-09-02에 엘베 캐빈을 붙인 절차:
+
+1. 게임패드로 대상 구역을 새로 SLAM (`cabin_run.pgm`)
+2. 기존 맵과 **FFT 상관으로 회전을 전수 탐색**해 정합 (그날 값: 회전 314.0°,
+   오프셋 414/216)
+3. RViz `Publish Point`로 병합 **경계선을 지정**하고 그 안쪽만 병합
+4. 필요하면 GIMP로 손질 (그날은 엘베 문 벽을 지워 홀↔캐빈을 연결)
+5. **`all.pgm`을 갈아끼우고 옛것을 `all_backup_YYYYMMDD.pgm`으로 남긴다**
+
+5번이 중요하다. `all.pgm`을 가리키는 참조가 `all.yaml`·`floor1~4.yaml` **다섯
+곳**이라, 참조를 고치는 방식은 한 곳만 빠뜨려도 조용히 어긋난다. 파일을 갈아끼우면
+고칠 참조가 0개가 된다.
+
+**앞으로 SLAM을 할 때는 `SerializePoseGraph` 서비스로 포즈그래프도 같이 저장하라.**
+
+```bash
+ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph \
+  "{filename: '<경로>/맵이름'}"
+```
+
+그러면 다음부터는 이미지 정합이 아니라 **진짜 이어찍기**(`mode:=localization` +
+`map_file_name`)가 가능해진다. 오늘 겪은 정합 작업 전체가 없어진다.
 
 ### 2.2 지도 저장
 

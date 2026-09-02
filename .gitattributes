@@ -3,3 +3,9 @@ files/*.pptx filter=lfs diff=lfs merge=lfs -text
 *.mp4 filter=lfs diff=lfs merge=lfs -text
 files/발표자료/20260116_시각장애인안내로봇.pptx filter=lfs diff=lfs merge=lfs -text
 files/**/*.pptx filter=lfs diff=lfs merge=lfs -text
+
+# 맵 이미지는 반드시 바이너리로 다룬다. git은 첫 8KB에 NUL이 있는지로 판정하는데
+# all.pgm은 앞부분이 전부 미지(205)라 NUL이 없어 '텍스트'로 잡힌다. 그대로 두면
+# core.autocrlf를 켜거나 윈도우에서 체크아웃할 때 5MB 맵이 조용히 손상되고,
+# 충돌 시 맵에 3-way 텍스트 병합이 도는 것 자체가 사고다. (yaml은 텍스트가 맞다.)
+*.pgm binary

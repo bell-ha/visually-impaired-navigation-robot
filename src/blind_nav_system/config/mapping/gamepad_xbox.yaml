@@ -1,0 +1,21 @@
+# 맵핑용 게임패드 설정 (Xbox 360 패드) — LB(버튼 4)를 누르고 있어야 움직이는 데드맨.
+# 맵핑 속도는 0.25 m/s · 0.25 rad/s로 낮춰 잡았다(빠르면 스캔이 번진다).
+# 사용: ros2 run joy joy_node
+#       ros2 run teleop_twist_joy teleop_node --ros-args --params-file <이 파일> \
+#            -r /cmd_vel:=/stretch/cmd_vel
+# ⛔ ~/.local/bin/stretch_gamepad_teleop.py 는 쓰지 마라 — stretch_body를 직접 잡아
+#    바디 락과 시리얼을 물어서 런치의 stretch_driver를 죽인다.
+teleop_twist_joy_node:
+  ros__parameters:
+    axis_linear:
+      x: 1
+    scale_linear:
+      x: 0.25
+    scale_linear_turbo:
+      x: 0.45
+    axis_angular:
+      yaw: 0
+    scale_angular:
+      yaw: 0.25
+    enable_button: 4
+    enable_turbo_button: 5

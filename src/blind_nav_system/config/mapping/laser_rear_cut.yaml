@@ -1,0 +1,16 @@
+# 맵핑용 라이다 필터 — 로봇 뒤 ±60°를 잘라 뒤따르는 운영자가 벽으로 찍히는 것을 막는다.
+# ⚠ replace_with_nan: true 가 핵심이다. 기본값(false)은 잘린 빔을 range_max+1=13.0으로
+#   채우는데, SLAM의 max_laser_range=15.0이 그걸 13m 벽으로 읽어 뒤쪽에 가짜 원형 벽을 만든다.
+# ⚠ 각도는 라이다 프레임 기준이다. TF 실측 base_link→laser = 180°라 라이다 0° = 로봇 뒤다.
+#   부호를 뒤집으면 정확히 운영자만 찍힌다.
+# 사용: ros2 run laser_filters scan_to_scan_filter_chain --ros-args --params-file <이 파일>
+#       → SLAM에 -p scan_topic:=/scan_rear_cut
+scan_to_scan_filter_chain:
+  ros__parameters:
+    filter1:
+      name: rear_cut
+      type: laser_filters/LaserScanAngularBoundsFilterInPlace
+      params:
+        lower_angle: -1.047
+        upper_angle: 1.047
+        replace_with_nan: true
