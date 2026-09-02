@@ -3150,7 +3150,11 @@ class ElevatorTracker(Node):
         갱신하고 로그도 /status도 없었다. T를 모르는 채로 T에 영향 주는 손잡이
         (사진모드·스레드 상한·격리)를 돌리면 이후 판단이 전부 추측이 된다.
         박스 수를 같이 싣는 이유: predict()는 검출 1회 + 박스마다 OCR 1회라
-        T가 박스 수에 비례한다. 빈 화면 T와 캐빈 T는 다른 수치다."""
+        T가 박스 수에 비례한다. 빈 화면 T와 캐빈 T는 다른 수치다.
+
+        사진모드(--no-ocr)에서는 이 함수가 아예 안 불려 계측이 쌓이지 않는다
+        (추론을 안 하므로). /status.infer_ms가 계속 비어 있는 것은 고장이 아니다 —
+        T를 재려면 정상 모드로 켤 것."""
         with state_lock:
             state["infer_ms"]    = int(round(ms))
             state["infer_boxes"] = boxes

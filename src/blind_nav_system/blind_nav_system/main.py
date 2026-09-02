@@ -1177,6 +1177,21 @@ def elevator_app():
 
     # 이미 켜져 있음 → 앱만 켜진 상태 유지, 제어권은 건드리지 않음(엘베앱 켜기 ≠ 제어권 주기)
     if desired is True and running:
+        # 요청한 모드와 실행 중인 모드가 다르면 조용히 ok를 돌려주지 않는다 —
+        # 아무 일도 안 일어났는데 UI는 성공으로 읽는다. 그렇다고 여기서 앱을
+        # 재시작하지도 않는다: 사용자가 제어권을 쥐고 여정 중일 수 있고, 앱을
+        # 죽이는 위험은 #92에서 확인했다. 정직하게 실패하고 사람이 끄고 켜게 한다.
+        want_photo = bool(data.get("photo"))
+        st = _elev_status(timeout=1.0)
+        if st is not None and bool(st.get("no_ocr")) != want_photo:
+            return jsonify(ok=False, running=True, error=(
+                "엘베앱이 사진모드로 실행 중입니다 — 정상 모드로 바꾸려면 끄고 다시 켜세요"
+                if st.get("no_ocr") else
+                "엘베앱이 정상 모드로 실행 중입니다 — 사진모드로 바꾸려면 끄고 다시 켜세요"
+            )), 409
+        # 모드를 못 읽으면 불일치를 단정하지 않는다. 여기서까지 fail-closed로 막으면
+        # 앱 토글 자체가 막힌다 — 아래 /auto_goto와 방향이 다른 이유는 위험의
+        # 비대칭이다: 여정 시작은 사람이 갇히지만, 앱 토글의 최악은 "다시 누르기"다.
         return jsonify(ok=True, running=True)
 
     # 시작 (경로는 __file__ 기준이라 cwd 무관, 부모 env(ROS·FastDDS) 상속)
@@ -1946,7 +1961,14 @@ def auto_goto():
     # 시각장애인이 팔 나온 채 홀에 발이 묶인다. 시작 전에 막는다.
     if _elev_app_running():
         _st = _elev_status(timeout=1.0)
-        if _st and _st.get("no_ocr"):
+        if _st is None:
+            # 모르면 안 움직인다. 앱이 떠 있는데 상태를 못 읽으면 모드도 모르는
+            # 것이고, 그 상태로 여정이 성공할 시나리오가 없다 — 하류가 어차피
+            # 실패하는데 그 실패는 팔이 나온 채 홀에 발이 묶이는 형태다.
+            # 사유는 사진모드와 구분해서 낸다(운영자가 원인을 알아야 한다).
+            return jsonify(ok=False, error="엘베앱 상태를 읽을 수 없어 여정을 "
+                                           "시작하지 않습니다 — 엘베앱을 확인하세요"), 409
+        if _st.get("no_ocr"):
             return jsonify(ok=False, error="사진모드에서는 여정을 시작할 수 없습니다 "
                                            "— 엘베앱을 정상 모드로 다시 켜세요"), 409
     threading.Thread(target=_auto_run, args=(dest,), daemon=True).start()
