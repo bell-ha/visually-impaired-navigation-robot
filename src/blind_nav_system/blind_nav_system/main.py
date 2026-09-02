@@ -517,10 +517,12 @@ def _readiness_poll_loop():
                     _elev_isolated(False)   # 연속 카운터 리셋 — 비200은 고립 signature가 아니다
                     _ready_val["elev_app"] = {"status": "bad", "detail": f"HTTP {r.status_code}"}
                     _ready_val["gripper_camera"] = {"status": "unknown", "detail": "엘베앱 응답 없음"}
+                    _elev_no_ocr = None     # 못 물어봤으면 모드도 모른다(옛 값 금지)
             except Exception:
                 _elev_isolated(False)   # 연속 카운터 리셋 — 무응답은 고립 signature가 아니다
                 _ready_val["elev_app"] = {"status": "unknown", "detail": "무응답(미기동/접속거부)"}
                 _ready_val["gripper_camera"] = {"status": "unknown", "detail": "미기동"}
+                _elev_no_ocr = None     # 위와 같은 이유 — 바로 옆 카메라 판정과 같은 규율
         except Exception:
             time.sleep(3.0)
             continue
@@ -1981,7 +1983,8 @@ def auto_goto():
             _st = _elev_status(timeout=1.0)
             if _st is not None:
                 break
-            time.sleep(0.4)
+            if _i < 2:          # 마지막 회차 뒤엔 잘 이유가 없다(순수 낭비 0.4s)
+                time.sleep(0.4)
         if _st is None:
             # 모르면 안 움직인다. 앱이 떠 있는데 상태를 못 읽으면 모드도 모르는
             # 것이고, 그 상태로 여정이 성공할 시나리오가 없다 — 하류가 어차피
