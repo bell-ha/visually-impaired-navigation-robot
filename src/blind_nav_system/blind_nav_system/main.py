@@ -2137,8 +2137,15 @@ def _proc_alive(pid: int) -> bool:
 # (나중에 종료를 지원하게 되면 여기서 PID를 꺼내 쓰면 된다.)
 _sys_ext: dict = {}
 
-_LAUNCH_XML = ("/home/hello-robot/GitHub/visually-impaired-navigation-robot/"
-               "src/blind_nav_system/launch/stretch_robot_process.launch.xml")
+# 런치 경로를 여기에 다시 적지 않는다 — _SYS_PROC_DEFS의 cmd에서 뽑는다.
+# 두 곳에 적으면 한쪽만 바뀌었을 때 탐지가 '조용히' 죽고 이중 기동 방지가 통째로
+# 사라진다(무음 실패라 미러 드리프트 중에서도 나쁜 쪽이다).
+# 뽑기에 실패하면 빈 문자열이 되어 "" in cmdline 이 항상 참이 되는 참사가 나므로,
+# 실패를 플래그로 남기고 _sys_start_gate가 fail-closed로 거부한다.
+import re as _re_sys
+_m_launch = _re_sys.search(r"/\S+\.launch\.xml", _SYS_PROC_DEFS["launch"]["cmd"][-1])
+_LAUNCH_XML = _m_launch.group(0) if _m_launch else "\0"   # 절대 매치되지 않는 값
+_LAUNCH_XML_OK = _m_launch is not None
 
 # 탐지 대상은 launch·rviz 둘뿐이다. battery·free·home은 몇 초짜리 단발 스크립트라
 # "실행 중(외부)" 깜빡임만 만들고, 이중 기동 방지 대상도 아니다.
@@ -2197,6 +2204,15 @@ def _scan_sys_ext():
         # 패턴을 인자로 담고 있던 남의 셸이 그대로 잡혔다 — pgrep -f를 못 쓰게 만든
         # 그 함정이 /proc 순회에도 똑같이 있다(다른 세션이 이 문자열을 grep하기만
         # 해도 걸린다). 그래서 argv[0]/argv[1]로 정체를 먼저 가른다.
+        # [전제] 규칙이 인자 '위치'에 묶여 있다 — python3 -u .../ros2 launch 나
+        # stdbuf 래핑처럼 토큰이 하나만 밀리면 못 잡는다. 지금 성립하는 이유:
+        # /opt/ros/humble/bin/ros2가 shebang #!/usr/bin/python3 스크립트라
+        # exec ros2 launch ... 가 커널에서 python3 .../ros2 launch ... 로 펼쳐지고,
+        # 그래서 대시보드가 띄우는 형태와 사람이 터미널에서 치는 형태가 같은 argv가
+        # 된다. 이 전제가 깨지면 탐지가 무음으로 죽는다.
+        # [예정] colcon 패키지로 전환하면 패키지 상대 형태
+        # (ros2 launch blind_nav_system ...)도 같이 봐야 한다. 지금은 colcon이
+        # 아니라 절대경로가 유일한 실행 형태다.
         is_rviz_bin = argv[0] == "/opt/ros/humble/lib/rviz2/rviz2"
         is_ros2 = any(len(argv) > i + 1 and os.path.basename(argv[i]) == "ros2"
                       and argv[i + 1] in ("launch", "run") for i in (0, 1))
@@ -2234,6 +2250,9 @@ def _sys_start_gate(name):
         return f"이미 실행 중입니다 (PID {pr.pid})", 409
     if name not in _SYS_EXT_GATE:
         return None            # 단발 스크립트는 이중 기동 대상이 아니다
+    if name == "launch" and not _LAUNCH_XML_OK:
+        return ("런치 경로를 확인하지 못해 시작하지 않습니다 — 탐지가 불가능한 상태라 "
+                "이중 기동을 막을 수 없습니다"), 409
     show, gate = _scan_sys_ext()
     if gate is None:
         # 모르면 막는다. 비대칭이 근거다 — 거짓 "안 돌고 있음"의 대가는 이중 기동
@@ -2317,6 +2336,23 @@ def sys_proc_ctrl(name):
     running = bool(p and p.poll() is None)
 
     if action == "stop" or (action == "toggle" and running):
+        # 내가 띄운 게 아니면 여기서 끝낸다. p가 None인 채로 내려가면
+        # _kill_proc_group(None, ...)이 곧바로 True를 돌려주고, 그 뒤 pgrep으로
+        # 잡힌 '외부 런치의' rplidar에 SIGKILL + 모터 정지까지 나간다 — 남의
+        # 프로세스를 죽이지 않는다는 이 기능의 불변식이 정확히 여기서 깨진다.
+        # UI는 external이면 버튼을 비활성으로 두지만 라우트는 열려 있다(오래된
+        # 페이지·curl로 도달 가능). 진입만 막는 것이고 종료 로직은 손대지 않는다.
+        if p is None and name in _SYS_EXT_GATE:
+            show, gate = _scan_sys_ext()
+            pid = (gate or {}).get(name)
+            if gate is None or pid:
+                _log("SYS", f"{defn['label']} 종료 거부 — 외부 프로세스"
+                            + (f" (PID {pid})" if pid else " 판정 불가"))
+                return jsonify(ok=False, error=(
+                    f"실행 중(외부) — PID {pid}, 이 대시보드가 띄운 게 아니라 여기서 "
+                    "끌 수 없습니다. 터미널에서 끄세요." if pid else
+                    "실행 여부를 확인하지 못해 종료하지 않습니다 — 터미널에서 확인하세요."
+                )), 409
         _sys_procs.pop(name, None)
         kill_timeout = defn.get("kill_timeout", 6)
         auto_free    = defn.get("auto_free_lock", False)
