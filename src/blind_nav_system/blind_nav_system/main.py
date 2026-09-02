@@ -1425,7 +1425,22 @@ def _elev_wait_press_done(timeout=30):
 
 # ⑥ 하차(후진 186cm) 완료 판정용. 목표값은 엘베앱 SCENE_MOVES[5]와 같은 수치다.
 _EXIT_TARGET_CM = -186.0
-_EXIT_TOL_CM    = 1.0     # 도달 허용 오차
+_EXIT_TOL_CM    = 1.0     # 도달 허용 오차. 넓히지 않는다 — scene_acc는 연속이 아니라
+                          # 스텝 완료마다 점프하므로(0 → -51.9 → -102.9 → -153.8 →
+                          # -187.2 → -184.0) tol을 넓히면 done이 오버슛 시점(-187.2)에
+                          # 터진다. 앱이 +3.1cm 보정을 하러 가기 직전이다 — 대시보드가
+                          # 완료를 선언하고 리스를 회수해 그 보정이 "제어권 없음"으로
+                          # 거부된다. #92가 없애려던 구조를 게이트 안에 다시 심는 꼴이라,
+                          # 오차는 tol이 아니라 아래 강등(_EXIT_NEAR_CM)으로 흡수한다.
+# 진동 break로 스스로 멈춘 완주를 실패로 오판하지 않기 위한 강등 임계.
+# 유도가 아니라 실측이다 (~/.ros/log/python3_12606_1784856324677.log:217, ⑥ 하차):
+#   - 스텝 오버슛: 명령 -50cm → 실제 -51.9 / -51.0 / -50.8 = 1~2cm
+#   - 진동 break 시점 잔여: 최대 2cm (관측 2건 — 2cm, 1cm. 완주 4건 중 2건이 이 경로)
+#   - 5.0 = 관측 최대의 2.5배 마진
+# "186cm면 문틀 마진이 얼마"라는 근거가 아니다 — 그건 아무도 잰 적이 없다.
+# 근거는 "관측된 진동 잔여가 최대 2cm"뿐이다. #92가 잡으려는 진짜 실패는 잔여
+# 136cm 이상이라 27배 떨어져 있어 이 창으로 새어나올 수 없다.
+_EXIT_NEAR_CM   = 5.0
 _EXIT_STALL_SEC = 10.0    # 첫 진행이 기록된 뒤, 이만큼 진행이 없으면 실패
 # 첫 진행이 기록되기 전에만 쓰는 유예. scene_acc는 스텝이 '끝나야' 갱신되므로
 # (엘베앱 _manual_trans 말미) 그 전까지는 정상 동작 중에도 진행이 0으로 보인다.
@@ -1488,6 +1503,12 @@ def _elev_wait_exit_done():
         # 진행이 아니므로 그때까지는 유예를 쓴다.
         limit = _EXIT_STALL_SEC if (best is not None and best > 0.5) else _EXIT_START_GRACE
         if now - last_prog >= limit:
+            # 진동 감지로 안무가 스스로 마친 완주는 여기서 무진행으로 보인다.
+            # 잔여가 충분히 작으면 성공으로 강등해 정상 경로에 합류시킨다.
+            if cur is not None and abs(_EXIT_TARGET_CM - cur) <= _EXIT_NEAR_CM:
+                _log("AUTO", f"⑥ 하차 완료 (잔여 {abs(_EXIT_TARGET_CM - cur):.1f}cm "
+                             f"— 진동 보정으로 안무가 스스로 마침, 누적 {cur:+.1f}cm)")
+                return "done", cur
             return "stall", cur
         if now - t0 >= _EXIT_MAX_SEC:
             return "timeout", cur
