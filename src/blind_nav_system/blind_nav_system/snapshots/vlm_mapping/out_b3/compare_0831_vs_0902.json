@@ -1,0 +1,317 @@
+{
+ "purpose": "8/31(0.55m) vs 9/2(0.19~0.44m) 독립 측정 대조",
+ "note_source_images": "8/28 원본 사진은 커밋 2f38eb9 에서 삭제됨. meta 는 2f38eb9^ 에서 읽음.",
+ "A_panel_intrinsic": {
+  "20260828T180736_snap": {
+   "name": "8/31 · 20260828T180736_snap",
+   "n_points": 7,
+   "cam_to_panel_m": 0.621,
+   "plane_rms_mm": 1.25,
+   "plane_max_mm": 2.31,
+   "grid": "3×3",
+   "fill": [
+    [
+     "●",
+     "●",
+     "·"
+    ],
+    [
+     "·",
+     "●",
+     "●"
+    ],
+    [
+     "●",
+     "●",
+     "●"
+    ]
+   ],
+   "grid_collisions": 0,
+   "row_pitch_mm": [
+    62.6,
+    53.5
+   ],
+   "col_pitch_mm": [
+    81.9,
+    66.6
+   ],
+   "normal_base": [
+    -0.1397,
+    0.9891,
+    -0.0463
+   ],
+   "labels_order": [
+    "문열림",
+    "3",
+    "2",
+    "5",
+    "종",
+    "1",
+    "4"
+   ]
+  },
+  "20260828T180746_snap": {
+   "name": "8/31 · 20260828T180746_snap",
+   "n_points": 7,
+   "cam_to_panel_m": 0.621,
+   "plane_rms_mm": 2.1,
+   "plane_max_mm": 3.94,
+   "grid": "3×3",
+   "fill": [
+    [
+     "●",
+     "●",
+     "·"
+    ],
+    [
+     "·",
+     "●",
+     "●"
+    ],
+    [
+     "●",
+     "●",
+     "●"
+    ]
+   ],
+   "grid_collisions": 0,
+   "row_pitch_mm": [
+    58.9,
+    57.6
+   ],
+   "col_pitch_mm": [
+    79.2,
+    68.5
+   ],
+   "normal_base": [
+    -0.1765,
+    0.9834,
+    -0.0429
+   ],
+   "labels_order": [
+    "문열림",
+    "3",
+    "2",
+    "5",
+    "종",
+    "1",
+    "4"
+   ]
+  },
+  "20260902T183106_엘리베이터안탑승장소(좌표)": {
+   "name": "9/2 · 20260902T183106_엘리베이터안탑승장소(좌표)",
+   "n_points": 7,
+   "cam_to_panel_m": 0.477,
+   "plane_rms_mm": 2.68,
+   "plane_max_mm": 4.16,
+   "grid": "3×3",
+   "fill": [
+    [
+     "●",
+     "●",
+     "·"
+    ],
+    [
+     "·",
+     "●",
+     "●"
+    ],
+    [
+     "●",
+     "●",
+     "●"
+    ]
+   ],
+   "grid_collisions": 0,
+   "row_pitch_mm": [
+    60.6,
+    56.8
+   ],
+   "col_pitch_mm": [
+    77.1,
+    67.6
+   ],
+   "normal_base": [
+    -0.0467,
+    0.9989,
+    -0.0091
+   ],
+   "button_diam_mm": {
+    "median": 29.6,
+    "min": 25.0,
+    "max": 33.6
+   }
+  }
+ },
+ "B_map_absolute": {
+  "possible": false,
+  "reason": "8/28 meta 의 tf.map__base_link 가 null 이다. localization_available=false, missing 에 \"tf:map__base_link\" 가 찍혀 있다 — 촬영 당시 map 프레임 자체가 없었다(AMCL/지도 미구동).",
+  "stale_amcl_evidence": {
+   "recorded_amcl_8_28": {
+    "x": -47.62,
+    "y": 4.917,
+    "z": 0.9969,
+    "w": 0.0792,
+    "yaw_deg": 170.9
+   },
+   "today_hall_panel_pose": [
+    -47.454,
+    4.993,
+    168.4
+   ],
+   "today_cabin_pose": [
+    -47.824,
+    7.102,
+    68.9
+   ],
+   "note": "기록된 8/28 amcl(-47.62, 4.917, 171°)은 오늘의 승강장 자세와 17cm·2.5° 안에서 일치한다. 그런데 그 사진은 캐빈 *안*에서 찍은 조작반이다(오늘 캐빈 자세는 -47.82, 7.10). 즉 기록된 값은 이전 위치에서 멈춰 있던 낡은 값이다. 이걸 map 변환에 썼다면 2m 넘게 틀린 좌표가 그럴듯하게 나왔을 것이다."
+  },
+  "consequence": "8/31 산출물은 base_link 좌표만 의미가 있다. 지도 절대좌표로 승격할 수 없고, DECISIONS #14 의 B3 \"실제 press 좌표 대조\"는 이 데이터로는 불가능하다. 9/2 수집분은 24세트 전부 map__base_link 가 살아 있어 이 문제가 없다."
+ },
+ "A_multiframe_0902": [
+  {
+   "snap": "20260902T182619_엘리베이터버튼수집_1",
+   "n": 4,
+   "range_m": 0.442,
+   "plane_rms_mm": 1.0,
+   "nn_gap_mm": 67.6,
+   "diam_median_mm": 28.6
+  },
+  {
+   "snap": "20260902T182728_엘리베이터버튼수집_2",
+   "n": 6,
+   "range_m": 0.196,
+   "plane_rms_mm": 20.15,
+   "nn_gap_mm": 61.6,
+   "diam_median_mm": 29.8
+  },
+  {
+   "snap": "20260902T182811_엘리베이터버튼수집_3",
+   "n": 5,
+   "range_m": 0.191,
+   "plane_rms_mm": 19.13,
+   "nn_gap_mm": 60.6,
+   "diam_median_mm": 24.0
+  },
+  {
+   "snap": "20260902T182821_엘리베이터버튼수집_4",
+   "n": 5,
+   "range_m": 0.199,
+   "plane_rms_mm": 0.62,
+   "nn_gap_mm": 58.9,
+   "diam_median_mm": 30.9
+  },
+  {
+   "snap": "20260902T182855_엘리베이터버튼수집_5",
+   "n": 5,
+   "range_m": 0.2,
+   "plane_rms_mm": 0.48,
+   "nn_gap_mm": 60.2,
+   "diam_median_mm": 27.8
+  },
+  {
+   "snap": "20260902T182903_엘리베이터버튼수집_6",
+   "n": 7,
+   "range_m": 0.193,
+   "plane_rms_mm": 0.68,
+   "nn_gap_mm": 57.3,
+   "diam_median_mm": 30.4
+  },
+  {
+   "snap": "20260902T182909_엘리베이터버튼수집_7",
+   "n": 5,
+   "range_m": 0.193,
+   "plane_rms_mm": 0.18,
+   "nn_gap_mm": 56.8,
+   "diam_median_mm": 29.2
+  },
+  {
+   "snap": "20260902T182914_엘리베이터버튼수집_8",
+   "n": 5,
+   "range_m": 0.19,
+   "plane_rms_mm": 0.39,
+   "nn_gap_mm": 61.3,
+   "diam_median_mm": 33.5
+  },
+  {
+   "snap": "20260902T182918_엘리베이터버튼수집_9",
+   "n": 5,
+   "range_m": 0.194,
+   "plane_rms_mm": 0.19,
+   "nn_gap_mm": 61.4,
+   "diam_median_mm": 29.7
+  },
+  {
+   "snap": "20260902T182928_엘리베이터버튼수집_10",
+   "n": 5,
+   "range_m": 0.199,
+   "plane_rms_mm": 0.54,
+   "nn_gap_mm": 59.1,
+   "diam_median_mm": 31.4
+  },
+  {
+   "snap": "20260902T182936_엘리베이터버튼수집_11",
+   "n": 7,
+   "range_m": 0.194,
+   "plane_rms_mm": 0.43,
+   "nn_gap_mm": 59.7,
+   "diam_median_mm": 27.7
+  },
+  {
+   "snap": "20260902T182941_엘리베이터버튼수집_12",
+   "n": 6,
+   "range_m": 0.207,
+   "plane_rms_mm": 0.34,
+   "nn_gap_mm": 57.1,
+   "diam_median_mm": 30.4
+  },
+  {
+   "snap": "20260902T182949_엘리베이터버튼수집_13",
+   "n": 5,
+   "range_m": 0.202,
+   "plane_rms_mm": 0.2,
+   "nn_gap_mm": 59.6,
+   "diam_median_mm": 32.1
+  },
+  {
+   "snap": "20260902T182956_엘리베이터버튼수집_14",
+   "n": 5,
+   "range_m": 0.194,
+   "plane_rms_mm": 0.28,
+   "nn_gap_mm": 59.4,
+   "diam_median_mm": 28.4
+  },
+  {
+   "snap": "20260902T183003_엘리베이터버튼수집_15",
+   "n": 5,
+   "range_m": 0.193,
+   "plane_rms_mm": 16.86,
+   "nn_gap_mm": 59.2,
+   "diam_median_mm": 28.0
+  },
+  {
+   "snap": "20260902T183008_엘리베이터버튼수집_16",
+   "n": 7,
+   "range_m": 0.197,
+   "plane_rms_mm": 15.57,
+   "nn_gap_mm": 60.7,
+   "diam_median_mm": 30.4
+  },
+  {
+   "snap": "20260902T183015_엘리베이터버튼수집_17",
+   "n": 5,
+   "range_m": 0.194,
+   "plane_rms_mm": 0.33,
+   "nn_gap_mm": 60.9,
+   "diam_median_mm": 27.9
+  },
+  {
+   "snap": "20260902T183106_엘리베이터안탑승장소(좌표)",
+   "n": 7,
+   "range_m": 0.449,
+   "plane_rms_mm": 2.68,
+   "nn_gap_mm": 59.1,
+   "diam_median_mm": 29.6
+  }
+ ]
+}

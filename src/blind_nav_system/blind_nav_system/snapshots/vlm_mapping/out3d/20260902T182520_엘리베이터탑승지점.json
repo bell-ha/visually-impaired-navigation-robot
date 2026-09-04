@@ -1,0 +1,112 @@
+{
+ "snapshot": "20260902T182520_엘리베이터탑승지점",
+ "generated_by": "extract3d.py",
+ "dash_time": "2026-09-02T18:25:20",
+ "wall_time": "2026-09-02T18:25:21+0900",
+ "floor": "5",
+ "image": {
+  "w": 848,
+  "h": 480
+ },
+ "depth_scale_m_per_unit": 0.001,
+ "depth_invalid_values": [
+  0,
+  65535
+ ],
+ "prior_knowledge_note": "button_layout.json 을 읽지 않았다. 층 배치·버튼 개수·행열 수를 코드에 박지 않았다. 사진 밖에서 온 정보는 K/D/TF, 깊이 규약, 그리고 버튼 물리 치수 통념(지름 15~55mm, 최소 간격 40mm)뿐이다. 픽셀 반경 상수는 쓰지 않는다 — 깊이에서 매 프레임 역산한다.",
+ "z_reference": {
+  "z_m": 2.026,
+  "source": "화면 전체 유효 깊이의 중앙값",
+  "valid_ratio": 0.8687,
+  "min_valid_threshold": 0.5,
+  "low_confidence": false,
+  "note": null
+ },
+ "hough": {
+  "dp": 1,
+  "param1": 100,
+  "param2": 30,
+  "medianBlur": 5,
+  "output_cols": 0,
+  "derived_from_depth": {
+   "minRadius": 2,
+   "maxRadius": 6,
+   "minDist": 8.5,
+   "px_per_mm": 0.213
+  },
+  "button_diam_mm": [
+   15.0,
+   55.0
+  ],
+  "button_pitch_min_mm": 40.0
+ },
+ "sigma_high_mm": 10.0,
+ "intrinsics": {
+  "fx": 431.570556640625,
+  "fy": 431.1651306152344,
+  "cx": 415.5458068847656,
+  "cy": 240.33712768554688,
+  "D": [
+   -0.05399240553379059,
+   0.05522029846906662,
+   0.0005651129758916795,
+   0.0011813163291662931,
+   -0.017749549821019173
+  ],
+  "distortion_model": "plumb_bob"
+ },
+ "tf": {
+  "base_link__grip_color": {
+   "translation": {
+    "x": -0.009332004261196424,
+    "y": -0.4821564426548858,
+    "z": 1.1094094282102145
+   },
+   "rotation": {
+    "x": -0.01192679005087783,
+    "y": 0.7766779425210769,
+    "z": -0.6297251500886266,
+    "w": 0.008681049830851483
+   }
+  },
+  "map__base_link": {
+   "translation": {
+    "x": -48.20734867085291,
+    "y": 5.3968411700679635,
+    "z": 0.0
+   },
+   "rotation": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.6605311280247589,
+    "w": 0.7507986607009496
+   }
+  }
+ },
+ "quaternion_order": "xyzw",
+ "joint_states": {
+  "wrist_extension": 0.2400059311895907,
+  "joint_lift": 0.9400033456298196,
+  "joint_arm_l3": 0.06000148279739768,
+  "joint_arm_l2": 0.06000148279739768,
+  "joint_arm_l1": 0.06000148279739768,
+  "joint_arm_l0": 0.06000148279739768,
+  "joint_head_pan": 0.0,
+  "joint_head_tilt": 0.0,
+  "joint_wrist_yaw": 0.02940129843447479,
+  "joint_wrist_pitch": -0.03374757733348411,
+  "joint_wrist_roll": -0.0015339807878856412,
+  "joint_gripper_finger_left": 0.3643430610424365,
+  "joint_gripper_finger_right": 0.3643430610424365
+ },
+ "amcl_pose": {
+  "x": -48.228,
+  "y": 5.224,
+  "z": 0.6647,
+  "w": 0.7471,
+  "yaw_deg": 83.3
+ },
+ "localization_available": true,
+ "n_circles": 0,
+ "circles": []
+}

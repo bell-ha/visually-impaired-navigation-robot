@@ -1,0 +1,909 @@
+{
+ "snapshot": "20260902T182619_엘리베이터버튼수집_1",
+ "generated_by": "extract3d.py",
+ "dash_time": "2026-09-02T18:26:19",
+ "wall_time": "2026-09-02T18:26:20+0900",
+ "floor": "5",
+ "image": {
+  "w": 848,
+  "h": 480
+ },
+ "depth_scale_m_per_unit": 0.001,
+ "depth_invalid_values": [
+  0,
+  65535
+ ],
+ "prior_knowledge_note": "button_layout.json 을 읽지 않았다. 층 배치·버튼 개수·행열 수를 코드에 박지 않았다. 사진 밖에서 온 정보는 K/D/TF, 깊이 규약, 그리고 버튼 물리 치수 통념(지름 15~55mm, 최소 간격 40mm)뿐이다. 픽셀 반경 상수는 쓰지 않는다 — 깊이에서 매 프레임 역산한다.",
+ "z_reference": {
+  "z_m": 0.441,
+  "source": "화면 전체 유효 깊이의 중앙값",
+  "valid_ratio": 0.6877,
+  "min_valid_threshold": 0.5,
+  "low_confidence": false,
+  "note": null
+ },
+ "hough": {
+  "dp": 1,
+  "param1": 100,
+  "param2": 30,
+  "medianBlur": 5,
+  "output_cols": 3,
+  "derived_from_depth": {
+   "minRadius": 7,
+   "maxRadius": 27,
+   "minDist": 39.1,
+   "px_per_mm": 0.9786
+  },
+  "button_diam_mm": [
+   15.0,
+   55.0
+  ],
+  "button_pitch_min_mm": 40.0
+ },
+ "sigma_high_mm": 10.0,
+ "intrinsics": {
+  "fx": 431.570556640625,
+  "fy": 431.1651306152344,
+  "cx": 415.5458068847656,
+  "cy": 240.33712768554688,
+  "D": [
+   -0.05399240553379059,
+   0.05522029846906662,
+   0.0005651129758916795,
+   0.0011813163291662931,
+   -0.017749549821019173
+  ],
+  "distortion_model": "plumb_bob"
+ },
+ "tf": {
+  "base_link__grip_color": {
+   "translation": {
+    "x": -0.009336859485979399,
+    "y": -0.269809203419836,
+    "z": 1.1098560170028209
+   },
+   "rotation": {
+    "x": -0.011904117943813406,
+    "y": 0.7752269475298276,
+    "z": -0.6315106292476796,
+    "w": 0.008706144196221921
+   }
+  },
+  "map__base_link": {
+   "translation": {
+    "x": -47.864700687418136,
+    "y": 7.102051223752582,
+    "z": 0.0
+   },
+   "rotation": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.6024200422358315,
+    "w": 0.7981792359567988
+   }
+  }
+ },
+ "quaternion_order": "xyzw",
+ "joint_states": {
+  "wrist_extension": 0.027817770891457677,
+  "joint_lift": 0.9400033456298196,
+  "joint_arm_l3": 0.006954442722864419,
+  "joint_arm_l2": 0.006954442722864419,
+  "joint_arm_l1": 0.006954442722864419,
+  "joint_arm_l0": 0.006954442722864419,
+  "joint_head_pan": 0.0,
+  "joint_head_tilt": 0.0,
+  "joint_wrist_yaw": 0.02940129843447479,
+  "joint_wrist_pitch": -0.029145634969827184,
+  "joint_wrist_roll": -0.0015339807878856412,
+  "joint_gripper_finger_left": 0.3643430610424365,
+  "joint_gripper_finger_right": 0.3643430610424365
+ },
+ "amcl_pose": {
+  "x": -47.867,
+  "y": 7.092,
+  "z": 0.603,
+  "w": 0.7977,
+  "yaw_deg": 74.2
+ },
+ "localization_available": true,
+ "n_circles": 4,
+ "circles": [
+  {
+   "idx": 0,
+   "u": 298,
+   "v": 156,
+   "r": 15,
+   "detection": {
+    "hough_votes": null,
+    "hough_output_cols": 3,
+    "hough_votes_note": "OpenCV가 votes 열을 주지 않는다(3열 출력) — null",
+    "edge_support": 1.0,
+    "edge_support_samples": 180,
+    "edge_support_note": "cv2 제공값 아님. 원 둘레 중 Canny 에지에 걸친 비율"
+   },
+   "norm_raw": [
+    -0.272368,
+    -0.195603
+   ],
+   "norm_undistorted": [
+    -0.274239,
+    -0.196914
+   ],
+   "depth": {
+    "z_center": {
+     "n_total": 1,
+     "n_valid": 1,
+     "valid_ratio": 1.0,
+     "median_mm": 417.0,
+     "std_mm": 0.0,
+     "z_m": 0.417,
+     "raw_mm": 417,
+     "radius_px": 0.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.11358,
+      -0.08157,
+      0.417
+     ],
+     "cam_xyz_undist": [
+      -0.11436,
+      -0.08211,
+      0.417
+     ],
+     "undist_diff_mm": 0.95,
+     "base_xyz": [
+      0.1167,
+      -0.69116,
+      1.10523
+     ],
+     "base_xyz_undist": [
+      0.11748,
+      -0.69125,
+      1.10576
+     ],
+     "map_xyz": [
+      -47.16803,
+      7.02478,
+      1.10523
+     ],
+     "map_xyz_undist": [
+      -47.16773,
+      7.02551,
+      1.10576
+     ],
+     "diameter_mm": 29.0
+    },
+    "z_med_r3": {
+     "n_total": 29,
+     "n_valid": 29,
+     "valid_ratio": 1.0,
+     "median_mm": 418.0,
+     "std_mm": 1.2,
+     "z_m": 0.418,
+     "radius_px": 3.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.11385,
+      -0.08176,
+      0.418
+     ],
+     "cam_xyz_undist": [
+      -0.11463,
+      -0.08231,
+      0.418
+     ],
+     "undist_diff_mm": 0.96,
+     "base_xyz": [
+      0.117,
+      -0.69217,
+      1.10522
+     ],
+     "base_xyz_undist": [
+      0.11779,
+      -0.69226,
+      1.10575
+     ],
+     "map_xyz": [
+      -47.16698,
+      7.02479,
+      1.10522
+     ],
+     "map_xyz_undist": [
+      -47.16668,
+      7.02552,
+      1.10575
+     ],
+     "diameter_mm": 29.1
+    },
+    "z_med_half": {
+     "n_total": 177,
+     "n_valid": 177,
+     "valid_ratio": 1.0,
+     "median_mm": 418.0,
+     "std_mm": 2.9,
+     "z_m": 0.418,
+     "radius_px": 7.5,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.11385,
+      -0.08176,
+      0.418
+     ],
+     "cam_xyz_undist": [
+      -0.11463,
+      -0.08231,
+      0.418
+     ],
+     "undist_diff_mm": 0.96,
+     "base_xyz": [
+      0.117,
+      -0.69217,
+      1.10522
+     ],
+     "base_xyz_undist": [
+      0.11779,
+      -0.69226,
+      1.10575
+     ],
+     "map_xyz": [
+      -47.16698,
+      7.02479,
+      1.10522
+     ],
+     "map_xyz_undist": [
+      -47.16668,
+      7.02552,
+      1.10575
+     ],
+     "diameter_mm": 29.1
+    },
+    "z_med_ring": {
+     "n_total": 888,
+     "n_valid": 888,
+     "valid_ratio": 1.0,
+     "median_mm": 420.0,
+     "std_mm": 5.3,
+     "z_m": 0.42,
+     "radius_px": [
+      15.0,
+      22.5
+     ],
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.11439,
+      -0.08215,
+      0.42
+     ],
+     "cam_xyz_undist": [
+      -0.11518,
+      -0.0827,
+      0.42
+     ],
+     "undist_diff_mm": 0.96,
+     "base_xyz": [
+      0.1176,
+      -0.69419,
+      1.1052
+     ],
+     "base_xyz_undist": [
+      0.11839,
+      -0.69428,
+      1.10573
+     ],
+     "map_xyz": [
+      -47.16487,
+      7.02482,
+      1.1052
+     ],
+     "map_xyz_undist": [
+      -47.16457,
+      7.02555,
+      1.10573
+     ],
+     "diameter_mm": 29.2
+    }
+   },
+   "sigma_high_variants": [],
+   "occlusion_suspect": false,
+   "tile": "20260902T182619_엘리베이터버튼수집_1_tiles/c00.png"
+  },
+  {
+   "idx": 1,
+   "u": 378,
+   "v": 158,
+   "r": 14,
+   "detection": {
+    "hough_votes": null,
+    "hough_output_cols": 3,
+    "hough_votes_note": "OpenCV가 votes 열을 주지 않는다(3열 출력) — null",
+    "edge_support": 1.0,
+    "edge_support_samples": 180,
+    "edge_support_note": "cv2 제공값 아님. 원 둘레 중 Canny 에지에 걸친 비율"
+   },
+   "norm_raw": [
+    -0.086998,
+    -0.190964
+   ],
+   "norm_undistorted": [
+    -0.087287,
+    -0.191508
+   ],
+   "depth": {
+    "z_center": {
+     "n_total": 1,
+     "n_valid": 1,
+     "valid_ratio": 1.0,
+     "median_mm": 435.0,
+     "std_mm": 0.0,
+     "z_m": 0.435,
+     "raw_mm": 435,
+     "radius_px": 0.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.03784,
+      -0.08307,
+      0.435
+     ],
+     "cam_xyz_undist": [
+      -0.03797,
+      -0.08331,
+      0.435
+     ],
+     "undist_diff_mm": 0.27,
+     "base_xyz": [
+      0.04152,
+      -0.71131,
+      1.10318
+     ],
+     "base_xyz_undist": [
+      0.04165,
+      -0.71136,
+      1.10341
+     ],
+     "map_xyz": [
+      -47.16926,
+      6.94695,
+      1.10318
+     ],
+     "map_xyz_undist": [
+      -47.16918,
+      6.94706,
+      1.10341
+     ],
+     "diameter_mm": 28.2
+    },
+    "z_med_r3": {
+     "n_total": 29,
+     "n_valid": 29,
+     "valid_ratio": 1.0,
+     "median_mm": 435.0,
+     "std_mm": 0.3,
+     "z_m": 0.435,
+     "radius_px": 3.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.03784,
+      -0.08307,
+      0.435
+     ],
+     "cam_xyz_undist": [
+      -0.03797,
+      -0.08331,
+      0.435
+     ],
+     "undist_diff_mm": 0.27,
+     "base_xyz": [
+      0.04152,
+      -0.71131,
+      1.10318
+     ],
+     "base_xyz_undist": [
+      0.04165,
+      -0.71136,
+      1.10341
+     ],
+     "map_xyz": [
+      -47.16926,
+      6.94695,
+      1.10318
+     ],
+     "map_xyz_undist": [
+      -47.16918,
+      6.94706,
+      1.10341
+     ],
+     "diameter_mm": 28.2
+    },
+    "z_med_half": {
+     "n_total": 149,
+     "n_valid": 149,
+     "valid_ratio": 1.0,
+     "median_mm": 434.0,
+     "std_mm": 1.4,
+     "z_m": 0.434,
+     "radius_px": 7.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.03776,
+      -0.08288,
+      0.434
+     ],
+     "cam_xyz_undist": [
+      -0.03788,
+      -0.08311,
+      0.434
+     ],
+     "undist_diff_mm": 0.27,
+     "base_xyz": [
+      0.04141,
+      -0.7103,
+      1.10319
+     ],
+     "base_xyz_undist": [
+      0.04153,
+      -0.71034,
+      1.10342
+     ],
+     "map_xyz": [
+      -47.17027,
+      6.94712,
+      1.10319
+     ],
+     "map_xyz_undist": [
+      -47.17019,
+      6.94723,
+      1.10342
+     ],
+     "diameter_mm": 28.2
+    },
+    "z_med_ring": {
+     "n_total": 760,
+     "n_valid": 760,
+     "valid_ratio": 1.0,
+     "median_mm": 430.0,
+     "std_mm": 5.8,
+     "z_m": 0.43,
+     "radius_px": [
+      14.0,
+      21.0
+     ],
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.03741,
+      -0.08211,
+      0.43
+     ],
+     "cam_xyz_undist": [
+      -0.03753,
+      -0.08235,
+      0.43
+     ],
+     "undist_diff_mm": 0.26,
+     "base_xyz": [
+      0.04094,
+      -0.70624,
+      1.10325
+     ],
+     "base_xyz_undist": [
+      0.04106,
+      -0.70628,
+      1.10348
+     ],
+     "map_xyz": [
+      -47.1743,
+      6.94778,
+      1.10325
+     ],
+     "map_xyz_undist": [
+      -47.17422,
+      6.94789,
+      1.10348
+     ],
+     "diameter_mm": 27.9
+    }
+   },
+   "sigma_high_variants": [],
+   "occlusion_suspect": false,
+   "tile": "20260902T182619_엘리베이터버튼수집_1_tiles/c01.png"
+  },
+  {
+   "idx": 2,
+   "u": 376,
+   "v": 214,
+   "r": 16,
+   "detection": {
+    "hough_votes": null,
+    "hough_output_cols": 3,
+    "hough_votes_note": "OpenCV가 votes 열을 주지 않는다(3열 출력) — null",
+    "edge_support": 1.0,
+    "edge_support_samples": 180,
+    "edge_support_note": "cv2 제공값 아님. 원 둘레 중 Canny 에지에 걸친 비율"
+   },
+   "norm_raw": [
+    -0.091632,
+    -0.061084
+   ],
+   "norm_undistorted": [
+    -0.091732,
+    -0.061148
+   ],
+   "depth": {
+    "z_center": {
+     "n_total": 1,
+     "n_valid": 1,
+     "valid_ratio": 1.0,
+     "median_mm": 448.0,
+     "std_mm": 0.0,
+     "z_m": 0.448,
+     "raw_mm": 448,
+     "radius_px": 0.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.04105,
+      -0.02737,
+      0.448
+     ],
+     "cam_xyz_undist": [
+      -0.0411,
+      -0.02739,
+      0.448
+     ],
+     "undist_diff_mm": 0.05,
+     "base_xyz": [
+      0.04468,
+      -0.71269,
+      1.04599
+     ],
+     "base_xyz_undist": [
+      0.04473,
+      -0.71269,
+      1.04602
+     ],
+     "map_xyz": [
+      -47.16707,
+      6.94962,
+      1.04599
+     ],
+     "map_xyz_undist": [
+      -47.16706,
+      6.94966,
+      1.04602
+     ],
+     "diameter_mm": 33.2
+    },
+    "z_med_r3": {
+     "n_total": 29,
+     "n_valid": 29,
+     "valid_ratio": 1.0,
+     "median_mm": 448.0,
+     "std_mm": 0.9,
+     "z_m": 0.448,
+     "radius_px": 3.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.04105,
+      -0.02737,
+      0.448
+     ],
+     "cam_xyz_undist": [
+      -0.0411,
+      -0.02739,
+      0.448
+     ],
+     "undist_diff_mm": 0.05,
+     "base_xyz": [
+      0.04468,
+      -0.71269,
+      1.04599
+     ],
+     "base_xyz_undist": [
+      0.04473,
+      -0.71269,
+      1.04602
+     ],
+     "map_xyz": [
+      -47.16707,
+      6.94962,
+      1.04599
+     ],
+     "map_xyz_undist": [
+      -47.16706,
+      6.94966,
+      1.04602
+     ],
+     "diameter_mm": 33.2
+    },
+    "z_med_half": {
+     "n_total": 197,
+     "n_valid": 197,
+     "valid_ratio": 1.0,
+     "median_mm": 449.0,
+     "std_mm": 2.1,
+     "z_m": 0.449,
+     "radius_px": 8.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.04114,
+      -0.02743,
+      0.449
+     ],
+     "cam_xyz_undist": [
+      -0.04119,
+      -0.02746,
+      0.449
+     ],
+     "undist_diff_mm": 0.05,
+     "base_xyz": [
+      0.0448,
+      -0.71368,
+      1.04585
+     ],
+     "base_xyz_undist": [
+      0.04485,
+      -0.71368,
+      1.04588
+     ],
+     "map_xyz": [
+      -47.16609,
+      6.94946,
+      1.04585
+     ],
+     "map_xyz_undist": [
+      -47.16607,
+      6.9495,
+      1.04588
+     ],
+     "diameter_mm": 33.3
+    },
+    "z_med_ring": {
+     "n_total": 996,
+     "n_valid": 996,
+     "valid_ratio": 1.0,
+     "median_mm": 443.0,
+     "std_mm": 9.5,
+     "z_m": 0.443,
+     "radius_px": [
+      16.0,
+      24.0
+     ],
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.04059,
+      -0.02706,
+      0.443
+     ],
+     "cam_xyz_undist": [
+      -0.04064,
+      -0.02709,
+      0.443
+     ],
+     "undist_diff_mm": 0.05,
+     "base_xyz": [
+      0.04408,
+      -0.70774,
+      1.0467
+     ],
+     "base_xyz_undist": [
+      0.04413,
+      -0.70775,
+      1.04673
+     ],
+     "map_xyz": [
+      -47.17199,
+      6.95039,
+      1.0467
+     ],
+     "map_xyz_undist": [
+      -47.17198,
+      6.95043,
+      1.04673
+     ],
+     "diameter_mm": 32.8
+    }
+   },
+   "sigma_high_variants": [],
+   "occlusion_suspect": false,
+   "tile": "20260902T182619_엘리베이터버튼수집_1_tiles/c02.png"
+  },
+  {
+   "idx": 3,
+   "u": 300,
+   "v": 270,
+   "r": 12,
+   "detection": {
+    "hough_votes": null,
+    "hough_output_cols": 3,
+    "hough_votes_note": "OpenCV가 votes 열을 주지 않는다(3열 출력) — null",
+    "edge_support": 1.0,
+    "edge_support_samples": 180,
+    "edge_support_note": "cv2 제공값 아님. 원 둘레 중 Canny 에지에 걸친 비율"
+   },
+   "norm_raw": [
+    -0.267733,
+    0.068797
+   ],
+   "norm_undistorted": [
+    -0.269009,
+    0.069057
+   ],
+   "depth": {
+    "z_center": {
+     "n_total": 1,
+     "n_valid": 1,
+     "valid_ratio": 1.0,
+     "median_mm": 451.0,
+     "std_mm": 0.0,
+     "z_m": 0.451,
+     "raw_mm": 451,
+     "radius_px": 0.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.12075,
+      0.03103,
+      0.451
+     ],
+     "cam_xyz_undist": [
+      -0.12132,
+      0.03114,
+      0.451
+     ],
+     "undist_diff_mm": 0.59,
+     "base_xyz": [
+      0.124,
+      -0.70148,
+      0.98808
+     ],
+     "base_xyz_undist": [
+      0.12457,
+      -0.70143,
+      0.98796
+     ],
+     "map_xyz": [
+      -47.15611,
+      7.02896,
+      0.98808
+     ],
+     "map_xyz_undist": [
+      -47.15599,
+      7.02953,
+      0.98796
+     ],
+     "diameter_mm": 25.1
+    },
+    "z_med_r3": {
+     "n_total": 29,
+     "n_valid": 29,
+     "valid_ratio": 1.0,
+     "median_mm": 451.0,
+     "std_mm": 1.0,
+     "z_m": 0.451,
+     "radius_px": 3.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.12075,
+      0.03103,
+      0.451
+     ],
+     "cam_xyz_undist": [
+      -0.12132,
+      0.03114,
+      0.451
+     ],
+     "undist_diff_mm": 0.59,
+     "base_xyz": [
+      0.124,
+      -0.70148,
+      0.98808
+     ],
+     "base_xyz_undist": [
+      0.12457,
+      -0.70143,
+      0.98796
+     ],
+     "map_xyz": [
+      -47.15611,
+      7.02896,
+      0.98808
+     ],
+     "map_xyz_undist": [
+      -47.15599,
+      7.02953,
+      0.98796
+     ],
+     "diameter_mm": 25.1
+    },
+    "z_med_half": {
+     "n_total": 113,
+     "n_valid": 113,
+     "valid_ratio": 1.0,
+     "median_mm": 451.0,
+     "std_mm": 1.1,
+     "z_m": 0.451,
+     "radius_px": 6.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.12075,
+      0.03103,
+      0.451
+     ],
+     "cam_xyz_undist": [
+      -0.12132,
+      0.03114,
+      0.451
+     ],
+     "undist_diff_mm": 0.59,
+     "base_xyz": [
+      0.124,
+      -0.70148,
+      0.98808
+     ],
+     "base_xyz_undist": [
+      0.12457,
+      -0.70143,
+      0.98796
+     ],
+     "map_xyz": [
+      -47.15611,
+      7.02896,
+      0.98808
+     ],
+     "map_xyz_undist": [
+      -47.15599,
+      7.02953,
+      0.98796
+     ],
+     "diameter_mm": 25.1
+    },
+    "z_med_ring": {
+     "n_total": 568,
+     "n_valid": 568,
+     "valid_ratio": 1.0,
+     "median_mm": 451.0,
+     "std_mm": 4.5,
+     "z_m": 0.451,
+     "radius_px": [
+      12.0,
+      18.0
+     ],
+     "sigma_high": false,
+     "cam_xyz": [
+      -0.12075,
+      0.03103,
+      0.451
+     ],
+     "cam_xyz_undist": [
+      -0.12132,
+      0.03114,
+      0.451
+     ],
+     "undist_diff_mm": 0.59,
+     "base_xyz": [
+      0.124,
+      -0.70148,
+      0.98808
+     ],
+     "base_xyz_undist": [
+      0.12457,
+      -0.70143,
+      0.98796
+     ],
+     "map_xyz": [
+      -47.15611,
+      7.02896,
+      0.98808
+     ],
+     "map_xyz_undist": [
+      -47.15599,
+      7.02953,
+      0.98796
+     ],
+     "diameter_mm": 25.1
+    }
+   },
+   "sigma_high_variants": [],
+   "occlusion_suspect": false,
+   "tile": "20260902T182619_엘리베이터버튼수집_1_tiles/c03.png"
+  }
+ ]
+}

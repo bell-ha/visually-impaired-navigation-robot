@@ -1,0 +1,312 @@
+{
+ "snapshot": "20260902T182307_5층버튼누르는지점",
+ "generated_by": "extract3d.py",
+ "dash_time": "2026-09-02T18:23:07",
+ "wall_time": "2026-09-02T18:23:08+0900",
+ "floor": "5",
+ "image": {
+  "w": 848,
+  "h": 480
+ },
+ "depth_scale_m_per_unit": 0.001,
+ "depth_invalid_values": [
+  0,
+  65535
+ ],
+ "prior_knowledge_note": "button_layout.json 을 읽지 않았다. 층 배치·버튼 개수·행열 수를 코드에 박지 않았다. 사진 밖에서 온 정보는 K/D/TF, 깊이 규약, 그리고 버튼 물리 치수 통념(지름 15~55mm, 최소 간격 40mm)뿐이다. 픽셀 반경 상수는 쓰지 않는다 — 깊이에서 매 프레임 역산한다.",
+ "z_reference": {
+  "z_m": 0.592,
+  "source": "화면 전체 유효 깊이의 중앙값",
+  "valid_ratio": 0.8193,
+  "min_valid_threshold": 0.5,
+  "low_confidence": false,
+  "note": null
+ },
+ "hough": {
+  "dp": 1,
+  "param1": 100,
+  "param2": 30,
+  "medianBlur": 5,
+  "output_cols": 3,
+  "derived_from_depth": {
+   "minRadius": 5,
+   "maxRadius": 20,
+   "minDist": 29.2,
+   "px_per_mm": 0.729
+  },
+  "button_diam_mm": [
+   15.0,
+   55.0
+  ],
+  "button_pitch_min_mm": 40.0
+ },
+ "sigma_high_mm": 10.0,
+ "intrinsics": {
+  "fx": 431.570556640625,
+  "fy": 431.1651306152344,
+  "cx": 415.5458068847656,
+  "cy": 240.33712768554688,
+  "D": [
+   -0.05399240553379059,
+   0.05522029846906662,
+   0.0005651129758916795,
+   0.0011813163291662931,
+   -0.017749549821019173
+  ],
+  "distortion_model": "plumb_bob"
+ },
+ "tf": {
+  "base_link__grip_color": {
+   "translation": {
+    "x": -0.009330399305458807,
+    "y": -0.24221103342646166,
+    "z": 1.1092515085901402
+   },
+   "rotation": {
+    "x": -0.011934333393376418,
+    "y": 0.7771606940980159,
+    "z": -0.6291292489997384,
+    "w": 0.008672674822154655
+   }
+  },
+  "map__base_link": {
+   "translation": {
+    "x": -47.537388272695644,
+    "y": 5.011066846228018,
+    "z": 0.0
+   },
+   "rotation": {
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.9954565996556025,
+    "w": 0.09521637570347663
+   }
+  }
+ },
+ "quaternion_order": "xyzw",
+ "joint_states": {
+  "wrist_extension": 8.379891679188205e-06,
+  "joint_lift": 0.9399783562443761,
+  "joint_arm_l3": 2.094972919797051e-06,
+  "joint_arm_l2": 2.094972919797051e-06,
+  "joint_arm_l1": 2.094972919797051e-06,
+  "joint_arm_l0": 2.094972919797051e-06,
+  "joint_head_pan": 0.0,
+  "joint_head_tilt": 0.0,
+  "joint_wrist_yaw": 0.02940129843447479,
+  "joint_wrist_pitch": -0.035281558121369745,
+  "joint_wrist_roll": -0.0015339807878856412,
+  "joint_gripper_finger_left": 0.3654899961768829,
+  "joint_gripper_finger_right": 0.3654899961768829
+ },
+ "amcl_pose": {
+  "x": -47.454,
+  "y": 4.993,
+  "z": 0.9949,
+  "w": 0.1008,
+  "yaw_deg": 168.4
+ },
+ "localization_available": true,
+ "n_circles": 1,
+ "circles": [
+  {
+   "idx": 0,
+   "u": 482,
+   "v": 210,
+   "r": 15,
+   "detection": {
+    "hough_votes": null,
+    "hough_output_cols": 3,
+    "hough_votes_note": "OpenCV가 votes 열을 주지 않는다(3열 출력) — null",
+    "edge_support": 1.0,
+    "edge_support_samples": 180,
+    "edge_support_note": "cv2 제공값 아님. 원 둘레 중 Canny 에지에 걸친 비율"
+   },
+   "norm_raw": [
+    0.153982,
+    -0.070361
+   ],
+   "norm_undistorted": [
+    0.154137,
+    -0.070463
+   ],
+   "depth": {
+    "z_center": {
+     "n_total": 1,
+     "n_valid": 1,
+     "valid_ratio": 1.0,
+     "median_mm": 561.0,
+     "std_mm": 0.0,
+     "z_m": 0.561,
+     "raw_mm": 561,
+     "radius_px": 0.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      0.08638,
+      -0.03947,
+      0.561
+     ],
+     "cam_xyz_undist": [
+      0.08647,
+      -0.03953,
+      0.561
+     ],
+     "undist_diff_mm": 0.1,
+     "base_xyz": [
+      -0.07939,
+      -0.80144,
+      1.03117
+     ],
+     "base_xyz_undist": [
+      -0.07947,
+      -0.80145,
+      1.03122
+     ],
+     "map_xyz": [
+      -47.30751,
+      5.78292,
+      1.03117
+     ],
+     "map_xyz_undist": [
+      -47.30742,
+      5.78292,
+      1.03122
+     ],
+     "diameter_mm": 39.0
+    },
+    "z_med_r3": {
+     "n_total": 29,
+     "n_valid": 29,
+     "valid_ratio": 1.0,
+     "median_mm": 560.0,
+     "std_mm": 4.9,
+     "z_m": 0.56,
+     "radius_px": 3.0,
+     "sigma_high": false,
+     "cam_xyz": [
+      0.08623,
+      -0.0394,
+      0.56
+     ],
+     "cam_xyz_undist": [
+      0.08632,
+      -0.03946,
+      0.56
+     ],
+     "undist_diff_mm": 0.1,
+     "base_xyz": [
+      -0.07926,
+      -0.80044,
+      1.03131
+     ],
+     "base_xyz_undist": [
+      -0.07935,
+      -0.80046,
+      1.03136
+     ],
+     "map_xyz": [
+      -47.30782,
+      5.78197,
+      1.03131
+     ],
+     "map_xyz_undist": [
+      -47.30774,
+      5.78197,
+      1.03136
+     ],
+     "diameter_mm": 38.9
+    },
+    "z_med_half": {
+     "n_total": 177,
+     "n_valid": 177,
+     "valid_ratio": 1.0,
+     "median_mm": 557.0,
+     "std_mm": 7.8,
+     "z_m": 0.557,
+     "radius_px": 7.5,
+     "sigma_high": false,
+     "cam_xyz": [
+      0.08577,
+      -0.03919,
+      0.557
+     ],
+     "cam_xyz_undist": [
+      0.08585,
+      -0.03925,
+      0.557
+     ],
+     "undist_diff_mm": 0.1,
+     "base_xyz": [
+      -0.07889,
+      -0.79745,
+      1.03172
+     ],
+     "base_xyz_undist": [
+      -0.07897,
+      -0.79747,
+      1.03178
+     ],
+     "map_xyz": [
+      -47.30876,
+      5.7791,
+      1.03172
+     ],
+     "map_xyz_undist": [
+      -47.30867,
+      5.7791,
+      1.03178
+     ],
+     "diameter_mm": 38.7
+    },
+    "z_med_ring": {
+     "n_total": 888,
+     "n_valid": 888,
+     "valid_ratio": 1.0,
+     "median_mm": 548.0,
+     "std_mm": 3.8,
+     "z_m": 0.548,
+     "radius_px": [
+      15.0,
+      22.5
+     ],
+     "sigma_high": false,
+     "cam_xyz": [
+      0.08438,
+      -0.03856,
+      0.548
+     ],
+     "cam_xyz_undist": [
+      0.08447,
+      -0.03861,
+      0.548
+     ],
+     "undist_diff_mm": 0.1,
+     "base_xyz": [
+      -0.07777,
+      -0.78848,
+      1.03298
+     ],
+     "base_xyz_undist": [
+      -0.07785,
+      -0.78849,
+      1.03303
+     ],
+     "map_xyz": [
+      -47.31156,
+      5.77051,
+      1.03298
+     ],
+     "map_xyz_undist": [
+      -47.31148,
+      5.77051,
+      1.03303
+     ],
+     "diameter_mm": 38.1
+    }
+   },
+   "sigma_high_variants": [],
+   "occlusion_suspect": false,
+   "tile": "20260902T182307_5층버튼누르는지점_tiles/c00.png"
+  }
+ ]
+}

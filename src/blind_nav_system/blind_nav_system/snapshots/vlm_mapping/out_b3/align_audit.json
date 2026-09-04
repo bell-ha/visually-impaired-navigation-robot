@@ -1,0 +1,378 @@
+{
+ "method": "깊이 불연속 ↔ 컬러 Canny 에지 겹침 최대화 (±45px, 3px 격자)",
+ "informative_rule": "판정력 조건 두 개를 모두 만족한 장만 센다. (a) 유효깊이 p95-p5 ≥ 500mm — 평평한 근접 패널만 찍힌 장은 깊이 에지가 통째로 잡음이라 상관면이 평평해진다. (b) 비정렬 시 예상 시차 ≥ 8px — 2m 짜리 원경은 비정렬이어도 4px 라 정렬/비정렬을 애초에 구분할 수 없다.",
+ "n_informative": 4,
+ "n_total": 24,
+ "best_shift_dx_median": 0.0,
+ "best_shift_dy_median": 0.0,
+ "best_shift_dx_range": [
+  0,
+  0
+ ],
+ "best_shift_dy_range": [
+  0,
+  0
+ ],
+ "rows": [
+  {
+   "snap": "20260902T182307_5층버튼누르는지점",
+   "median_raw": 592.0,
+   "z_m_at_0.001": 0.592,
+   "best_shift_px": [
+    0,
+    0
+   ],
+   "best_score": 515,
+   "score_at_zero": 515,
+   "zero_vs_best_ratio": 1.0,
+   "unaligned_would_be_px": 13.1,
+   "depth_spread_mm": 789.0,
+   "informative": true
+  },
+  {
+   "snap": "20260902T182406_5층버튼수집중_1",
+   "median_raw": 340.0,
+   "z_m_at_0.001": 0.34,
+   "best_shift_px": [
+    0,
+    0
+   ],
+   "best_score": 477,
+   "score_at_zero": 477,
+   "zero_vs_best_ratio": 1.0,
+   "unaligned_would_be_px": 22.8,
+   "depth_spread_mm": 531.0,
+   "informative": true
+  },
+  {
+   "snap": "20260902T182417_5층버튼수집중_2",
+   "median_raw": 333.0,
+   "z_m_at_0.001": 0.333,
+   "best_shift_px": [
+    0,
+    0
+   ],
+   "best_score": 540,
+   "score_at_zero": 540,
+   "zero_vs_best_ratio": 1.0,
+   "unaligned_would_be_px": 23.3,
+   "depth_spread_mm": 532.0,
+   "informative": true
+  },
+  {
+   "snap": "20260902T182428_5층버튼수집중_3",
+   "median_raw": 350.0,
+   "z_m_at_0.001": 0.35,
+   "best_shift_px": [
+    0,
+    0
+   ],
+   "best_score": 489,
+   "score_at_zero": 489,
+   "zero_vs_best_ratio": 1.0,
+   "unaligned_would_be_px": 22.2,
+   "depth_spread_mm": 533.0,
+   "informative": true
+  },
+  {
+   "snap": "20260902T182520_엘리베이터탑승지점",
+   "median_raw": 2026.0,
+   "z_m_at_0.001": 2.026,
+   "best_shift_px": [
+    39,
+    30
+   ],
+   "best_score": 467,
+   "score_at_zero": 416,
+   "zero_vs_best_ratio": 0.8908,
+   "unaligned_would_be_px": 3.8,
+   "depth_spread_mm": 6673.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182619_엘리베이터버튼수집_1",
+   "median_raw": 441.0,
+   "z_m_at_0.001": 0.441,
+   "best_shift_px": [
+    -6,
+    -3
+   ],
+   "best_score": 321,
+   "score_at_zero": 251,
+   "zero_vs_best_ratio": 0.7819,
+   "unaligned_would_be_px": 17.6,
+   "depth_spread_mm": 424.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182728_엘리베이터버튼수집_2",
+   "median_raw": 199.0,
+   "z_m_at_0.001": 0.199,
+   "best_shift_px": [
+    30,
+    -45
+   ],
+   "best_score": 200,
+   "score_at_zero": 86,
+   "zero_vs_best_ratio": 0.43,
+   "unaligned_would_be_px": 39.0,
+   "depth_spread_mm": 116.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182811_엘리베이터버튼수집_3",
+   "median_raw": 191.0,
+   "z_m_at_0.001": 0.191,
+   "best_shift_px": [
+    -30,
+    -39
+   ],
+   "best_score": 174,
+   "score_at_zero": 107,
+   "zero_vs_best_ratio": 0.6149,
+   "unaligned_would_be_px": 40.7,
+   "depth_spread_mm": 96.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182821_엘리베이터버튼수집_4",
+   "median_raw": 192.0,
+   "z_m_at_0.001": 0.192,
+   "best_shift_px": [
+    21,
+    -39
+   ],
+   "best_score": 277,
+   "score_at_zero": 138,
+   "zero_vs_best_ratio": 0.4982,
+   "unaligned_would_be_px": 40.5,
+   "depth_spread_mm": 87.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182855_엘리베이터버튼수집_5",
+   "median_raw": 194.0,
+   "z_m_at_0.001": 0.194,
+   "best_shift_px": [
+    45,
+    -36
+   ],
+   "best_score": 294,
+   "score_at_zero": 276,
+   "zero_vs_best_ratio": 0.9388,
+   "unaligned_would_be_px": 40.0,
+   "depth_spread_mm": 93.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182903_엘리베이터버튼수집_6",
+   "median_raw": 192.0,
+   "z_m_at_0.001": 0.192,
+   "best_shift_px": [
+    45,
+    -6
+   ],
+   "best_score": 349,
+   "score_at_zero": 330,
+   "zero_vs_best_ratio": 0.9456,
+   "unaligned_would_be_px": 40.5,
+   "depth_spread_mm": 90.4,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182909_엘리베이터버튼수집_7",
+   "median_raw": 189.0,
+   "z_m_at_0.001": 0.189,
+   "best_shift_px": [
+    -30,
+    -3
+   ],
+   "best_score": 252,
+   "score_at_zero": 191,
+   "zero_vs_best_ratio": 0.7579,
+   "unaligned_would_be_px": 41.1,
+   "depth_spread_mm": 101.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182914_엘리베이터버튼수집_8",
+   "median_raw": 189.0,
+   "z_m_at_0.001": 0.189,
+   "best_shift_px": [
+    -39,
+    0
+   ],
+   "best_score": 264,
+   "score_at_zero": 212,
+   "zero_vs_best_ratio": 0.803,
+   "unaligned_would_be_px": 41.1,
+   "depth_spread_mm": 98.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182918_엘리베이터버튼수집_9",
+   "median_raw": 189.0,
+   "z_m_at_0.001": 0.189,
+   "best_shift_px": [
+    18,
+    -33
+   ],
+   "best_score": 276,
+   "score_at_zero": 135,
+   "zero_vs_best_ratio": 0.4891,
+   "unaligned_would_be_px": 41.1,
+   "depth_spread_mm": 98.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182928_엘리베이터버튼수집_10",
+   "median_raw": 197.0,
+   "z_m_at_0.001": 0.197,
+   "best_shift_px": [
+    -33,
+    -42
+   ],
+   "best_score": 224,
+   "score_at_zero": 188,
+   "zero_vs_best_ratio": 0.8393,
+   "unaligned_would_be_px": 39.4,
+   "depth_spread_mm": 116.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182936_엘리베이터버튼수집_11",
+   "median_raw": 199.0,
+   "z_m_at_0.001": 0.199,
+   "best_shift_px": [
+    -24,
+    -3
+   ],
+   "best_score": 213,
+   "score_at_zero": 152,
+   "zero_vs_best_ratio": 0.7136,
+   "unaligned_would_be_px": 39.0,
+   "depth_spread_mm": 102.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182941_엘리베이터버튼수집_12",
+   "median_raw": 200.0,
+   "z_m_at_0.001": 0.2,
+   "best_shift_px": [
+    42,
+    -42
+   ],
+   "best_score": 205,
+   "score_at_zero": 78,
+   "zero_vs_best_ratio": 0.3805,
+   "unaligned_would_be_px": 38.8,
+   "depth_spread_mm": 109.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182949_엘리베이터버튼수집_13",
+   "median_raw": 191.0,
+   "z_m_at_0.001": 0.191,
+   "best_shift_px": [
+    -30,
+    -39
+   ],
+   "best_score": 271,
+   "score_at_zero": 101,
+   "zero_vs_best_ratio": 0.3727,
+   "unaligned_would_be_px": 40.7,
+   "depth_spread_mm": 90.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T182956_엘리베이터버튼수집_14",
+   "median_raw": 191.0,
+   "z_m_at_0.001": 0.191,
+   "best_shift_px": [
+    18,
+    21
+   ],
+   "best_score": 288,
+   "score_at_zero": 205,
+   "zero_vs_best_ratio": 0.7118,
+   "unaligned_would_be_px": 40.7,
+   "depth_spread_mm": 88.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T183003_엘리베이터버튼수집_15",
+   "median_raw": 212.0,
+   "z_m_at_0.001": 0.212,
+   "best_shift_px": [
+    -36,
+    -39
+   ],
+   "best_score": 192,
+   "score_at_zero": 95,
+   "zero_vs_best_ratio": 0.4948,
+   "unaligned_would_be_px": 36.6,
+   "depth_spread_mm": 165.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T183008_엘리베이터버튼수집_16",
+   "median_raw": 202.0,
+   "z_m_at_0.001": 0.202,
+   "best_shift_px": [
+    -33,
+    -12
+   ],
+   "best_score": 151,
+   "score_at_zero": 80,
+   "zero_vs_best_ratio": 0.5298,
+   "unaligned_would_be_px": 38.5,
+   "depth_spread_mm": 116.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T183015_엘리베이터버튼수집_17",
+   "median_raw": 192.0,
+   "z_m_at_0.001": 0.192,
+   "best_shift_px": [
+    21,
+    -12
+   ],
+   "best_score": 285,
+   "score_at_zero": 153,
+   "zero_vs_best_ratio": 0.5368,
+   "unaligned_would_be_px": 40.5,
+   "depth_spread_mm": 86.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T183028_엘리베이터버튼수집_18",
+   "median_raw": 187.0,
+   "z_m_at_0.001": 0.187,
+   "best_shift_px": [
+    18,
+    -33
+   ],
+   "best_score": 245,
+   "score_at_zero": 225,
+   "zero_vs_best_ratio": 0.9184,
+   "unaligned_would_be_px": 41.5,
+   "depth_spread_mm": 93.0,
+   "informative": false
+  },
+  {
+   "snap": "20260902T183106_엘리베이터안탑승장소(좌표)",
+   "median_raw": 464.0,
+   "z_m_at_0.001": 0.464,
+   "best_shift_px": [
+    -33,
+    -33
+   ],
+   "best_score": 452,
+   "score_at_zero": 272,
+   "zero_vs_best_ratio": 0.6018,
+   "unaligned_would_be_px": 16.7,
+   "depth_spread_mm": 431.0,
+   "informative": false
+  }
+ ]
+}

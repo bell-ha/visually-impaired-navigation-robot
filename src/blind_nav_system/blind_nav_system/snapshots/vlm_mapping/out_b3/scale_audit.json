@@ -1,0 +1,739 @@
+{
+ "method": "깊이 미사용 광선 삼각측량 vs 깊이 원값 → s = |P-C| / raw",
+ "assoc_scale_used_for_matching_only": 0.001,
+ "groups": [
+  {
+   "amcl_xyyaw": [
+    -47.819,
+    7.057,
+    69.9
+   ],
+   "n_views": 7,
+   "baseline_m": 0.11,
+   "baseline_axis": "z",
+   "cam_span_xyz_mm": [
+    0.0,
+    0.0,
+    110.0
+   ],
+   "lift_range_m": 0.11,
+   "ext_range_m": 0.28,
+   "snaps": [
+    "20260902T182811_엘리베이터버튼수집_3",
+    "20260902T182821_엘리베이터버튼수집_4",
+    "20260902T182855_엘리베이터버튼수집_5",
+    "20260902T182903_엘리베이터버튼수집_6",
+    "20260902T182909_엘리베이터버튼수집_7",
+    "20260902T182914_엘리베이터버튼수집_8",
+    "20260902T182918_엘리베이터버튼수집_9"
+   ],
+   "ref_snap": "20260902T182903_엘리베이터버튼수집_6",
+   "n_ref_circles": 7,
+   "n_tracks": 7,
+   "tracks": [
+    {
+     "n_views": 4,
+     "baseline_mm": 70.0,
+     "baseline_perp_mm": 69.8,
+     "ref_px": [
+      250,
+      24
+     ],
+     "P_base": [
+      0.06905,
+      -0.71837,
+      1.09481
+     ],
+     "tri_resid_mm": 0.94,
+     "raw_range": [
+      170.0,
+      187.0
+     ],
+     "s_from_slantrange": 0.0011843,
+     "s_from_opticalz": 0.0010696,
+     "accepted": true
+    },
+    {
+     "n_views": 4,
+     "baseline_mm": 70.0,
+     "baseline_perp_mm": 69.8,
+     "ref_px": [
+      446,
+      34
+     ],
+     "P_base": [
+      -0.01413,
+      -0.72224,
+      1.09079
+     ],
+     "tri_resid_mm": 1.46,
+     "raw_range": [
+      174.0,
+      191.0
+     ],
+     "s_from_slantrange": 0.0010962,
+     "s_from_opticalz": 0.0010584,
+     "accepted": true
+    },
+    {
+     "n_views": 7,
+     "baseline_mm": 110.0,
+     "baseline_perp_mm": 109.7,
+     "ref_px": [
+      436,
+      174
+     ],
+     "P_base": [
+      -0.01277,
+      -0.71908,
+      1.03086
+     ],
+     "tri_resid_mm": 2.07,
+     "raw_range": [
+      178.0,
+      207.0
+     ],
+     "s_from_slantrange": 0.0010496,
+     "s_from_opticalz": 0.0010355,
+     "accepted": true
+    },
+    {
+     "n_views": 6,
+     "baseline_mm": 80.0,
+     "baseline_perp_mm": 79.9,
+     "ref_px": [
+      592,
+      182
+     ],
+     "P_base": [
+      -0.08357,
+      -0.71983,
+      1.02842
+     ],
+     "tri_resid_mm": 3.1,
+     "raw_range": [
+      182.0,
+      204.0
+     ],
+     "s_from_slantrange": 0.0011215,
+     "s_from_opticalz": 0.0010098,
+     "accepted": true
+    },
+    {
+     "n_views": 7,
+     "baseline_mm": 110.0,
+     "baseline_perp_mm": 103.4,
+     "ref_px": [
+      428,
+      292
+     ],
+     "P_base": [
+      -0.00969,
+      -0.72863,
+      0.96963
+     ],
+     "tri_resid_mm": 2.55,
+     "raw_range": [
+      196.0,
+      224.0
+     ],
+     "s_from_slantrange": 0.0010752,
+     "s_from_opticalz": 0.0010627,
+     "accepted": true
+    },
+    {
+     "n_views": 4,
+     "baseline_mm": 40.0,
+     "baseline_perp_mm": 39.2,
+     "ref_px": [
+      266,
+      294
+     ],
+     "P_base": [
+      0.06689,
+      -0.71435,
+      0.97311
+     ],
+     "tri_resid_mm": 1.02,
+     "raw_range": [
+      190.0,
+      202.0
+     ],
+     "s_from_slantrange": 0.0010861,
+     "s_from_opticalz": 0.0010228,
+     "accepted": true
+    },
+    {
+     "n_views": 4,
+     "baseline_mm": 40.0,
+     "baseline_perp_mm": 39.1,
+     "ref_px": [
+      574,
+      300
+     ],
+     "P_base": [
+      -0.08548,
+      -0.73408,
+      0.96549
+     ],
+     "tri_resid_mm": 1.42,
+     "raw_range": [
+      200.0,
+      209.0
+     ],
+     "s_from_slantrange": 0.0011412,
+     "s_from_opticalz": 0.0010644,
+     "accepted": true
+    }
+   ]
+  },
+  {
+   "amcl_xyyaw": [
+    -47.846,
+    7.021,
+    75.9
+   ],
+   "n_views": 5,
+   "baseline_m": 0.0858,
+   "baseline_axis": "z",
+   "cam_span_xyz_mm": [
+    0.0,
+    0.1,
+    85.8
+   ],
+   "lift_range_m": 0.0858,
+   "ext_range_m": 0.28,
+   "snaps": [
+    "20260902T182928_엘리베이터버튼수집_10",
+    "20260902T182936_엘리베이터버튼수집_11",
+    "20260902T182941_엘리베이터버튼수집_12",
+    "20260902T182949_엘리베이터버튼수집_13",
+    "20260902T182956_엘리베이터버튼수집_14"
+   ],
+   "ref_snap": "20260902T182936_엘리베이터버튼수집_11",
+   "n_ref_circles": 7,
+   "n_tracks": 7,
+   "tracks": [
+    {
+     "n_views": 2,
+     "baseline_mm": 55.9,
+     "baseline_perp_mm": 55.3,
+     "ref_px": [
+      66,
+      2
+     ],
+     "P_base": [
+      0.1701,
+      -0.74139,
+      1.10167
+     ],
+     "tri_resid_mm": 2.45,
+     "raw_range": [
+      175.0,
+      187.0
+     ],
+     "s_from_slantrange": 0.0015944,
+     "s_from_opticalz": 0.0011653,
+     "accepted": true
+    },
+    {
+     "n_views": 4,
+     "baseline_mm": 55.9,
+     "baseline_perp_mm": 55.4,
+     "ref_px": [
+      254,
+      2
+     ],
+     "P_base": [
+      0.05683,
+      -0.70662,
+      1.09156
+     ],
+     "tri_resid_mm": 5.03,
+     "raw_range": [
+      174.0,
+      191.0
+     ],
+     "s_from_slantrange": 0.00111,
+     "s_from_opticalz": 0.0009812,
+     "accepted": false
+    },
+    {
+     "n_views": 3,
+     "baseline_mm": 85.8,
+     "baseline_perp_mm": 85.7,
+     "ref_px": [
+      256,
+      142
+     ],
+     "P_base": [
+      0.07186,
+      -0.728,
+      1.03427
+     ],
+     "tri_resid_mm": 0.9,
+     "raw_range": [
+      183.0,
+      206.0
+     ],
+     "s_from_slantrange": 0.0011593,
+     "s_from_opticalz": 0.0010625,
+     "accepted": true
+    },
+    {
+     "n_views": 5,
+     "baseline_mm": 85.8,
+     "baseline_perp_mm": 85.3,
+     "ref_px": [
+      412,
+      150
+     ],
+     "P_base": [
+      -0.01016,
+      -0.69806,
+      1.03286
+     ],
+     "tri_resid_mm": 10.84,
+     "raw_range": [
+      186.0,
+      209.0
+     ],
+     "s_from_slantrange": 0.0009099,
+     "s_from_opticalz": 0.0008906,
+     "accepted": false
+    },
+    {
+     "n_views": 3,
+     "baseline_mm": 85.8,
+     "baseline_perp_mm": 83.4,
+     "ref_px": [
+      96,
+      262
+     ],
+     "P_base": [
+      0.16171,
+      -0.73125,
+      0.97338
+     ],
+     "tri_resid_mm": 1.9,
+     "raw_range": [
+      199.0,
+      220.0
+     ],
+     "s_from_slantrange": 0.0013531,
+     "s_from_opticalz": 0.0010808,
+     "accepted": true
+    },
+    {
+     "n_views": 2,
+     "baseline_mm": 29.8,
+     "baseline_perp_mm": 29.3,
+     "ref_px": [
+      266,
+      272
+     ],
+     "P_base": [
+      0.066,
+      -0.71523,
+      0.97368
+     ],
+     "tri_resid_mm": 0.96,
+     "raw_range": [
+      201.0,
+      208.0
+     ],
+     "s_from_slantrange": 0.0010364,
+     "s_from_opticalz": 0.0009761,
+     "accepted": false
+    },
+    {
+     "n_views": 5,
+     "baseline_mm": 85.8,
+     "baseline_perp_mm": 79.9,
+     "ref_px": [
+      406,
+      274
+     ],
+     "P_base": [
+      -0.00775,
+      -0.70826,
+      0.97826
+     ],
+     "tri_resid_mm": 10.77,
+     "raw_range": [
+      202.0,
+      226.0
+     ],
+     "s_from_slantrange": 0.0009514,
+     "s_from_opticalz": 0.0009245,
+     "accepted": false
+    }
+   ]
+  },
+  {
+   "amcl_xyyaw": [
+    -47.454,
+    4.993,
+    168.4
+   ],
+   "n_views": 4,
+   "baseline_m": 0.24,
+   "baseline_axis": "y",
+   "cam_span_xyz_mm": [
+    0.0,
+    240.0,
+    0.2
+   ],
+   "lift_range_m": 0.0,
+   "ext_range_m": 0.24,
+   "snaps": [
+    "20260902T182307_5층버튼누르는지점",
+    "20260902T182406_5층버튼수집중_1",
+    "20260902T182417_5층버튼수집중_2",
+    "20260902T182428_5층버튼수집중_3"
+   ],
+   "ref_snap": "20260902T182307_5층버튼누르는지점",
+   "n_ref_circles": 1,
+   "n_tracks": 1,
+   "tracks": [
+    {
+     "n_views": 2,
+     "baseline_mm": 239.9,
+     "baseline_perp_mm": 60.4,
+     "ref_px": [
+      482,
+      210
+     ],
+     "P_base": [
+      -0.07295,
+      -0.77961,
+      1.03206
+     ],
+     "tri_resid_mm": 4.38,
+     "raw_range": [
+      323.0,
+      560.0
+     ],
+     "s_from_slantrange": 0.0009739,
+     "s_from_opticalz": 0.0009541,
+     "accepted": false
+    }
+   ]
+  },
+  {
+   "amcl_xyyaw": [
+    -47.824,
+    7.102,
+    68.9
+   ],
+   "n_views": 4,
+   "baseline_m": 0.1,
+   "baseline_axis": "z",
+   "cam_span_xyz_mm": [
+    0.0,
+    0.0,
+    100.0
+   ],
+   "lift_range_m": 0.1,
+   "ext_range_m": 0.28,
+   "snaps": [
+    "20260902T183003_엘리베이터버튼수집_15",
+    "20260902T183008_엘리베이터버튼수집_16",
+    "20260902T183015_엘리베이터버튼수집_17",
+    "20260902T183028_엘리베이터버튼수집_18"
+   ],
+   "ref_snap": "20260902T183008_엘리베이터버튼수집_16",
+   "n_ref_circles": 7,
+   "n_tracks": 6,
+   "tracks": [
+    {
+     "n_views": 2,
+     "baseline_mm": 0.0,
+     "baseline_perp_mm": 0.0,
+     "ref_px": [
+      124,
+      60
+     ],
+     "P_base": [
+      -0.00935,
+      -0.52196,
+      1.05984
+     ],
+     "tri_resid_mm": 0.0,
+     "raw_range": [
+      168.0,
+      176.0
+     ],
+     "s_from_slantrange": 2e-07,
+     "s_from_opticalz": -2e-07,
+     "accepted": false
+    },
+    {
+     "n_views": 2,
+     "baseline_mm": 0.0,
+     "baseline_perp_mm": 0.0,
+     "ref_px": [
+      314,
+      74
+     ],
+     "P_base": [
+      -0.00934,
+      -0.52199,
+      1.05985
+     ],
+     "tri_resid_mm": 0.0,
+     "raw_range": [
+      175.0,
+      179.0
+     ],
+     "s_from_slantrange": 0.0,
+     "s_from_opticalz": -0.0,
+     "accepted": false
+    },
+    {
+     "n_views": 2,
+     "baseline_mm": 0.0,
+     "baseline_perp_mm": 0.0,
+     "ref_px": [
+      318,
+      210
+     ],
+     "P_base": [
+      -0.00934,
+      -0.52198,
+      1.05985
+     ],
+     "tri_resid_mm": 0.0,
+     "raw_range": [
+      197.0,
+      208.0
+     ],
+     "s_from_slantrange": 1e-07,
+     "s_from_opticalz": -1e-07,
+     "accepted": false
+    },
+    {
+     "n_views": 2,
+     "baseline_mm": 0.0,
+     "baseline_perp_mm": 0.0,
+     "ref_px": [
+      464,
+      212
+     ],
+     "P_base": [
+      -0.00938,
+      -0.52252,
+      1.05978
+     ],
+     "tri_resid_mm": 0.0,
+     "raw_range": [
+      194.0,
+      207.0
+     ],
+     "s_from_slantrange": 2.7e-06,
+     "s_from_opticalz": 2.7e-06,
+     "accepted": false
+    },
+    {
+     "n_views": 2,
+     "baseline_mm": 0.0,
+     "baseline_perp_mm": 0.0,
+     "ref_px": [
+      320,
+      326
+     ],
+     "P_base": [
+      -0.00934,
+      -0.52198,
+      1.05986
+     ],
+     "tri_resid_mm": 0.0,
+     "raw_range": [
+      160.0,
+      163.0
+     ],
+     "s_from_slantrange": 1e-07,
+     "s_from_opticalz": -1e-07,
+     "accepted": false
+    },
+    {
+     "n_views": 3,
+     "baseline_mm": 100.0,
+     "baseline_perp_mm": 96.6,
+     "ref_px": [
+      452,
+      326
+     ],
+     "P_base": [
+      -0.02352,
+      -0.7283,
+      0.96926
+     ],
+     "tri_resid_mm": 3.81,
+     "raw_range": [
+      185.0,
+      224.0
+     ],
+     "s_from_slantrange": 0.001065,
+     "s_from_opticalz": 0.0010371,
+     "accepted": true
+    }
+   ]
+  },
+  {
+   "amcl_xyyaw": [
+    -47.867,
+    7.092,
+    74.2
+   ],
+   "n_views": 2,
+   "baseline_m": 0.2522,
+   "baseline_axis": "y",
+   "cam_span_xyz_mm": [
+    0.0,
+    252.2,
+    0.0
+   ],
+   "lift_range_m": 0.0,
+   "ext_range_m": 0.2522,
+   "snaps": [
+    "20260902T182619_엘리베이터버튼수집_1",
+    "20260902T182728_엘리베이터버튼수집_2"
+   ],
+   "ref_snap": "20260902T182728_엘리베이터버튼수집_2",
+   "n_ref_circles": 6,
+   "n_tracks": 3,
+   "tracks": [
+    {
+     "n_views": 2,
+     "baseline_mm": 252.2,
+     "baseline_perp_mm": 111.3,
+     "ref_px": [
+      130,
+      184
+     ],
+     "P_base": [
+      0.12008,
+      -0.70241,
+      1.10109
+     ],
+     "tri_resid_mm": 4.63,
+     "raw_range": [
+      182.0,
+      418.0
+     ],
+     "s_from_slantrange": 0.0011507,
+     "s_from_opticalz": 0.0010133,
+     "accepted": false
+    },
+    {
+     "n_views": 2,
+     "baseline_mm": 252.2,
+     "baseline_perp_mm": 49.7,
+     "ref_px": [
+      310,
+      190
+     ],
+     "P_base": [
+      0.0362,
+      -0.68008,
+      1.09989
+     ],
+     "tri_resid_mm": 4.38,
+     "raw_range": [
+      191.0,
+      435.0
+     ],
+     "s_from_slantrange": 0.000906,
+     "s_from_opticalz": 0.0008792,
+     "accepted": false
+    },
+    {
+     "n_views": 2,
+     "baseline_mm": 252.2,
+     "baseline_perp_mm": 79.5,
+     "ref_px": [
+      314,
+      316
+     ],
+     "P_base": [
+      0.0375,
+      -0.67779,
+      1.04923
+     ],
+     "tri_resid_mm": 3.48,
+     "raw_range": [
+      201.0,
+      448.0
+     ],
+     "s_from_slantrange": 0.0008952,
+     "s_from_opticalz": 0.0008741,
+     "accepted": true
+    }
+   ]
+  },
+  {
+   "amcl_xyyaw": [
+    -48.228,
+    5.224,
+    83.3
+   ],
+   "n_views": 1,
+   "baseline_m": 0.0,
+   "baseline_axis": "x",
+   "cam_span_xyz_mm": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "lift_range_m": 0.0,
+   "ext_range_m": 0.0,
+   "snaps": [
+    "20260902T182520_엘리베이터탑승지점"
+   ],
+   "skipped": "뷰 1개 / 카메라 베이스라인 0mm — 삼각측량 기하 부족"
+  },
+  {
+   "amcl_xyyaw": [
+    -47.825,
+    7.254,
+    74.7
+   ],
+   "n_views": 1,
+   "baseline_m": 0.0,
+   "baseline_axis": "x",
+   "cam_span_xyz_mm": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "lift_range_m": 0.0,
+   "ext_range_m": 0.0,
+   "snaps": [
+    "20260902T183106_엘리베이터안탑승장소(좌표)"
+   ],
+   "skipped": "뷰 1개 / 카메라 베이스라인 0mm — 삼각측량 기하 부족"
+  }
+ ],
+ "verdict": {
+  "n_tracks_used": 12,
+  "s_median_m_per_unit": 0.0010605,
+  "s_mean": 0.0010452,
+  "s_std": 6.37e-05,
+  "s_min": 0.0008741,
+  "s_max": 0.0011653,
+  "ratio_to_0.001": 1.0605,
+  "accept_rule": "시선수직 베이스라인 ≥ 30mm 이고 삼각측량 잔차 < 4mm",
+  "by_baseline_axis": {
+   "y": {
+    "n": 1,
+    "s_median": 0.0008741
+   },
+   "z": {
+    "n": 11,
+    "s_median": 0.0010625
+   }
+  },
+  "degeneracy_note": "s 와 베이스라인 길이는 이 실험에서 정확히 축퇴한다. s=0.00106 은 \"깊이 단위가 1.06mm\" 와 \"카메라 실제 이동이 TF 보다 6% 작다\" 를 구분하지 못한다. 서로 다른 관절(리프트=z축, 팔신장=x/y축)이 같은 s 를 주면 원인은 깊이 쪽, 다르면 그 관절 TF 쪽이다."
+ }
+}
