@@ -1489,10 +1489,151 @@ SCENES = ["① 호출 press", "② 문앞 정렬", "③ 문 열림 대기",
 # Esc로 중단 → 패드 보정 → 같은 단계 재클릭 시 잔여만 이어서 실행 (scene_acc 기준).
 # ※ press 정렬이 매번 다른 위치에서 끝나므로(이번엔 X정렬 11.5cm) 몇 cm 보정은 정상.
 SCENE_MOVES = {
-    1: [("fwd", 56.5), ("rot", -90.0)],   # ② 문앞: 전진 56.5cm → 우회전 90°
+    # 2026-09-04 갱신: 56.5 → 80.8. 56.5는 7/15 리허설 당시 자세 기준이라, 같은 날
+    # location.yaml의 '엘리베이터 탑승지점'을 (-47.668,4.9445)→(-47.454,4.993)으로
+    # 옮긴 뒤로는 낡은 값이 됐다. 새 호출지점에서 씬1 목표(-48.228,5.224)까지의
+    # 실측 직선거리가 80.8cm다. 갱신 전에는 좌표 주행 클램프(±40cm)의 중심이
+    # 24.3cm 치우쳐 있어서 위쪽 여유가 15.7cm뿐이었고, Nav2가 20cm만 못 미쳐 서면
+    # 씬1이 통째로 거부됐다(로봇이 안 움직인다). 넓힌 게 아니라 중심을 맞춘 것이다.
+    # ※ 나중에 호출지점을 또 옮기면 이 값도 같이 옮겨야 한다.
+    1: [("fwd", 80.8), ("rot", -90.0)],   # ② 문앞: 전진 80.8cm → 우회전 90°
     3: [("fwd", 185.0)],                  # ④ 탑승: 전진 185cm
     5: [("fwd", -186.0)],                 # ⑥ 하차: 후진 186cm
 }
+# ※ SCENE_MOVES는 지우지 않는다. 좌표 목표를 쓸 때도 (a) 목표가 없을 때의 동작이고
+#    (b) 좌표에서 계산한 잔여가 이 값에서 얼마나 벗어났는지 재는 클램프 기준이다.
+
+# ── 씬별 좌표 목표 (map 프레임) ───────────────────────────────
+# 하드코딩 거리 대신 '그 자리'로 가게 하는 폐루프용. 파일이 없거나 비면 기존 동작.
+SCENE_TARGETS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "scene_targets.yaml")
+# 🔴 안전 클램프 — 좌표 잔여가 티칭값에서 이만큼 넘게 벗어나면 '움직이지 않는다'.
+# AMCL이 이 구간에서 27cm 틀린 실측이 있다. 틀린 측위로 폐루프를 걸면 로봇이
+# 능동적으로 잘못된 방향으로 간다. 이 클램프가 그 폭주를 막는 유일한 장치다.
+SCENE_CLAMP_FWD_CM  = 40.0
+# ⚠ 회전 클램프는 3단 방식에서 기준이 바뀌었다. 예전에는 '티칭 회전값 대비 ±20°'
+# 였는데, 3단 방식의 ①정렬은 목표점 방위로 도는 것이라 티칭값(-90°)과 비교할 대상이
+# 아니다(씬1 실측 ①=-5°, 티칭 대비 85° 차이 → 옛 기준이면 항상 거부된다).
+# 그래서 '한 번의 회전이 ±90°를 넘으면 거부'로 바꿨다. 전진안·후진안 중 작은 쪽을
+# 고르므로 ①은 원리상 90°를 넘을 수 없고, 넘으면 계산 오류 신호다.
+# 절대각으로는 완화지만(±20°→±90°), 3단 방식에서는 옛 기준이 성립하지 않는다.
+SCENE_CLAMP_TURN_DEG = 90.0     # ①정렬에만 적용 (③는 클램프 없음 — 아래 사유)
+# ③정렬(주행방향 → 목표자세)은 원리적 상한이 없다. 씬1이 이미 -80.1°라 ±90°면
+# 출발점이 20cm만 어긋나도 거부된다. 그런데 거부 시점엔 ①②가 끝나 위치는 맞고
+# 자세만 틀린 채로 서게 되고, 다음 씬의 방위 계산이 통째로 틀어진다.
+# 안전장치가 아니라 고장 유발기라 ③에서는 검사를 아예 하지 않는다.
+# 대신 이 각도를 넘으면 로그로만 알린다(실행은 계속).
+SCENE_TURN_WARN_DEG = 100.0
+
+# 3단 go-to-pose 반복 상한 — 수렴하면 그 전에 끝난다.
+SCENE_MAX_ITERS = 4
+POSE_SKIP_M   = 0.02   # 남은 거리가 이 이하면 ①②를 건너뛴다(노이즈로 제자리 도는 것 방지)
+POSE_DONE_M   = 0.01   # 종료 조건: 거리
+POSE_DONE_DEG = 3.0    # 종료 조건: 자세각
+
+# 각 구간의 허용오차 — _scene_leg 가 이 값으로 수렴을 판정한다.
+SCENE_TOL_FWD_CM  = 1.0
+SCENE_TOL_ROT_DEG = 3.0
+
+
+def _load_scene_targets():
+    """scene_targets.yaml → {"1": {x, y, yaw_deg}, ...}. 어떤 실패든 빈 dict.
+
+    빈 dict = 좌표 목표 없음 = 기존 하드코딩 경로 그대로다. pyyaml이 없어도,
+    파일이 없어도, 값이 깨져 있어도 앱이 죽지 않고 기존 동작으로 돌아간다.
+    (button_layout.json 로드와 같은 방침 — 사전지식 파일은 있으면 쓰고 없으면 만다.)
+    """
+    try:
+        import yaml
+        with open(SCENE_TARGETS_FILE, encoding="utf-8") as f:
+            doc = yaml.safe_load(f) or {}
+        raw = doc.get("targets") or {}
+        out = {}
+        for k, v in raw.items():
+            if not isinstance(v, dict):
+                continue
+            try:   # 한 항목이 깨져도 나머지는 살린다
+                out[str(k)] = {"x": float(v["x"]), "y": float(v["y"]),
+                               "yaw_deg": float(v["yaw_deg"])}
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+    except Exception:
+        return {}
+
+
+_scene_targets = _load_scene_targets()
+
+
+def _save_scene_targets(tgts) -> bool:
+    """주석 헤더를 유지한 채 원자적으로 저장. 실패하면 False (조용히 성공하지 않는다)."""
+    head = ("# 씬별 목표 자세 (map 프레임). 비어 있으면 기존 하드코딩(SCENE_MOVES) 동작.\n"
+            "# 현장에서 POST /scene_teach {\"n\": 씬번호} 로 현재 자세를 저장한다.\n"
+            "#\n"
+            "# yaw_deg 규약: map 프레임 기준 도(°), -180~180. 쿼터니언이 아니다.\n"
+            "#   yaw = atan2(2(wz+xy), 1-2(yy+zz)) 를 도로 바꾼 값.\n"
+            "# 여기 값은 '목표 자세'일 뿐이고, 실제 이동량은 SCENE_MOVES 티칭값\n"
+            "# ±40cm/±20° 클램프를 통과해야만 실행된다. 벗어나면 로봇은 움직이지 않는다.\n"
+            "targets:\n")
+    body = ""
+    for k in sorted(tgts, key=lambda z: (len(z), z)):
+        v = tgts[k]
+        body += (f'  "{k}":\n'
+                 f"    x: {v['x']:.3f}\n"
+                 f"    y: {v['y']:.3f}\n"
+                 f"    yaw_deg: {v['yaw_deg']:.1f}\n")
+    if not body:
+        body = "  {}\n"
+    try:
+        d = os.path.dirname(SCENE_TARGETS_FILE)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".scene_targets_", suffix=".yaml")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(head + body)
+        os.replace(tmp, SCENE_TARGETS_FILE)   # 원자적 교체 — 중간에 죽어도 반쪽 파일 없음
+        return True
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        return False
+
+
+@app.route("/scene_teach", methods=["POST"])
+def scene_teach():
+    """현재 map 자세를 씬 n의 목표로 저장 (현장 티칭).
+
+    TF를 못 뜨면 저장하지 않고 실패를 그대로 돌려준다 — 조용히 성공하지 않는다.
+    """
+    node = _node_ref[0]
+    if node is None:
+        return jsonify(ok=False, error="node 없음"), 503
+    if not _authority_ok():
+        node._dlog("[TEACH] ⛔ 제어권 없음 — 목표 저장 거부")
+        return jsonify(ok=False, error="제어권 없음 (대시보드에서 부여 필요)"), 409
+    try:
+        n = int((request.json or {}).get("n", -1))
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="씬 번호가 올바르지 않다"), 400
+    if not (0 <= n < len(SCENES)):
+        return jsonify(ok=False, error=f"씬 번호 범위 밖: {n}"), 400
+    pose = node._map_pose()
+    if pose is None:
+        node._dlog(f"[TEACH] ⛔ 씬{n} — map→base_link TF 실패, 저장하지 않음 "
+                   "(측위가 켜져 있는지 확인하라)")
+        return jsonify(ok=False, error="map→base_link TF 실패 — 측위 확인 필요"), 409
+    x, y, yaw_deg = pose
+    tgt = {"x": x, "y": y, "yaw_deg": yaw_deg}
+    merged = dict(_scene_targets)
+    merged[str(n)] = tgt
+    if not _save_scene_targets(merged):
+        node._dlog(f"[TEACH] ⛔ 씬{n} — 파일 저장 실패, 목표 반영하지 않음")
+        return jsonify(ok=False, error="scene_targets.yaml 저장 실패"), 500
+    _scene_targets[str(n)] = tgt          # 파일이 실제로 써진 뒤에만 메모리 반영
+    node._dlog(f"[TEACH] 씬{n} 목표 저장 (x={x:.3f}, y={y:.3f}, yaw={yaw_deg:.1f}°) "
+               f"— {SCENES[n]}")
+    return jsonify(ok=True, n=n, target=tgt)
+
 
 @app.route("/scene", methods=["POST"])
 def scene_set():
@@ -2622,6 +2763,74 @@ class ElevatorTracker(Node):
                    + (f" ({stopped})" if stopped else "")
                    + f" — 단계 누적 회전 {acc_now:+.0f}°")
 
+    def _map_pose(self):
+        """map→base_link TF에서 현재 자세 (x_m, y_m, yaw_deg). 실패하면 None.
+
+        yaw_deg는 map 프레임 기준 도(°). scene_targets.yaml의 yaw_deg와 같은 규약이다.
+
+        리스너는 '처음 필요할 때 한 번만' 만들고 계속 재사용한다. 스텝마다 만들면
+        캐시 대기 1초가 이동 사이마다 끼고 /tf 구독이 반복 생성된다. 좌표 목표를
+        전혀 안 쓰면 이 함수가 호출되지 않으므로 리스너도 만들어지지 않는다
+        (= 목표가 비었을 때 /tf 구독이 늘지 않는다).
+        """
+        try:
+            import tf2_ros
+            from rclpy.duration import Duration
+            from rclpy.time import Time as RclpyTime
+            if getattr(self, "_scene_tf_buf", None) is None:
+                buf = tf2_ros.Buffer()
+                lis = tf2_ros.TransformListener(buf, self)
+                time.sleep(1.0)      # 스냅샷 경로와 같은 캐시 대기 — 첫 lookup 실패 방지
+                self._scene_tf_buf, self._scene_tf_lis = buf, lis
+            t = self._scene_tf_buf.lookup_transform(
+                SNAPSHOT_FRAMES["map"], SNAPSHOT_FRAMES["base"],
+                RclpyTime(), timeout=Duration(seconds=1.0))
+            tr, q = t.transform.translation, t.transform.rotation
+            yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                             1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            return (float(tr.x), float(tr.y), float(math.degrees(yaw)))
+        except Exception:
+            # 미측위·TF 미수신 등 — 실패는 실패로 돌려준다. 추정값으로 때우지 않는다.
+            return None
+
+    def _scene_residual(self, tgt):
+        """목표까지의 잔여 → (전진cm, 횡cm, 회전deg, (x, y, yaw_deg)). 자세 실패 시 None.
+
+        부호 규약 (틀리면 로봇이 반대로 간다):
+          로컬 좌표 = R(-yaw) · (목표 - 현재).  +x = 로봇이 바라보는 쪽(전진), +y = 왼쪽.
+            fwd = dx·cos(yaw) + dy·sin(yaw)     → 양수면 앞으로 가야 함
+            lat = -dx·sin(yaw) + dy·cos(yaw)    → 양수면 목표가 왼쪽에 있음
+          _manual_step(cm, 0)은 양수 cm가 전진이므로 fwd 부호를 그대로 넘기면 된다.
+          회전은 목표yaw − 현재yaw 를 ±180으로 정규화. _manual_step(0, deg)와 부호 일치.
+        횡(lat)은 이번 범위가 아니다 — 계산해서 로그로만 남긴다(각도 정렬 실측치).
+        """
+        cur = self._map_pose()
+        if cur is None:
+            return None
+        x, y, yaw_deg = cur
+        yaw = math.radians(yaw_deg)
+        dx, dy = tgt["x"] - x, tgt["y"] - y
+        fwd_cm = (dx * math.cos(yaw) + dy * math.sin(yaw)) * 100.0
+        lat_cm = (-dx * math.sin(yaw) + dy * math.cos(yaw)) * 100.0
+        rot_deg = (tgt["yaw_deg"] - yaw_deg + 180.0) % 360.0 - 180.0
+        return fwd_cm, lat_cm, rot_deg, cur
+
+    def _scene_step_log(self, n, kind, res, remain, ref_remain):
+        """계측 한 줄 — map과 odom을 같은 줄에 찍는 게 핵심.
+
+        "AMCL이 27cm 틀린 것 같다"를 이번 주행으로 판정할 자료다. 둘을 따로 찍으면
+        시각이 어긋나 대조가 안 된다.
+        """
+        fwd_cm, lat_cm, rot_deg, (mx, my, myaw) = res
+        oxy = getattr(self, "_odom_xy", None)
+        oyaw = getattr(self, "_odom_yaw", None)
+        odom = (f"odom({oxy[0]:+.3f},{oxy[1]:+.3f},{math.degrees(oyaw):+.1f}°)"
+                if oxy is not None and oyaw is not None else "odom(없음)")
+        u = "cm" if kind == "fwd" else "°"
+        self._dlog(f"[AUTO] 씬{n} 스텝 — map({mx:+.3f},{my:+.3f},{myaw:+.1f}°) / {odom}"
+                   f" / 잔여 전진 {fwd_cm:+.1f}cm 횡 {lat_cm:+.1f}cm 회전 {rot_deg:+.1f}°"
+                   f" / 기준 {ref_remain:+.1f}{u}")
+
     def _run_scene_moves(self, n):
         """여정 단계 자동 안무 재생 (별도 스레드) — 티칭값에서 단계 누적을 뺀
         잔여만 실행. Esc(_step_abort)로 중단 → 패드 보정 → 같은 단계 재클릭 시
@@ -2648,6 +2857,25 @@ class ElevatorTracker(Node):
             self._auto_busy = False
 
     def _run_scene_moves_inner(self, n, moves):
+        """좌표 목표가 있으면 3단 go-to-pose, 없으면 기존 경로.
+
+        아래 '기존 경로' 부분은 2026-09-04 수정 전(HEAD) 본문을 한 글자도 바꾸지 않고
+        그대로 둔 것이다 — 목표가 없는 씬(⑥하차 등)의 동작을 보존하기 위해서다.
+        좌표 로직은 _run_scene_gotopose 로 완전히 분리해 두 경로가 섞이지 않게 했다.
+        """
+        tgt = _scene_targets.get(str(n))
+        if tgt is None:
+            self._dlog(f"[AUTO] 씬{n} 좌표 목표 없음 — 기존 누적 이동량(scene_acc) 방식")
+        elif self._scene_residual(tgt) is None:
+            self._dlog(f"[AUTO] 씬{n} 좌표 목표는 있으나 map→base_link TF 실패 — "
+                       "기존 누적 이동량(scene_acc) 방식으로 진행")
+        elif not any(k == "fwd" for k, _ in moves):
+            # 주행 클램프의 기준(티칭 전진값)이 없으면 좌표 주행을 허용하지 않는다
+            self._dlog(f"[AUTO] 씬{n} 티칭 전진값이 없어 클램프 기준을 못 만듦 — 기존 방식")
+        else:
+            return self._run_scene_gotopose(n, moves, tgt)
+
+        # ───────── 이하 기존 경로 (HEAD 원본 그대로) ─────────
         for kind, target in moves:
             key = "fwd_cm" if kind == "fwd" else "rot_deg"
             with state_lock:
@@ -2696,6 +2924,204 @@ class ElevatorTracker(Node):
                         break
                 last_sign = s_
         self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓")
+
+    def _scene_leg(self, n, it, label, kind, residual_fn, clamp_fn):
+        """한 구간(회전 또는 주행)을 잔여가 허용오차에 들 때까지 실행.
+
+        Esc·진행불가·진동 감지·매 스텝 클램프 재검사를 여기 한 곳에 모았다 —
+        ①정렬 / ②주행 / ③정렬 세 구간이 같은 안전장치를 공유해야 하기 때문이다.
+        주행은 부호를 그대로 _manual_step 에 넘기므로 음수면 후진한다(씬5의 -186cm와
+        같은 경로다).
+
+        반환: "done"(도달) / "stop"(진동 — 이 정도로 마침) / "abort"(중단·거부·불가)
+        """
+        tol = SCENE_TOL_FWD_CM if kind == "fwd" else SCENE_TOL_ROT_DEG
+        key = "fwd_cm" if kind == "fwd" else "rot_deg"
+        lim = 50.0 if kind == "fwd" else 90.0     # 한 스텝 최대치 (기존과 동일)
+        u = "cm" if kind == "fwd" else "°"
+        remain = residual_fn()
+        if remain is None:
+            self._dlog(f"[AUTO] 씬{n} 반복{it} {label} — 자세 조회 실패, 중단")
+            return "abort"
+        if abs(remain) < tol:
+            return "done"
+        if not clamp_fn(remain):
+            return "abort"
+        with state_lock:
+            done = (state.get("scene_acc") or {}).get(key, 0.0)
+        flips, last_sign = 0, (1 if remain > 0 else -1)
+        while abs(remain) >= tol:
+            if getattr(self, "_step_abort", False):
+                self._dlog(f"[AUTO] 중단됨 — 패드 보정 후 같은 단계를 다시 누르면 "
+                           f"잔여({abs(remain):.0f}{u})부터 이어감")
+                return "abort"
+            step = max(-lim, min(lim, remain))
+            if kind == "fwd":
+                self._manual_step(step, 0.0)      # 음수 = 후진 (사용자 명시 허용)
+            else:
+                self._manual_step(0.0, step)
+            with state_lock:
+                new_done = (state.get("scene_acc") or {}).get(key, 0.0)
+            if abs(new_done - done) < 0.3:        # 스텝이 거부되거나 전혀 못 움직임
+                self._dlog(f"[AUTO] 진행 불가 (가드/장애물) — 잔여 "
+                           f"{abs(remain):.0f}{u}. 패드로 상황 정리 후 단계 재클릭")
+                return "abort"
+            done = new_done
+            remain = residual_fn()
+            if remain is None:
+                self._dlog(f"[AUTO] 씬{n} 반복{it} {label} — 자세 조회 실패, 중단")
+                return "abort"
+            if not clamp_fn(remain):              # 이동 중 측위가 튄 경우
+                return "abort"
+            # 진동 감지 (기존과 같은 기준): 잔여 부호가 2번 뒤집히면 그만
+            s_ = 1 if remain > 0 else -1
+            if abs(remain) >= tol and s_ != last_sign:
+                flips += 1
+                if flips >= 2:
+                    self._dlog(f"[AUTO] 잔여 {remain:+.0f}{u} — 진동 감지, "
+                               "이 정도로 마침 (필요하면 패드로 미세 보정)")
+                    return "stop"
+            last_sign = s_
+        return "done"
+
+    def _run_scene_gotopose(self, n, moves, tgt):
+        """좌표 목표로 가는 3단 방식 — ①목표점을 향해 정렬 ②직선 주행 ③목표 자세로 정렬.
+
+        전진·회전만 번갈아 하는 기존 방식은 횡방향 오차를 원리적으로 못 없앤다
+        (2026-09-04 실측 횡 -5~-21cm). 목표점 '방위'로 먼저 돌고 나서 직선으로 가면
+        횡오차가 남지 않는다. 전진안과 후진안 중 회전량이 작은 쪽을 고르므로 후진이
+        선택될 수 있다 — 사용자가 명시적으로 허용했다.
+
+        부호 규약 (틀리면 로봇이 반대로 간다):
+          bearing = atan2(dy, dx)  — map 기준 목표점 방위
+          turn_fwd = wrap(bearing - pyaw)        앞으로 가려고 돌 각
+          turn_rev = wrap(bearing + 180 - pyaw)  뒤로 가려고 돌 각
+          정렬 후 _scene_residual()[0](헤딩 방향 성분)이 곧 주행량이라, 후진안을
+          고르면 그 값이 음수로 나와 _manual_step 이 알아서 후진한다. 부호를 따로
+          붙이지 않는다 — 붙이면 이중 반전이 된다.
+        """
+        base_fwd = next(v for k, v in moves if k == "fwd")   # 클램프 기준(티칭 전진값)
+
+        def _wrap(d):
+            return (d + 180.0) % 360.0 - 180.0
+
+        def _drive_clamp(remain_cm):
+            """누적 주행이 티칭값에서 ±40cm 넘게 벗어나면 거부.
+
+            |remain - (기준 - 누적)| = |(누적 + remain) - 기준| 이므로, 이 검사는
+            '이번 주행까지 끝냈을 때의 누적 주행량이 티칭값에서 얼마나 벗어나는가'와
+            같다. 반복 회차가 늘어도 누적으로 재기 때문에 기준이 흐트러지지 않는다.
+            """
+            with state_lock:
+                acc = (state.get("scene_acc") or {}).get("fwd_cm", 0.0)
+            ref = base_fwd - acc
+            if abs(remain_cm - ref) <= SCENE_CLAMP_FWD_CM:
+                return True
+            self._dlog(f"[AUTO] ⛔ 좌표 목표가 티칭값과 너무 다름 "
+                       f"(계산 {remain_cm:+.0f}cm vs 기준 {ref:+.0f}cm) — 실행 거부. "
+                       f"측위를 확인하라 [허용 ±{SCENE_CLAMP_FWD_CM:.0f}cm · "
+                       f"티칭 원값 {base_fwd:+.0f}cm · 누적 {acc:+.0f}cm]")
+            return False
+
+        def _turn_clamp(deg):
+            """①정렬 전용 — 한 번의 회전이 ±90°를 넘으면 거부.
+
+            전진안·후진안 중 작은 쪽을 고르므로 ①은 원리상 90°를 넘을 수 없다.
+            넘었다면 계산이 틀렸다는 신호라 움직이지 않는 쪽이 맞다.
+            ※ ③정렬에는 쓰지 않는다. ③는 원리적 상한이 없어서 이 검사가
+              안전장치가 아니라 고장 유발기가 된다(상수 정의부 주석 참조).
+            """
+            if abs(deg) <= SCENE_CLAMP_TURN_DEG:
+                return True
+            self._dlog(f"[AUTO] ⛔ 회전량 {deg:+.0f}°가 한계 "
+                       f"±{SCENE_CLAMP_TURN_DEG:.0f}°를 넘음 — 실행 거부. "
+                       "부호·정규화 계산을 확인하라")
+            return False
+
+        for it in range(1, SCENE_MAX_ITERS + 1):
+            res = self._scene_residual(tgt)
+            if res is None:
+                self._dlog(f"[AUTO] 씬{n} 반복{it} — 자세 조회 실패, 중단")
+                return
+            fwd_cm, lat_cm, rot_deg, (px, py, pyaw) = res
+            self._scene_step_log(n, "fwd", res, fwd_cm, base_fwd)
+            dx, dy = tgt["x"] - px, tgt["y"] - py
+            dist = math.hypot(dx, dy)
+            if dist <= POSE_DONE_M and abs(rot_deg) <= POSE_DONE_DEG:
+                self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓ ({it}회) — "
+                           f"잔여 dist={dist:.3f}m yaw={rot_deg:+.1f}° 횡={lat_cm:+.1f}cm")
+                return
+
+            bearing = math.degrees(math.atan2(dy, dx))
+            turn_fwd = _wrap(bearing - pyaw)
+            turn_rev = _wrap(bearing + 180.0 - pyaw)
+            fwd_plan = abs(turn_fwd) <= abs(turn_rev)
+            turn = turn_fwd if fwd_plan else turn_rev
+            why = "전진안 선택" if fwd_plan else "후진안 선택"
+
+            if dist > POSE_SKIP_M:
+                # ① 목표점 방위로 정렬 — 목표 방위는 제자리 회전 중에도 거의 안 변하지만
+                #    매 스텝 다시 계산해 회전 오차를 닫는다.
+                self._dlog(f"[AUTO] 씬{n} 반복{it} ①정렬 turn={turn:+.1f}° ({why}) "
+                           f"/ dist={dist:.3f}m")
+
+                def _aim_residual():
+                    r = self._scene_residual(tgt)
+                    if r is None:
+                        return None
+                    _f, _l, _r, (cx, cy, cyaw) = r
+                    b = math.degrees(math.atan2(tgt["y"] - cy, tgt["x"] - cx))
+                    return _wrap((b if fwd_plan else b + 180.0) - cyaw)
+
+                st = self._scene_leg(n, it, "①정렬", "rot", _aim_residual, _turn_clamp)
+                if st == "abort":
+                    return
+                if st == "stop":
+                    break
+
+                # ② 직선 주행 — 정렬을 마쳤으므로 헤딩 방향 성분이 곧 주행량이다.
+                #    후진안이면 이 값이 음수로 나와 그대로 후진한다.
+                d0 = self._scene_residual(tgt)
+                drive_cm = d0[0] if d0 else 0.0
+                self._dlog(f"[AUTO] 씬{n} 반복{it} ②주행 {drive_cm/100.0:+.3f}m "
+                           + ("(후진)" if drive_cm < 0 else "(전진)"))
+                st = self._scene_leg(n, it, "②주행", "fwd",
+                                     lambda: (self._scene_residual(tgt) or [None])[0],
+                                     _drive_clamp)
+                if st == "abort":
+                    return
+                if st == "stop":
+                    break
+
+            # ③ 목표 자세로 정렬
+            r3 = self._scene_residual(tgt)
+            if r3 is None:
+                self._dlog(f"[AUTO] 씬{n} 반복{it} ③정렬 — 자세 조회 실패, 중단")
+                return
+            self._dlog(f"[AUTO] 씬{n} 반복{it} ③정렬 turn={r3[2]:+.1f}° / "
+                       f"잔여 dist={math.hypot(tgt['x']-r3[3][0], tgt['y']-r3[3][1]):.3f}m "
+                       f"yaw={r3[2]:+.1f}°")
+            if abs(r3[2]) > SCENE_TURN_WARN_DEG:
+                # 거부하지 않는다 — 알리기만 한다. 여기서 멈추면 위치는 맞고 자세만
+                # 틀린 채로 서서 다음 씬의 방위 계산이 틀어진다.
+                self._dlog(f"[AUTO] ⚠ ③정렬 회전이 큼 ({r3[2]:+.0f}°) — "
+                           "출발 자세가 많이 어긋났을 수 있다")
+            st = self._scene_leg(n, it, "③정렬", "rot",
+                                 lambda: (self._scene_residual(tgt) or [None, None, None])[2],
+                                 lambda _d: True)   # ③는 회전 클램프 없음
+            if st == "abort":
+                return
+            if st == "stop":
+                break
+
+        res = self._scene_residual(tgt)
+        if res is None:
+            self._dlog(f"[AUTO] {SCENES[n]} 안무 종료 — 최종 자세 확인 실패")
+            return
+        fwd_cm, lat_cm, rot_deg, (px, py, _y) = res
+        dist = math.hypot(tgt["x"] - px, tgt["y"] - py)
+        self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓ — 잔여 dist={dist:.3f}m "
+                   f"yaw={rot_deg:+.1f}° 횡={lat_cm:+.1f}cm 전진={fwd_cm:+.1f}cm")
 
     def _maybe_base_nudge(self, ex: float, dist):
         """좌우 픽셀 오차 → 안전 확인 후 베이스 소폭 전/후진 (별도 스레드)."""
