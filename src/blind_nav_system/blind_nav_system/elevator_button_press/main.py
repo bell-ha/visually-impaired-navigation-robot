@@ -1527,13 +1527,26 @@ SCENE_TURN_WARN_DEG = 100.0
 
 # 3단 go-to-pose 반복 상한 — 수렴하면 그 전에 끝난다.
 SCENE_MAX_ITERS = 4
-POSE_SKIP_M   = 0.02   # 남은 거리가 이 이하면 ①②를 건너뛴다(노이즈로 제자리 도는 것 방지)
-POSE_DONE_M   = 0.01   # 종료 조건: 거리
+# 남은 거리가 이 이하면 ①②를 건너뛰고 ③정렬만 한다.
+# 가까울수록 '목표점 방위'가 측위 잡음에 지배당한다 — AMCL 잡음 3cm면 d=0.16m에서
+# 방위가 ±11° 튀고, 그 방위로 재조준하면 제자리에서 크게 돈다.
+# (2026-09-04 실기: 반복1이 dist 16.5cm·yaw -1.8°로 거의 맞았는데, 반복2 ①정렬이
+#  +80.5° 회전을 명령해 진동까지 갔다. 0.02는 너무 작았다.)
+POSE_SKIP_M   = 0.20
+# 종료 조건: 거리. 1cm는 AMCL로 도달 불가능한 값이라 불필요한 반복만 유발한다.
+# Nav2의 xy_goal_tolerance도 0.05다.
+POSE_DONE_M   = 0.05
 POSE_DONE_DEG = 3.0    # 종료 조건: 자세각
 
 # 각 구간의 허용오차 — _scene_leg 가 이 값으로 수렴을 판정한다.
 SCENE_TOL_FWD_CM  = 1.0
-SCENE_TOL_ROT_DEG = 3.0
+# 2026-09-04: 3.0 → 5.0. AMCL yaw 잡음이 실측 1.6°이고 회전 슬립까지 겹치면 3°는
+# 빠듯하다. 문 감지는 전방 ±10°라 5°면 충분하다.
+SCENE_TOL_ROT_DEG = 5.0
+# 한 구간(_scene_leg 1회)에서 허용하는 최대 스텝. 진동 감지가 '개선 없을 때만'
+# 세도록 바뀌어서, 아주 느리게 개선되는 경우 무한히 돌 여지가 생겼다 — 그 상한.
+# 한 스텝이 최대 50cm/90°이므로 30회면 어떤 정상 구간보다 넉넉하다.
+SCENE_LEG_MAX_STEPS = 30
 
 
 def _load_scene_targets():
@@ -2950,7 +2963,14 @@ class ElevatorTracker(Node):
         with state_lock:
             done = (state.get("scene_acc") or {}).get(key, 0.0)
         flips, last_sign = 0, (1 if remain > 0 else -1)
+        best = abs(remain)      # 지금까지 도달한 최소 잔여 — '개선 중인가' 판정용
+        steps = 0               # 스텝 상한 (개선이 계속되면 flips가 안 쌓이므로 별도 상한)
         while abs(remain) >= tol:
+            steps += 1
+            if steps > SCENE_LEG_MAX_STEPS:
+                self._dlog(f"[AUTO] 잔여 {remain:+.0f}{u} — 스텝 상한"
+                           f"({SCENE_LEG_MAX_STEPS}회) 도달, 이 정도로 마침")
+                return "stop"
             if getattr(self, "_step_abort", False):
                 self._dlog(f"[AUTO] 중단됨 — 패드 보정 후 같은 단계를 다시 누르면 "
                            f"잔여({abs(remain):.0f}{u})부터 이어감")
@@ -2973,14 +2993,22 @@ class ElevatorTracker(Node):
                 return "abort"
             if not clamp_fn(remain):              # 이동 중 측위가 튄 경우
                 return "abort"
-            # 진동 감지 (기존과 같은 기준): 잔여 부호가 2번 뒤집히면 그만
+            # 진동 감지 — 부호가 뒤집혀도 '잔여가 계속 줄고 있으면' 정상 수렴이다.
+            # 바퀴 슬립 때문에 회전은 한 번에 안 맞고 넘었다 되돌아오며 좁혀지는 게
+            # 정상 거동인데, 부호 뒤집힘만 세면 그걸 고장으로 오판한다.
+            # (2026-09-04 실기: -63°→-35°→-13°로 수렴 중이었는데 flips>=2로 중단,
+            #  yaw -12.5° 미달로 끝났다.) 그래서 '개선이 없을 때만' 카운트한다.
             s_ = 1 if remain > 0 else -1
             if abs(remain) >= tol and s_ != last_sign:
-                flips += 1
-                if flips >= 2:
-                    self._dlog(f"[AUTO] 잔여 {remain:+.0f}{u} — 진동 감지, "
-                               "이 정도로 마침 (필요하면 패드로 미세 보정)")
-                    return "stop"
+                if abs(remain) < best * 0.8:      # 최소 잔여 대비 20% 이상 줄었다
+                    flips = 0                     # 진전이 있으면 카운터를 되돌린다
+                else:
+                    flips += 1
+                    if flips >= 2:
+                        self._dlog(f"[AUTO] 잔여 {remain:+.0f}{u} — 진동 감지(개선 없음), "
+                                   "이 정도로 마침 (필요하면 패드로 미세 보정)")
+                        return "stop"
+            best = min(best, abs(remain))
             last_sign = s_
         return "done"
 
@@ -3059,6 +3087,10 @@ class ElevatorTracker(Node):
             turn = turn_fwd if fwd_plan else turn_rev
             why = "전진안 선택" if fwd_plan else "후진안 선택"
 
+            # 진동으로 ①②가 중단돼도 ③정렬(제자리 회전)은 반드시 거친다. ③는 위치를
+            # 안 건드리므로 건너뛸 이유가 없고, 건너뛰면 자세가 틀어진 채로 "완료"가
+            # 찍힌다(2026-09-04 실기: 진동 break → ③ 삭제 → yaw -97.3°로 종료).
+            oscillated = False
             if dist > POSE_SKIP_M:
                 # ① 목표점 방위로 정렬 — 목표 방위는 제자리 회전 중에도 거의 안 변하지만
                 #    매 스텝 다시 계산해 회전 오차를 닫는다.
@@ -3073,25 +3105,28 @@ class ElevatorTracker(Node):
                     b = math.degrees(math.atan2(tgt["y"] - cy, tgt["x"] - cx))
                     return _wrap((b if fwd_plan else b + 180.0) - cyaw)
 
+                # ①의 abort(조준 자체 실패)는 즉시 반환한다 — 조준이 안 되면 ②③도
+                # 의미가 없다. stop(진동)만 흐름을 바꿔 ③로 넘긴다.
                 st = self._scene_leg(n, it, "①정렬", "rot", _aim_residual, _turn_clamp)
                 if st == "abort":
                     return
                 if st == "stop":
-                    break
+                    oscillated = True
 
-                # ② 직선 주행 — 정렬을 마쳤으므로 헤딩 방향 성분이 곧 주행량이다.
-                #    후진안이면 이 값이 음수로 나와 그대로 후진한다.
-                d0 = self._scene_residual(tgt)
-                drive_cm = d0[0] if d0 else 0.0
-                self._dlog(f"[AUTO] 씬{n} 반복{it} ②주행 {drive_cm/100.0:+.3f}m "
-                           + ("(후진)" if drive_cm < 0 else "(전진)"))
-                st = self._scene_leg(n, it, "②주행", "fwd",
-                                     lambda: (self._scene_residual(tgt) or [None])[0],
-                                     _drive_clamp)
-                if st == "abort":
-                    return
-                if st == "stop":
-                    break
+                if not oscillated:
+                    # ② 직선 주행 — 정렬을 마쳤으므로 헤딩 방향 성분이 곧 주행량이다.
+                    #    후진안이면 이 값이 음수로 나와 그대로 후진한다.
+                    d0 = self._scene_residual(tgt)
+                    drive_cm = d0[0] if d0 else 0.0
+                    self._dlog(f"[AUTO] 씬{n} 반복{it} ②주행 {drive_cm/100.0:+.3f}m "
+                               + ("(후진)" if drive_cm < 0 else "(전진)"))
+                    st = self._scene_leg(n, it, "②주행", "fwd",
+                                         lambda: (self._scene_residual(tgt) or [None])[0],
+                                         _drive_clamp)
+                    if st == "abort":
+                        return
+                    if st == "stop":
+                        oscillated = True
 
             # ③ 목표 자세로 정렬
             r3 = self._scene_residual(tgt)
@@ -3111,7 +3146,7 @@ class ElevatorTracker(Node):
                                  lambda _d: True)   # ③는 회전 클램프 없음
             if st == "abort":
                 return
-            if st == "stop":
+            if st == "stop" or oscillated:
                 break
 
         res = self._scene_residual(tgt)
@@ -3120,8 +3155,11 @@ class ElevatorTracker(Node):
             return
         fwd_cm, lat_cm, rot_deg, (px, py, _y) = res
         dist = math.hypot(tgt["x"] - px, tgt["y"] - py)
-        self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓ — 잔여 dist={dist:.3f}m "
-                   f"yaw={rot_deg:+.1f}° 횡={lat_cm:+.1f}cm 전진={fwd_cm:+.1f}cm")
+        # 반복 상한까지 갔는데 종료조건 미달이면 ✓를 찍지 않는다 — 전송성공≠동작완료.
+        ok = (dist <= POSE_DONE_M and abs(rot_deg) <= POSE_DONE_DEG)
+        self._dlog(f"[AUTO] {SCENES[n]} 안무 " + ("완료 ✓" if ok else "⚠ 미달")
+                   + f" — 잔여 dist={dist:.3f}m yaw={rot_deg:+.1f}° "
+                     f"횡={lat_cm:+.1f}cm 전진={fwd_cm:+.1f}cm")
 
     def _maybe_base_nudge(self, ex: float, dist):
         """좌우 픽셀 오차 → 안전 확인 후 베이스 소폭 전/후진 (별도 스레드)."""
