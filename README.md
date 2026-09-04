@@ -15,8 +15,24 @@
 </div>
 
 <div align="center">
-<img src="src/blind_nav_system/blind_nav_system/snapshots/20260902T182619_%EC%97%98%EB%A6%AC%EB%B2%A0%EC%9D%B4%ED%84%B0%EB%B2%84%ED%8A%BC%EC%88%98%EC%A7%91_1/grip_color.jpg" width="620"/>
-<br><sub>엘리베이터 캐빈 안. 그리퍼 카메라 시점에서 층 버튼 패널을 인식하는 중이다 (2026-09-02 실제 운행 기록)</sub>
+<img src="docs/images/elevator-align.jpg" width="620"/>
+<br><sub>엘리베이터 캐빈 안, 그리퍼 카메라 시점. 버튼마다 라벨과 신뢰도를 붙이고 목표 버튼(0.27 m)에 정렬을 마친 상태다.<br>글자를 읽지 못한 버튼은 <code>~?</code>로 표시하고 배치 패턴으로만 추정한다</sub>
+</div>
+
+<div align="center">
+
+### 데모 영상
+
+<a href="https://www.youtube.com/watch?v=3vwIzmuHD_s">
+<img src="https://img.youtube.com/vi/3vwIzmuHD_s/maxresdefault.jpg" width="400"/>
+</a>
+<a href="https://www.youtube.com/watch?v=SAGndz1JyPY">
+<img src="https://img.youtube.com/vi/SAGndz1JyPY/maxresdefault.jpg" width="400"/>
+</a>
+
+<sub>왼쪽 — **1층 출발 → 엘리베이터 자율 탑승 → 5층 504호 도착** 전 구간 (정상 시나리오 1회)<br>
+오른쪽 — ITRC 인재양성대전(코엑스) 시연 &nbsp;·&nbsp; 이미지를 누르면 영상이 열린다</sub>
+
 </div>
 
 ---
@@ -117,6 +133,18 @@ flowchart TB
 ```
 
 주행 스택은 Nav2를 사용하되, **사람 회피 로직을 위해 fork(`bell-ha/human-nav`)를 두고 `nav2_params_human.yaml`로 파라미터를 분리**했다. colcon 패키지가 아니라 `python3` 직접 실행 방식이다.
+
+### 바퀴 제어권은 한 번에 한 곳만 갖는다
+
+여정을 6단계로 쪼개고, **단계마다 바퀴를 움직일 수 있는 주체를 하나로 못박았다.**
+
+<div align="center">
+<img src="docs/images/journey-states.png" width="620"/>
+</div>
+
+주행 구간에서는 Nav2가, 엘리베이터 캐빈 안에서는 버튼 조작 앱이 제어권을 갖는다. 나머지 구간은 **잠금**이다.
+
+이렇게 나눈 이유는 통합 과정에서 겪은 문제 때문이다. 엘리베이터 앱이 팔을 뻗어 버튼을 누르는 동안 Nav2가 아직 살아 있으면, **두 주체가 동시에 로봇을 움직이려 든다.** 사람이 손잡이를 잡고 뒤에 서 있는 상태에서 이런 경합이 나면 그대로 물리 사고다. 그래서 기능을 더 붙이기 전에 제어권부터 배타적으로 만들었다.
 
 ---
 
