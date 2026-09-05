@@ -60,7 +60,7 @@
 |---|:---:|:---:|:---:|
 | Schulze 2025, *Front. Robot. AI* | ✅ | ❌ | ✅ |
 | Takagi 2025 — AI Suitcase (IBM·CMU) | 부분 | ✅ | ❌ |
-| Cai et al. — *Navigation beyond Wayfinding* | ✅ | ✅ | ❌ |
+| Cai et al. 2026, *HRI* — *Navigation beyond Wayfinding* | ✅ | ✅ | ❌ |
 | Ozdamar 2026, *IJRR* | ❌ | ✅ | ❌ |
 | Stals 2025, *HRI* | ❌ | ✅ | ❌ |
 | **이 프로젝트** | ✅ | ✅ | ✅ |
@@ -253,9 +253,21 @@ Nav2는 로봇만 보고 경로를 짠다. **로봇이 지나갈 수 있는 틈�
 - **올라가는 것만 됐다** — 호출 버튼 ▲/▼ 중 하나만 인식됐다
 - **탑승 실패가 잦았다** — 문 열린 뒤 전진 185 cm를 닫히기 전에 못 끝냈다
 
+### 5-4. 시스템 구성
 
+<div align="center">
+<img src="docs/figures/fig5-architecture.svg" width="960"/>
+</div>
 
----
+한 프로세스에 몰아넣지 않았다. **죽으면 안 되는 것부터 떼어냈다.**
+
+| 프로세스 | 왜 분리했나 |
+|---|---|
+| `people_tracker` · 엘리베이터 버튼 앱 | OCR이 7코어를 쓴다. 주행과 같이 돌면 센서가 밀린다 |
+| `robot_diag_nav` (블랙박스) | 진단 도구가 진단 대상과 함께 죽으면 안 된다 (5-2 참고) |
+| `vision_assistant` | 요청이 없을 때는 아무것도 하지 않아야 한다 |
+
+ROS2 노드 35개 · Flask 서버 2개(`:8080` 관제 · `:5000` 버튼 앱) · 층·장소별 지도 8종.
 
 ---
 
