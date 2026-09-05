@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 700" width="1020" height="700" font-family="-apple-system,'Helvetica Neue',Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif">
+<rect width="1020" height="700" fill="#ffffff"/>
+<rect x="56" y="150" width="380" height="380" rx="6" fill="#fbfbfb" stroke="#e4e4e4"/>
+<rect x="168" y="196" width="244" height="14" fill="#dcdcdc" stroke="#9c9c9c" stroke-width="1"/>
+<text x="297" y="186" font-size="11.5" fill="#aaa" font-weight="400">엘리베이터 버튼 패널</text>
+<path d="M138,190 L130,190 L130,340 L138,340" fill="none" stroke="#8c8c8c" stroke-width="1.2"/>
+<text x="79" y="195" font-size="11.5" fill="#777" font-weight="400">0.887 m</text>
+<text x="79" y="345" font-size="11.5" fill="#777" font-weight="400">0.387 m</text>
+<text x="57" y="270" font-size="11.5" fill="#555" font-weight="600">팔 도달 범위</text>
+<circle cx="312" cy="228" r="11" fill="#1a1a1a"/>
+<line x1="236" y1="244" x2="236" y2="452" stroke="#c4c4c4" stroke-width="1" stroke-dasharray="4 4"/>
+<rect x="191" y="456" width="90" height="48" rx="4" fill="#f0f0f0" stroke="#1a1a1a" stroke-width="1.6"/>
+<text x="224" y="485" font-size="12" fill="#1a1a1a" font-weight="400">로봇</text>
+<line x1="236" y1="456" x2="236" y2="228" stroke="#1a1a1a" stroke-width="10" stroke-linecap="round"/>
+<g stroke="#1a1a1a" stroke-width="2.8"><line x1="226" y1="218" x2="246" y2="238"/><line x1="246" y1="218" x2="226" y2="238"/></g>
+<line x1="243" y1="274" x2="305" y2="274" stroke="#1a1a1a" stroke-width="1.2"/>
+<polygon points="236,274 243,270 243,278" fill="#1a1a1a"/>
+<polygon points="312,274 305,270 305,278" fill="#1a1a1a"/>
+<text x="251" y="298" font-size="12.5" fill="#1a1a1a" font-weight="600">14.7 cm</text>
+<text x="332" y="233" font-size="12.5" fill="#1a1a1a" font-weight="600">목표 버튼</text>
+<text x="136" y="562" font-size="13.5" fill="#1a1a1a" font-weight="600">(a)  최대로 뻗어도 좌우로 벗어난다</text>
+<rect x="584" y="150" width="380" height="380" rx="6" fill="#fbfbfb" stroke="#e4e4e4"/>
+<rect x="696" y="196" width="244" height="14" fill="#dcdcdc" stroke="#9c9c9c" stroke-width="1"/>
+<text x="825" y="186" font-size="11.5" fill="#aaa" font-weight="400">엘리베이터 버튼 패널</text>
+<path d="M666,190 L658,190 L658,340 L666,340" fill="none" stroke="#8c8c8c" stroke-width="1.2"/>
+<text x="607" y="195" font-size="11.5" fill="#777" font-weight="400">0.887 m</text>
+<text x="607" y="345" font-size="11.5" fill="#777" font-weight="400">0.387 m</text>
+<text x="585" y="270" font-size="11.5" fill="#555" font-weight="600">팔 도달 범위</text>
+<circle cx="840" cy="228" r="11" fill="#1a1a1a"/>
+<line x1="840" y1="244" x2="840" y2="452" stroke="#c4c4c4" stroke-width="1" stroke-dasharray="4 4"/>
+<rect x="795" y="456" width="90" height="48" rx="4" fill="#f0f0f0" stroke="#1a1a1a" stroke-width="1.6"/>
+<text x="828" y="485" font-size="12" fill="#1a1a1a" font-weight="400">로봇</text>
+<line x1="840" y1="456" x2="840" y2="228" stroke="#1a1a1a" stroke-width="10" stroke-linecap="round"/>
+<rect x="719" y="456" width="90" height="48" rx="4" fill="none" stroke="#bbb" stroke-width="1.3" stroke-dasharray="5 4"/>
+<text x="752" y="485" font-size="11.5" fill="#aaa" font-weight="400">이전</text>
+<line x1="771" y1="524" x2="833" y2="524" stroke="#1a1a1a" stroke-width="1.2"/>
+<polygon points="840,524 833,520 833,528" fill="#1a1a1a"/>
+<polygon points="764,524 771,520 771,528" fill="#1a1a1a"/>
+<text x="854" y="528" font-size="12.5" fill="#1a1a1a" font-weight="600">14.7 cm 이동</text>
+<text x="860" y="233" font-size="12.5" fill="#1a1a1a" font-weight="600">닿는다</text>
+<text x="687" y="562" font-size="13.5" fill="#1a1a1a" font-weight="600">(b)  베이스를 옮겨야 닿는다</text>
+<line x1="56" y1="600" x2="964" y2="600" stroke="#dcdcdc"/>
+<text x="56" y="626" font-size="12.5" fill="#333" font-weight="400">팔은 <tspan font-weight="600">base_link의 x축(좌우)을 바꾸지 못한다.</tspan> 전후로만 늘어나므로 닿을 수 있는 위치는 면이 아니라 선분 하나다. (✕ = 팔이 닿는 지점)</text>
+<text x="56" y="648" font-size="12.5" fill="#777" font-weight="400">스냅샷 24세트 전수 검산 — 그리퍼 카메라 <tspan font-family="ui-monospace,Menlo,monospace">cam_x</tspan>가 24개 전부 소수 4자리까지 동일했다.</text>
+<text x="303" y="680" font-size="13" fill="#1a1a1a" font-weight="400">Fig. 3   도달 한계 — 얼마나 옮길지 알려면 버튼의 3D 좌표가 필요하다</text>
+</svg>

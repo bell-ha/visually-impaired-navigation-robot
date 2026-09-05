@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 600" width="1020" height="600" font-family="-apple-system,'Helvetica Neue',Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif">
+<rect width="1020" height="600" fill="#ffffff"/>
+<rect x="520.0" y="80" width="310.0" height="180.0" fill="#f4f4f4"/>
+<rect x="210" y="80" width="620" height="360" fill="none" stroke="#1a1a1a" stroke-width="1.4"/>
+<line x1="520.0" y1="80" x2="520.0" y2="440" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="5 4"/>
+<line x1="210" y1="260.0" x2="830" y2="260.0" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="5 4"/>
+<text x="279" y="106" font-size="13" fill="#777" font-weight="400">안내는 하되 조작은 사용자 몫</text>
+<text x="643" y="106" font-size="15" fill="#1a1a1a" font-weight="700">비어 있다</text>
+<text x="598" y="424" font-size="13" fill="#777" font-weight="400">조작은 하되 안내가 아니다</text>
+<circle cx="346" cy="130" r="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="359" y="135.39999999999998" font-size="12.5" fill="#1a1a1a" font-weight="400">Cai et al.</text>
+<circle cx="322" cy="174" r="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="335" y="178.60000000000002" font-size="12.5" fill="#1a1a1a" font-weight="400">AI Suitcase</text>
+<circle cx="408" cy="224" r="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="421" y="229.0" font-size="12.5" fill="#1a1a1a" font-weight="400">Ozdamar 2026</text>
+<circle cx="284" cy="231" r="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="297" y="236.20000000000002" font-size="12.5" fill="#1a1a1a" font-weight="400">Stals 2025</text>
+<circle cx="706" cy="382" r="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.5"/>
+<text x="612" y="387.4" font-size="12.5" fill="#1a1a1a" font-weight="400">Schulze 2025</text>
+<circle cx="731" cy="145" r="7" fill="#1a1a1a" stroke="#1a1a1a" stroke-width="2"/>
+<text x="652" y="149.8" font-size="12.5" fill="#1a1a1a" font-weight="700">이 프로젝트</text>
+<line x1="210" y1="466" x2="822" y2="466" stroke="#666" stroke-width="1"/>
+<polygon points="830,466 822,462 822,470" fill="#666"/>
+<text x="210" y="488" font-size="12.5" fill="#555" font-weight="400">사용자가 누른다</text>
+<text x="751" y="488" font-size="12.5" fill="#555" font-weight="400">로봇이 누른다</text>
+<line x1="184" y1="440" x2="184" y2="88" stroke="#666" stroke-width="1"/>
+<polygon points="184,80 180,88 188,88" fill="#666"/>
+<text x="170" y="440" font-size="12.5" fill="#555" transform="rotate(-90 170 440)">일반 사용자</text>
+<text x="170" y="176" font-size="12.5" fill="#555" transform="rotate(-90 170 176)">시각장애인</text>
+<line x1="60" y1="512" x2="960" y2="512" stroke="#d9d9d9" stroke-width="1"/>
+<text x="60" y="538" font-size="12.5" fill="#333" font-weight="400">층간 이동을 하는 로봇은 있다. 시각장애인을 안내하는 로봇도 있다. 둘이 만나는 지점이 비어 있다.</text>
+<text x="435" y="576" font-size="13" fill="#1a1a1a" font-weight="400">Fig. 4   선행 연구의 위치</text>
+</svg>
