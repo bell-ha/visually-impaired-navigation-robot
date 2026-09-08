@@ -1573,6 +1573,74 @@ def _elev_wait_exit_done():
         time.sleep(_EXIT_POLL_SEC)
 
 
+# ②④ 자동 안무 완료 판정용 — ⑥ 하차의 _elev_wait_exit_done 과 같은 자리의 함수다.
+# 절대 상한. 좌표 안무는 최대 SCENE_MAX_ITERS(4)회 반복이고 한 회가 ①정렬·②주행·
+# ③정렬 3구간이다. ④ 탑승의 185cm는 50cm 스텝 4번이고 한 스텝 자체 타임아웃이 최악
+# 8.5s라(엘베앱 _manual_trans) 주행만 34s — 1회 ≈50s, 4회 ≈200s. 여기에 여유 40s.
+# 정상값은 20~40s다. 이 상한에 닿는 것 자체가 고장 신호다.
+_SCENE_MAX_SEC  = 240.0
+_SCENE_POLL_SEC = 0.4
+_SCENE_MISS_MAX = 2       # /status 무응답이 이만큼 연속되면 앱이 죽은 것으로 본다
+                          # (_EXIT_MISS_MAX 와 같은 근거 — 1회 표본으로 단정하지 않는다)
+
+def _elev_wait_scene_done(n, seq=None, timeout=None):
+    """씬 n 자동 안무가 끝날 때까지 대기. (사유, 결과dict) 반환.
+
+    사유: "done"=목표 도달 / "fail"=끝났지만 미달·중단(결과dict의 reason에 이유)
+          "timeout"=절대상한 / "cancel"=사용자 취소 / "noapp"=엘베앱 상태 조회 불가
+          "noanmu"=그 씬은 자동 안무가 없다(자세 전환만 — 기다릴 것이 없음)
+
+    /scene은 안무 스레드를 start한 뒤 즉시 ok를 돌려준다 — 접수이지 완료가 아니다
+    (_elev_wait_exit_done 과 같은 이유). 그래서 판정을 응답이 아니라 엘베앱이
+    /status에 남기는 실행 기록(scene_result)에서 읽는다.
+    2026-09-04 실기: 씬②가 잔여 yaw -97.3°로 끝났는데 그 사실이 로그에만 남고
+    대시보드까지 올라오는 길이 아예 없었다.
+
+    ※ 반드시 _elev_scene(n) 직후에 불러라. /scene 라우트가 응답을 돌려주기 전에
+      실행 기록을 '실행중'으로 세워 두므로, 그 직후라면 낡은 기록을 볼 수 없다.
+    seq: /scene 응답의 run_seq(실행번호). 넘기면 '내가 시킨 그 회차'만 인정하므로
+      낡은 기록을 자기 것으로 오독할 여지가 원천적으로 사라진다. 안 넘기면 씬번호로만
+      맞춰 보는데, 그때 오독이 가능한 경우가 둘 있다 — /scene POST 자체가 실패해
+      새 기록이 안 생겼을 때, 그리고 같은 씬 버튼을 연달아 눌러 '정지 토글'이 됐을 때
+      (둘 다 직전 회차 결과를 그대로 돌려준다). 배선할 때 seq를 넘기는 쪽이 맞다.
+    """
+    t0 = time.monotonic()
+    limit = _SCENE_MAX_SEC if timeout is None else timeout
+    miss = 0
+    while True:
+        if _AUTO["cancel"]:
+            return "cancel", None
+        st = _elev_status(timeout=1.0)
+        if st is None:
+            miss += 1
+            if miss >= _SCENE_MISS_MAX:
+                return "noapp", None
+        else:
+            miss = 0
+            res = st.get("scene_result") or {}
+            if seq is not None and res.get("seq") != seq:
+                return "noanmu", None      # 내가 시킨 회차가 아니다 = 안 떴다
+            if res.get("n") != n:
+                # 이 씬은 안무를 띄우지 않았다(SCENE_MOVES에 없는 ①③⑤ 자세 전환 씬).
+                # /scene 응답 시점에 이미 기록이 세워지므로 '아직 안 생김'은 아니다.
+                return "noanmu", None
+            if not res.get("running", True):
+                return ("done" if res.get("ok") else "fail"), res
+        if time.monotonic() - t0 >= limit:
+            return "timeout", None
+        time.sleep(_SCENE_POLL_SEC)
+
+
+def _scene_res_txt(res):
+    """실행 기록의 잔여값을 사람이 읽는 한 줄로. 좌표 목표가 없는 씬은 사유만."""
+    res = res or {}
+    if res.get("dist_m") is None:
+        return str(res.get("reason") or "")
+    return (f"{res.get('reason') or ''} — 잔여 위치 {res['dist_m']:.3f}m "
+            f"방향 {res['yaw_deg']:+.1f}° 횡 {res['lat_cm']:+.1f}cm")
+
+
+
 _EXIT_WHY = {"stall":   "후진이 멈췄습니다",
              "timeout": "제한 시간을 넘겼습니다",
              "cancel":  "취소되었습니다",

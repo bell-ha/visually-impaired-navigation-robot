@@ -343,6 +343,9 @@ state = {
     "place":        "hall", # 장소 모드: hall(홀, ▲▼만) / cab(차내, 숫자만) — 팔레트·prior 분기
     "scene":        None,   # 여정 단계 (0~5, SCENES 인덱스) — 조종 패드 티칭 구간 표시
     "scene_acc":    {"fwd_cm": 0.0, "rot_deg": 0.0},  # 현재 단계 누적 이동량 (티칭 기록)
+    "scene_result": None,   # 마지막 자동 안무의 실행 상태·결과 (_scene_run_begin/_end 참고)
+                            # — /scene 응답의 ok는 "명령 접수"라서 정렬 성공을 못 알린다.
+                            #   대시보드가 /status로 이걸 읽어 성공/실패를 판단한다.
     "scene_ts":     0.0,    # 현재 단계 시작 시각 — press 완료가 이 이후여야 다음 단계 해제
     "press_ok_ts":  0.0,    # 마지막 press ✅ 완료 시각
     "door_base":    None,   # ③ 문대기 진입 시점 전방 여유 (닫힌 문 기준선)
@@ -1281,6 +1284,7 @@ def status():
                    lock_shape=bool(s.get("lock_shape")),
                    dz=_dead_zone_px(s.get("target_dist")),
                    scene=s.get("scene"), scene_acc=s.get("scene_acc"),
+                   scene_result=s.get("scene_result"),  # 마지막 자동 안무 실행 상태·결과
                    authority=bool(s.get("authority", False)),
                    lease_expired=bool(s.get("lease_expired")),
                    camera_missing=(_n._camera_missing_check() if _n is not None else None),
@@ -1660,6 +1664,52 @@ def scene_teach():
     return jsonify(ok=True, n=n, target=tgt)
 
 
+# ───────── 자동 안무 실행 기록 (state["scene_result"]) ─────────
+# /scene은 안무 스레드를 start한 뒤 즉시 ok를 돌려준다 — 그 ok는 "명령 접수"지
+# "정렬 성공"이 아니다. 2026-09-04 실기에서 씬②가 yaw -97.3°로 끝났는데도 그
+# 사실이 대시보드까지 못 올라갔다. 그래서 안무의 시작·종료·잔여를 여기에 남긴다.
+_scene_run_seq = 0
+
+
+def _scene_run_begin(n):
+    """안무 시작 기록 — 실행중 표시 + 실행번호(seq) 발급.
+
+    seq를 /scene 응답에 실어 보내면, 대시보드가 '내가 방금 시킨 그 회차'의 결과만
+    읽는다. 없으면 직전 회차의 낡은 결과를 자기 것으로 오독한다.
+    """
+    global _scene_run_seq
+    with state_lock:
+        _scene_run_seq += 1
+        seq = _scene_run_seq
+        state["scene_result"] = {
+            "seq": seq, "n": n, "running": True,
+            "started": time.time(), "finished": None,
+            "ok": None, "reason": None,
+            "dist_m": None, "yaw_deg": None, "lat_cm": None, "fwd_cm": None,
+        }
+    return seq
+
+
+def _scene_run_end(seq, ok, reason, dist_m=None, yaw_deg=None,
+                   lat_cm=None, fwd_cm=None):
+    """안무 종료 기록. 잔여값은 좌표 목표가 있는 경로에서만 채워진다(없으면 None).
+
+    seq가 현재 회차와 다르면 무시한다 — 이전 회차 스레드가 늦게 끝나며 새 회차의
+    기록을 덮어쓰는 것을 막는다(_run_scene_moves 는 이전 스레드를 최대 3초만 기다린다).
+    dict를 통째로 바꿔 담는다 — /status 가 state를 얕은 복사로 읽어가므로,
+    제자리 수정하면 절반만 갱신된 상태가 응답에 실릴 수 있다.
+    """
+    if seq is None:
+        return
+    with state_lock:
+        r = state.get("scene_result")
+        if not r or r.get("seq") != seq:
+            return
+        state["scene_result"] = dict(
+            r, running=False, finished=time.time(), ok=bool(ok), reason=reason,
+            dist_m=dist_m, yaw_deg=yaw_deg, lat_cm=lat_cm, fwd_cm=fwd_cm)
+
+
 @app.route("/scene", methods=["POST"])
 def scene_set():
     """여정 단계 전환 — 이전 단계의 누적 이동량을 로그로 매듭짓고 카운터 리셋.
@@ -1748,9 +1798,14 @@ def scene_set():
     if node:
         node._step_abort = True
     # 자동 안무 재생 (②④⑥): 티칭값 − 누적 = 잔여를 자동 실행
+    # run_seq = 이번 안무의 실행번호. 안무를 실제로 띄웠을 때만 발급하므로,
+    # 받는 쪽은 None이면 "기다릴 안무 없음(자세 전환만 한 씬)"으로 읽으면 된다.
+    run_seq = None
     if node and n in SCENE_MOVES:
-        threading.Thread(target=node._run_scene_moves, args=(n,), daemon=True).start()
-    return jsonify(ok=True, scene=n)
+        run_seq = _scene_run_begin(n)
+        threading.Thread(target=node._run_scene_moves, args=(n, run_seq),
+                         daemon=True).start()
+    return jsonify(ok=True, scene=n, run_seq=run_seq)
 
 @app.route("/step_move", methods=["POST"])
 def step_move():
@@ -2856,37 +2911,56 @@ class ElevatorTracker(Node):
                    f" / 잔여 전진 {fwd_cm:+.1f}cm 횡 {lat_cm:+.1f}cm 회전 {rot_deg:+.1f}°"
                    f" / 기준 {ref_remain:+.1f}{u}")
 
-    def _run_scene_moves(self, n):
+    def _run_scene_moves(self, n, run_seq=None):
         """여정 단계 자동 안무 재생 (별도 스레드) — 티칭값에서 단계 누적을 뺀
         잔여만 실행. Esc(_step_abort)로 중단 → 패드 보정 → 같은 단계 재클릭 시
-        잔여부터 이어감. 가드 거부/비상정지로 진행이 멈추면 남은 양을 로그로 알림."""
+        잔여부터 이어감. 가드 거부/비상정지로 진행이 멈추면 남은 양을 로그로 알림.
+
+        run_seq 가 있으면 어떤 경로로 끝나든 state["scene_result"] 에 결과를 남긴다
+        (_scene_run_end). 여기가 유일한 종료 지점이라 예외로 죽어도 '실행중'이
+        영원히 켜진 채 남지 않는다 — 그러면 기다리는 쪽이 상한까지 헛돈다."""
         moves = SCENE_MOVES.get(n)
         if not moves:
+            _scene_run_end(run_seq, False, "안무 없음")
             return
         if not _authority_ok():
             self._dlog("[AUTO] ⛔ 제어권 없음 — 자동 안무 생략 (대시보드에서 부여 필요)")
+            _scene_run_end(run_seq, False, "제어권 없음")
             return
         # 이전 자동 안무 스레드가 있으면 종료를 기다림 (중복 주행 방지)
         t0 = time.time()
         while getattr(self, "_auto_busy", False) and time.time() - t0 < 3.0:
             time.sleep(0.05)
         self._auto_busy = True
+        res = None
         try:
             # 이동 자세 goal(그리퍼 스윙)이 끝날 때까지 잠깐 대기 후 주행
             t0 = time.time()
             while not self._goal_done and time.time() - t0 < 5.0:
                 time.sleep(0.1)
             self._step_abort = False
-            self._run_scene_moves_inner(n, moves)
+            res = self._run_scene_moves_inner(n, moves)
+        except Exception as e:
+            self._dlog(f"[AUTO] ⛔ 씬{n} 안무 예외 — {e}")
+            res = {"ok": False, "reason": f"예외: {e}"}
         finally:
             self._auto_busy = False
+            r = res or {"ok": False, "reason": "결과 없음"}
+            _scene_run_end(run_seq, r.get("ok"), r.get("reason"),
+                           r.get("dist_m"), r.get("yaw_deg"),
+                           r.get("lat_cm"), r.get("fwd_cm"))
 
     def _run_scene_moves_inner(self, n, moves):
         """좌표 목표가 있으면 3단 go-to-pose, 없으면 기존 경로.
 
-        아래 '기존 경로' 부분은 2026-09-04 수정 전(HEAD) 본문을 한 글자도 바꾸지 않고
-        그대로 둔 것이다 — 목표가 없는 씬(⑥하차 등)의 동작을 보존하기 위해서다.
+        반환: {"ok", "reason", ...} — _run_scene_moves 가 그대로 실행 기록에 옮긴다.
+
+        아래 '기존 경로' 부분은 2026-09-04 수정 전(HEAD) 본문이다. 2026-09-07에
+        종료 지점 3곳의 return 에 결과 dict를 실은 것 말고는 손대지 않았다 — 반환값은
+        원래 아무도 안 읽었으므로 동작은 그대로다(목표가 없는 씬 ⑥하차 등 보존).
         좌표 로직은 _run_scene_gotopose 로 완전히 분리해 두 경로가 섞이지 않게 했다.
+        ※ 이 경로는 잔여 좌표(dist/yaw)를 낼 수 없다 — 좌표 목표가 없어서다.
+          결과에는 ok와 사유만 담기고 잔여값은 None으로 남는다.
         """
         tgt = _scene_targets.get(str(n))
         if tgt is None:
@@ -2918,7 +2992,7 @@ class ElevatorTracker(Node):
                 if getattr(self, "_step_abort", False):
                     self._dlog("[AUTO] 중단됨 — 패드 보정 후 같은 단계를 다시 누르면 "
                                f"잔여({abs(remain):.0f}{'cm' if kind == 'fwd' else '°'})부터 이어감")
-                    return
+                    return {"ok": False, "reason": "중단(Esc·단계전환)"}
                 if kind == "fwd":
                     # 50cm 단위(클램프 최대) — 25cm 쪼개기는 정지·재출발 오버헤드만
                     # 만들었음. 이동 중 26cm 비상정지 감시는 스텝 크기와 무관하게 연속.
@@ -2933,7 +3007,7 @@ class ElevatorTracker(Node):
                     self._dlog(f"[AUTO] 진행 불가 (가드/장애물) — 잔여 "
                                f"{abs(target - new_done):.0f}{'cm' if kind == 'fwd' else '°'}. "
                                "패드로 상황 정리 후 단계 재클릭")
-                    return
+                    return {"ok": False, "reason": "진행 불가(가드·장애물)"}
                 done = new_done
                 remain = target - done
                 # 진동 감지: 잔여 부호가 2번 뒤집히면 (오버슛↔보정 왕복) 그만 —
@@ -2949,6 +3023,10 @@ class ElevatorTracker(Node):
                         break
                 last_sign = s_
         self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓")
+        # ※ 이 경로는 진동 감지로 break 한 경우도 여기로 내려와 ✓를 찍는다(기존 동작).
+        #   좌표 목표가 없어 '얼마나 남았나'를 잴 수단이 없으므로 판정을 바꾸지 않고
+        #   로그와 같은 값을 그대로 실어 보낸다.
+        return {"ok": True, "reason": "완료(기존 경로)"}
 
     def _scene_leg(self, n, it, label, kind, residual_fn, clamp_fn):
         """한 구간(회전 또는 주행)을 잔여가 허용오차에 들 때까지 실행.
@@ -3078,11 +3156,28 @@ class ElevatorTracker(Node):
                        "부호·정규화 계산을 확인하라")
             return False
 
+        def _result(ok, reason, res=None):
+            """실행 기록(state["scene_result"])에 실을 결과.
+
+            어느 지점에서 끝났든 '지금 어디에 서 있나'를 같이 담는다 — 실패 통보에서
+            정작 알아야 할 것이 그것이라서다(2026-09-04: yaw -97.3°가 로그에만 남고
+            아무한테도 전달되지 않았다). 잔여를 못 재면 ok·사유만 담는다.
+            """
+            if res is None:
+                res = self._scene_residual(tgt)
+            if res is None:
+                return {"ok": bool(ok), "reason": reason}
+            f_cm, l_cm, r_deg, (cx, cy, _c) = res
+            return {"ok": bool(ok), "reason": reason,
+                    "dist_m": round(math.hypot(tgt["x"] - cx, tgt["y"] - cy), 3),
+                    "yaw_deg": round(r_deg, 1),
+                    "lat_cm": round(l_cm, 1), "fwd_cm": round(f_cm, 1)}
+
         for it in range(1, SCENE_MAX_ITERS + 1):
             res = self._scene_residual(tgt)
             if res is None:
                 self._dlog(f"[AUTO] 씬{n} 반복{it} — 자세 조회 실패, 중단")
-                return
+                return {"ok": False, "reason": "자세 조회 실패"}
             fwd_cm, lat_cm, rot_deg, (px, py, pyaw) = res
             self._scene_step_log(n, "fwd", res, fwd_cm, base_fwd)
             dx, dy = tgt["x"] - px, tgt["y"] - py
@@ -3090,7 +3185,7 @@ class ElevatorTracker(Node):
             if dist <= POSE_DONE_M and abs(rot_deg) <= POSE_DONE_DEG:
                 self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓ ({it}회) — "
                            f"잔여 dist={dist:.3f}m yaw={rot_deg:+.1f}° 횡={lat_cm:+.1f}cm")
-                return
+                return _result(True, "완료", res)
 
             bearing = math.degrees(math.atan2(dy, dx))
             turn_fwd = _wrap(bearing - pyaw)
@@ -3121,7 +3216,7 @@ class ElevatorTracker(Node):
                 # 의미가 없다. stop(진동)만 흐름을 바꿔 ③로 넘긴다.
                 st = self._scene_leg(n, it, "①정렬", "rot", _aim_residual, _turn_clamp)
                 if st == "abort":
-                    return
+                    return _result(False, "①정렬 중단")
                 if st == "stop":
                     oscillated = True
 
@@ -3136,7 +3231,7 @@ class ElevatorTracker(Node):
                                          lambda: (self._scene_residual(tgt) or [None])[0],
                                          _drive_clamp)
                     if st == "abort":
-                        return
+                        return _result(False, "②주행 중단")
                     if st == "stop":
                         oscillated = True
 
@@ -3144,7 +3239,7 @@ class ElevatorTracker(Node):
             r3 = self._scene_residual(tgt)
             if r3 is None:
                 self._dlog(f"[AUTO] 씬{n} 반복{it} ③정렬 — 자세 조회 실패, 중단")
-                return
+                return {"ok": False, "reason": "자세 조회 실패(③정렬 전)"}
             self._dlog(f"[AUTO] 씬{n} 반복{it} ③정렬 turn={r3[2]:+.1f}° / "
                        f"잔여 dist={math.hypot(tgt['x']-r3[3][0], tgt['y']-r3[3][1]):.3f}m "
                        f"yaw={r3[2]:+.1f}°")
@@ -3157,14 +3252,14 @@ class ElevatorTracker(Node):
                                  lambda: (self._scene_residual(tgt) or [None, None, None])[2],
                                  lambda _d: True)   # ③는 회전 클램프 없음
             if st == "abort":
-                return
+                return _result(False, "③정렬 중단")
             if st == "stop" or oscillated:
                 break
 
         res = self._scene_residual(tgt)
         if res is None:
             self._dlog(f"[AUTO] {SCENES[n]} 안무 종료 — 최종 자세 확인 실패")
-            return
+            return {"ok": False, "reason": "최종 자세 확인 실패"}
         fwd_cm, lat_cm, rot_deg, (px, py, _y) = res
         dist = math.hypot(tgt["x"] - px, tgt["y"] - py)
         # 반복 상한까지 갔는데 종료조건 미달이면 ✓를 찍지 않는다 — 전송성공≠동작완료.
@@ -3172,6 +3267,7 @@ class ElevatorTracker(Node):
         self._dlog(f"[AUTO] {SCENES[n]} 안무 " + ("완료 ✓" if ok else "⚠ 미달")
                    + f" — 잔여 dist={dist:.3f}m yaw={rot_deg:+.1f}° "
                      f"횡={lat_cm:+.1f}cm 전진={fwd_cm:+.1f}cm")
+        return _result(ok, "완료" if ok else "미달", res)
 
     def _maybe_base_nudge(self, ex: float, dist):
         """좌우 픽셀 오차 → 안전 확인 후 베이스 소폭 전/후진 (별도 스레드)."""
