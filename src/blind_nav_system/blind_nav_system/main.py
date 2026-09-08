@@ -1263,6 +1263,11 @@ def _dist_to(x, y):
 
 _AUTO = {"active": False, "dest": "", "step": "", "msg": "",
          "waiting": False, "cancel": False,
+         # force: '강제로 넘어가기' 1회용 신호. 안무가 도는 동안 '다음'이 잠겨 있을 때
+         # 사람이 그래도 진행시키려고 누르는 버튼이다. 누른 쪽(/auto_force)이 로봇을
+         # '먼저' 멈추고 나서 이걸 세운다 — 순서가 바뀌면 이 버튼이 막으려던 위험이 된다.
+         # 소비하는 쪽(_elev_wait_scene_done / _auto_wait_confirm)이 즉시 False 로 되돌린다.
+         "force": False,
          "phase": "", "dest_floor": "", "mode": ""}
 _auto_lock = threading.Lock()
 
@@ -1314,6 +1319,12 @@ def _auto_wait_confirm(timeout=900):
         if _AUTO["cancel"]:
             return False
         with _auto_lock:
+            if _AUTO.get("force"):
+                # 안무가 막 끝난 순간에 강제 버튼이 눌린 경우. 여기서 소비하지 않으면
+                # 그 신호가 다음 씬의 대기를 건너뛴다 — 반드시 여기서 털어낸다.
+                _AUTO["force"] = False
+                _AUTO["waiting"] = False
+                return True
             if not _AUTO["waiting"]:
                 return True
         time.sleep(0.2)
@@ -1411,6 +1422,52 @@ def manual_arm_state():
                    lift=lift, arm_ext=arm_ext)
 
 
+def _auto_scene_step(label, n, busy_msg, noanmu_msg, phase):
+    """씬 n 을 '잠금 → 실행 → 완료 대기 → 결과와 함께 개방' 순서로 돌린다.
+
+    왜 이 순서인가: 기존에는 _auto_set(wait=True) 가 _elev_scene() **앞**에 있었다.
+    그래서 로봇이 도는 동안 '다음' 버튼이 살아 있었고, 사람이 그때 누르면 회전
+    중인데도 다음 씬으로 넘어갔다(②③④ 전부). 잠그고 → 돌리고 → 끝난 뒤 결과와
+    함께 연다. (2026-09-08 사용자 승인 ③안: 이동 중 잠금 + 별도 강제 버튼)
+
+    반환: (계속할까, 사유, 결과dict)
+    미달이어도 시퀀스를 중단시키지 않는다 — 사람이 화면을 보고 판단한다. 여기서
+    하는 일은 '사실대로 띄우고 사람이 누를 때까지 기다리는 것'까지다.
+    """
+    with _auto_lock:
+        _AUTO["force"] = False        # 이전 단계에서 남았을 리 없지만 확실히 턴다
+    _auto_set(label, busy_msg, wait=False, phase=phase)      # ← 여기서 '다음'이 잠긴다
+    sent, seq = _elev_scene(n)
+    if not sent:
+        _auto_set(label, f"⚠ 엘베앱에 {label} 전송 실패 — 확인 후 '다음'",
+                  wait=True, phase=phase)
+        return _auto_wait_confirm(), "post", None
+    why, res = _elev_wait_scene_done(n, seq)
+    txt = _scene_res_txt(res)
+    tail = f" — {txt}" if txt else ""
+    # 미달일 때는 사유까지 보여야 한다 — "미달"인지 "좌표 거부 → 하드코딩 폴백"인지가
+    # 사람이 다음을 누를지 말지 가르는 정보다.
+    why_txt = (res or {}).get("reason") or ""
+    fail_tail = " — " + " · ".join(x for x in (why_txt, txt) if x) if (why_txt or txt) else ""
+    msg = {
+        "done":    f"{label} 완료 ✅{tail} · '다음'",
+        "fail":    f"{label} ⚠ 미달{fail_tail} · 확인 후 '다음'",
+        "timeout": f"⚠ {label} 안무가 안 끝남(시간초과) — 엘베UI 확인 후 '다음'",
+        "noapp":   f"⚠ 엘베앱 응답 없음({label}) — 확인 후 '다음'",
+        "noanmu":  noanmu_msg,
+        "forced":  f"⏭ 강제로 넘어감 — {label} 미완료 상태로 진행",
+    }.get(why, f"{label} — {why}{tail} · 확인 후 '다음'")
+    if why == "cancel":
+        return False, why, res
+    if why == "forced":
+        # 강제 = 확인 절차까지 건너뛴다. 여기서 다시 wait=True 로 열면 방금 누른
+        # 사람에게 한 번 더 누르라고 요구하는 셈이라 버튼의 의미가 없어진다.
+        _auto_set(label, msg, wait=False, phase=phase)
+        return True, why, res
+    _auto_set(label, msg, wait=True, phase=phase)             # ← 여기서 '다음'이 열린다
+    return _auto_wait_confirm(), why, res
+
+
 def _elev_status(timeout=3):
     """엘베앱 상태(/status) 조회 — dict 또는 None. ready=정렬완료, door_open 등 포함."""
     try:
@@ -1421,8 +1478,17 @@ def _elev_status(timeout=3):
         return None
 
 def _elev_scene(n):
-    """엘베앱 씬 n 트리거(자세 전환·자동안무). 자세 전송이 블로킹(~10s)이라 여유 타임아웃."""
-    return _elev_post("/scene", {"n": int(n)}, timeout=20) is not None
+    """엘베앱 씬 n 트리거(자세 전환·자동안무). **(전송성공, run_seq)** 반환.
+
+    run_seq 는 이번 안무의 실행번호다. _elev_wait_scene_done 에 그대로 넘기면 '내가
+    시킨 그 회차'의 결과만 인정하므로, 낡은 회차 결과를 자기 것으로 오독하는 일이
+    없다. 자동 안무가 없는 씬(SCENE_MOVES 에 없는 ①③⑤)은 None 이다.
+    ※ 반환을 bool 하나로 두면 '전송 실패'와 '안무 없음'을 못 가른다. 그래서 튜플이다.
+    자세 전송이 블로킹(~10s)이라 여유 타임아웃."""
+    r = _elev_post("/scene", {"n": int(n)}, timeout=20)
+    if r is None:
+        return False, None
+    return True, r.get("run_seq")
 
 def _elev_select(text):
     """버튼 자동 선택(POST /select). 호출=^(상)/s(하), 층=번호. 성공 시 True."""
@@ -1608,6 +1674,10 @@ def _elev_wait_scene_done(n, seq=None, timeout=None):
     limit = _SCENE_MAX_SEC if timeout is None else timeout
     miss = 0
     while True:
+        with _auto_lock:
+            if _AUTO.get("force"):
+                _AUTO["force"] = False      # 1회용 — 다음 씬으로 새어나가면 안 된다
+                return "forced", None
         if _AUTO["cancel"]:
             return "cancel", None
         st = _elev_status(timeout=1.0)
@@ -1632,12 +1702,16 @@ def _elev_wait_scene_done(n, seq=None, timeout=None):
 
 
 def _scene_res_txt(res):
-    """실행 기록의 잔여값을 사람이 읽는 한 줄로. 좌표 목표가 없는 씬은 사유만."""
+    """실행 기록의 **잔여값만** 사람이 읽는 한 줄로. 좌표 목표가 없는 씬은 빈 문자열.
+
+    사유(reason)는 일부러 넣지 않는다 — 부르는 쪽이 이미 '완료 ✅' / '⚠ 미달' 같은
+    말을 붙이므로 여기서도 붙이면 "완료 — 완료 — 잔여…" 처럼 겹친다. 사유가 필요한
+    자리(미달·강제)는 부르는 쪽에서 직접 붙인다."""
     res = res or {}
     if res.get("dist_m") is None:
-        return str(res.get("reason") or "")
-    return (f"{res.get('reason') or ''} — 잔여 위치 {res['dist_m']:.3f}m "
-            f"방향 {res['yaw_deg']:+.1f}° 횡 {res['lat_cm']:+.1f}cm")
+        return ""
+    return (f"잔여 위치 {res['dist_m']:.3f}m 방향 {res['yaw_deg']:+.1f}° "
+            f"횡 {res['lat_cm']:+.1f}cm")
 
 
 
@@ -1858,7 +1932,8 @@ def _auto_run(dest):
                         # 운영자가 팔을 뻗어둔 채 여정을 시작하면 이 가정은 틀린다.
     try:
         with _auto_lock:
-            _AUTO.update(active=True, dest=dest, cancel=False, phase="", mode="")
+            _AUTO.update(active=True, dest=dest, cancel=False, force=False,
+                         phase="", mode="")
         d = _loc(dest)
         if not d:
             _auto_set("오류", f"'{dest}' 좌표를 location.yaml에서 못 찾음"); return
@@ -1936,24 +2011,28 @@ def _auto_run(dest):
             _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(② 문앞정렬)")
             _auto_abort_elev(); return
-        _auto_set("② 문앞정렬", "문 앞으로 정렬 중(전진·회전)... 완료되면 '다음'",
-                  wait=True, phase="front")
-        _elev_scene(1)
-        if not _auto_wait_confirm(): _auto_abort_elev(); return
+        ok_, _why, _res = _auto_scene_step(
+            "② 문앞정렬", 1,
+            "문 앞으로 정렬 중(전진·회전)... 로봇이 멈추면 '다음'이 열립니다",
+            "② 문앞 정렬 — 확인 후 '다음'", "front")
+        if not ok_: _auto_abort_elev(); return
 
         # ③ 문 열림 대기 (자동 감지)
-        _auto_set("③ 문열림", "문 열림 대기 중... 문 열리면 '다음'", wait=True, phase="door")
-        _elev_scene(2)
-        if not _auto_wait_confirm(): _auto_abort_elev(); return
+        # ③은 SCENE_MOVES 에 없어 안무가 없다 → noanmu 로 즉시 '다음'이 열린다.
+        ok_, _why, _res = _auto_scene_step(
+            "③ 문열림", 2, "문 열림 감시 준비 중...",
+            "문 열림 대기 중... 문 열리면 '다음'", "door")
+        if not ok_: _auto_abort_elev(); return
 
         # ④ 탑승: 전진 185 (자동 안무)
         if not arm_safe:
             _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(④ 탑승)")
             _auto_abort_elev(); return
-        _auto_set("④ 탑승", "탑승(전진) 중... 다 탔으면 '다음'", wait=True, phase="ride")
-        _elev_scene(3)
-        if not _auto_wait_confirm(): _auto_abort_elev(); return
+        ok_, _why, _res = _auto_scene_step(
+            "④ 탑승", 3, "탑승(전진) 중... 로봇이 멈추면 '다음'이 열립니다",
+            "④ 탑승 — 다 탔으면 '다음'", "ride")
+        if not ok_: _auto_abort_elev(); return
 
         # ⑤ 층 press: 인식자세 → 목적층 자동선택 → 정렬 → '다음'에 누르기
         _auto_set("⑤ 층선택", f"인식 자세 + {dest_floor}층 버튼 자동 선택·정렬 중...",
@@ -2081,10 +2160,53 @@ def auto_goto():
 
 @app.route("/auto_confirm", methods=["POST"])
 def auto_confirm():
-    """블로커 단계 '다음 확인' — 대기 해제."""
+    """블로커 단계 '다음 확인' — 대기 해제.
+
+    안무가 도는 동안(waiting=False)에는 아무 일도 하지 않는다. UI가 버튼을 비활성으로
+    두지만 그건 화면일 뿐이고, 여기서도 막아야 잠금이 진짜 잠금이 된다.
+    그때 진행하려면 /auto_force 를 써야 한다 — 그쪽은 로봇을 먼저 멈춘다."""
     with _auto_lock:
-        _AUTO["waiting"] = False
+        if _AUTO.get("active") and not _AUTO.get("waiting"):
+            step = _AUTO.get("step", "")
+            locked = True
+        else:
+            _AUTO["waiting"] = False
+            locked = False
+    if locked:
+        _log("AUTO", f"'다음 확인' 무시 — [{step}] 동작 중이라 잠겨 있다 "
+                     "(그래도 넘어가려면 '강제로 넘어가기')")
+        return jsonify(ok=False, error="동작 중 — 잠김"), 409
     return jsonify(ok=True)
+
+
+@app.route("/auto_force", methods=["POST"])
+def auto_force():
+    """'강제로 넘어가기' — 진행 중인 안무를 **먼저 멈추고**, 그다음 대기를 푼다.
+
+    순서를 바꾸면 안 된다. 로봇이 도는 채로 다음 씬으로 넘어가면, 이 잠금이 막으려던
+    바로 그 상황이 된다. 정지가 먼저, 진행이 나중이다.
+    """
+    with _auto_lock:
+        if not _AUTO.get("active"):
+            return jsonify(ok=False, error="자동 여정이 진행 중이 아닙니다"), 409
+        step = _AUTO.get("step", "")
+    # 1) 정지가 먼저 (_step_abort → 안무 스레드와 현재 스텝 중단)
+    stopped = _elev_post("/step_stop", {}, timeout=3) is not None
+    # 2) 무엇을 어떤 상태에서 강제했는지 남긴다 — 다음 로그 판독에 이게 필요하다
+    res = (_elev_status(timeout=1.5) or {}).get("scene_result") or {}
+    where = (f"씬{res.get('n')} " + ("실행 중" if res.get("running") else
+             ("완료" if res.get("ok") else f"미달·중단({res.get('reason')})"))
+             + (f" — {_scene_res_txt(res)}" if _scene_res_txt(res) else "")
+             ) if res else "엘베앱 상태 조회 실패"
+    _log("AUTO", f"⏭ 강제로 넘어가기 — [{step}] 에서 사람이 눌렀다. "
+                 + ("베이스 정지 요청 전송됨" if stopped
+                    else "🚨 정지 요청 전송 실패 — 로봇이 계속 움직일 수 있다")
+                 + f" / 그 시점: {where}")
+    # 3) 그다음에 진행
+    with _auto_lock:
+        _AUTO["force"] = True
+        _AUTO["waiting"] = False
+    return jsonify(ok=True, stopped=stopped)
 
 @app.route("/auto_cancel", methods=["POST"])
 def auto_cancel():
@@ -2098,7 +2220,7 @@ def auto_status():
     with _auto_lock:
         return jsonify(**{k: _AUTO[k] for k in
                           ("active", "dest", "step", "msg", "waiting",
-                           "phase", "dest_floor", "mode")})
+                           "force", "phase", "dest_floor", "mode")})
 
 _CONFIRMED_LOCATIONS = {
     "인공지능 플랫폼",
