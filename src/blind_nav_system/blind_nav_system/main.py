@@ -1089,15 +1089,55 @@ def armleft():
 #   승차지점까지 주행(엘베앱 OFF) → 도착 후 엘베앱 ON(제어권 자동) → 버튼 → OFF → nav 복귀.
 #   [시작] 엘베앱 spawn → 5000 뜨면 제어권 자동 부여(+armleft 자동 종료)
 #   [종료] 제어권 회수(엘베 즉시 정지) → SIGTERM(엘베앱 finally 정리로 서보·바퀴 깨끗이)
+_ELEV_SCRIPT_REL = "elevator_button_press/main.py"
+
+
+def _elev_app_pids() -> list:
+    """진짜 엘베앱 프로세스의 PID 목록. 없으면 빈 리스트.
+
+    왜 pgrep 결과를 그대로 못 쓰나: `pgrep -f` 는 명령줄 **전체 문자열**에 매치한다.
+    그래서 이 경로를 인자로 가진 아무 프로세스나 잡힌다. 2026-09-08 실제로 잡힌 것:
+        /bin/bash -c source ~/.claude/shell-snapshots/snapshot-bash-….sh …
+        … grep -n "elevator_button_press/main.py" …
+    엘베앱이 완전히 꺼져 있는데도 '떠 있다'가 나왔고 대시보드 토글이 깜빡였다.
+
+    그래서 pgrep 은 후보를 싸게 추리는 데만 쓰고, 판정은 /proc/<pid>/cmdline 의 argv 를
+    직접 갈라서 한다. cmdline 은 NUL 구분이라 공백 섞인 인자에도 안 흔들리고,
+    정규식 이스케이프에 기대지 않는다.
+
+    참으로 보는 조건:
+      argv[0] 이 python 계열이고 인자 중 하나가 그 스크립트 경로로 끝난다
+      (대시보드는 [sys.executable, "-u", ".../elevator_button_press/main.py"] 로 띄운다)
+      또는 argv[0] 자체가 그 스크립트다(셰방으로 직접 실행하는 경우 대비).
+    """
+    try:
+        r = subprocess.run(["pgrep", "-f", _ELEV_SCRIPT_REL],
+                           capture_output=True, text=True)
+    except Exception:
+        return []
+    pids = []
+    for tok in (r.stdout or "").split():
+        try:
+            pid = int(tok)
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                argv = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+        except Exception:
+            continue          # 그새 죽었거나 못 읽음 — 후보에서 뺀다
+        if not argv:
+            continue
+        exe = os.path.basename(argv[0])
+        if (exe.startswith("python") and any(a.endswith(_ELEV_SCRIPT_REL) for a in argv[1:])) \
+                or argv[0].endswith(_ELEV_SCRIPT_REL):
+            pids.append(pid)
+    return pids
+
+
 def _elev_app_running() -> bool:
     p = _procs.get("elevator")
     if p and p.poll() is None:
         return True
-    try:   # 대시보드가 추적 못 하는 것(재시작 desync)도 이름으로 감지
-        return subprocess.run(["pgrep", "-f", "elevator_button_press/main.py"],
-                              capture_output=True).returncode == 0
-    except Exception:
-        return False
+    # 대시보드가 추적 못 하는 것(재시작 desync)도 감지 — 그 폴백은 그대로 살린다.
+    return bool(_elev_app_pids())
 
 def _wait_elev_app_up(timeout: float = 20.0) -> bool:
     """엘베앱 5000 서버가 응답할 때까지 대기. 막 spawn한 직후엔 5000이 안 떠서
@@ -1179,11 +1219,14 @@ def elevator_app():
                 p.terminate()
             except Exception:
                 pass
-        try:
-            subprocess.run(["pkill", "-f", "elevator_button_press/main.py"],
-                           capture_output=True)
-        except Exception:
-            pass
+        # pkill -f 를 쓰면 안 된다 — _elev_app_pids 주석의 그 오탐이 여기서는
+        # '남의 프로세스에 SIGTERM 을 보낸다'가 된다(실제로 Claude 세션의 bash 가
+        # 매치됐다). 판정을 마친 PID 에만 정확히 보낸다.
+        for _pid in _elev_app_pids():
+            try:
+                os.kill(_pid, signal.SIGTERM)
+            except Exception:
+                pass
         _procs.pop("elevator", None)
         _elev_started_mono = None   # 꺼진 앱에 고립 판정을 하지 않는다
         if _lease_renewer_thread is not None:
