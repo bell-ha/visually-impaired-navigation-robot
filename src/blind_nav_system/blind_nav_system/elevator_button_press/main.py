@@ -2939,7 +2939,7 @@ class ElevatorTracker(Node):
                    f" / 기준 {ref_remain:+.1f}{u}")
 
     def _scene_leg_log(self, n, it, label, step_i, cmd, moved, remain_a, u,
-                       t_a, remain_b):
+                       t_a, o_a, remain_b):
         """스텝 단위 계측 한 줄 — '명령 / 실제 이동 / 잔여'를 나란히 놓는다.
 
         _scene_step_log 는 반복 1회당 한 번만 불려서 스텝 단위 자료가 아예 없었다.
@@ -2952,30 +2952,48 @@ class ElevatorTracker(Node):
 
         잔여를 두 번 찍는 이유 (반증용):
           A = 이동 직후 읽은 값,  B = 다음 이동 명령 직전에 다시 읽은 값.
-          그 사이 바퀴는 멈춰 있으므로 **odom 운동은 0**이다. 그런데도 값이 움직이면
-          map 쪽이 뒤늦게 따라온 것이고(시간지연), 안 움직이면 시간지연이 아니라
-          AMCL 보정 자체의 편향이다(1런 레그 odom 63.6cm vs map 57.8cm = 9%).
-          ※ Δt 를 반드시 같이 보라 — A와 B 사이는 루프 오버헤드뿐이라 짧다.
-            Δt 가 AMCL 갱신 주기보다 짧으면 A=B 는 "지연 없음"이 아니라
-            "창이 짧아 갱신이 안 들어옴"이다. 그 판별을 위해 Δt 를 찍는다.
+          그 사이 바퀴가 멈춰 있었다면 map 잔여도 안 변해야 한다. 변했다면 map 쪽이
+          뒤늦게 따라온 것이고, 안 변했다면 시간지연이 아니라 AMCL 보정 자체의
+          편향이다(1런 레그 odom 63.6cm vs map 57.8cm = 9%).
+
+          ※ "그 사이 바퀴는 멈춰 있다"를 전제하면 안 된다 — 성립하지 않는다.
+            _manual_rot 은 정지 명령 뒤 0.3초를 기다렸다 최종 odom 을 읽지만
+            _manual_trans 는 정지 명령 직후 바로 읽는다. 그래서 병진에서는 A 가
+            감속 중에 찍히고 A~B 사이에 바퀴가 더 굴러갈 수 있다.
+            그래서 A 시점 odom 도 같이 찍는다. 판별은 이렇게 해야 성립한다:
+              odom(A) == odom(B) 이고 map잔여 A ≠ B  → map 이 늦게 따라옴
+              odom(A) != odom(B)                    → 바퀴가 아직 굴러감. 이 표본은 버린다
+          ※ Δt 도 같이 보라 — A와 B 사이는 루프 오버헤드뿐이라 짧다. Δt 가 AMCL 갱신
+            주기보다 짧으면 A=B 는 "지연 없음"이 아니라 "창이 짧아 갱신이 안 들어옴"이다.
 
         cmd/moved 는 클램프까지 적용해 실제로 _manual_step 에 넘긴 값과 scene_acc
         (odom 누적)의 증분이다. map 자세는 B 시점 값이고, 계측이 주행을 멈춰 세우지
         않도록 TF 대기 없이(timeout 0) 읽는다 — 못 읽으면 그냥 '없음'이다.
         """
+        def _otxt(xy, yaw):
+            return (f"({xy[0]:+.3f},{xy[1]:+.3f},{math.degrees(yaw):+.1f}°)"
+                    if xy is not None and yaw is not None else "(없음)")
+
         cur = self._map_pose(0.0)
         mp = (f"map({cur[0]:+.3f},{cur[1]:+.3f},{cur[2]:+.1f}°)"
               if cur is not None else "map(없음)")
-        oxy = getattr(self, "_odom_xy", None)
-        oyaw = getattr(self, "_odom_yaw", None)
-        odom = (f"odom({oxy[0]:+.3f},{oxy[1]:+.3f},{math.degrees(oyaw):+.1f}°)"
-                if oxy is not None and oyaw is not None else "odom(없음)")
+        axy, ayaw = o_a
+        bxy = getattr(self, "_odom_xy", None)
+        byaw = getattr(self, "_odom_yaw", None)
+        # A→B 사이 실제 바퀴 이동량. 0이 아니면 위 A/B 비교는 무효인 표본이다.
+        if axy is not None and ayaw is not None and bxy is not None and byaw is not None:
+            d_m = math.hypot(bxy[0] - axy[0], bxy[1] - axy[1])
+            d_deg = math.degrees((byaw - ayaw + math.pi) % (2 * math.pi) - math.pi)
+            dtxt = f"Δodom {d_m * 100:.1f}cm {d_deg:+.1f}°"
+        else:
+            dtxt = "Δodom 없음"
         b_txt = f"{remain_b:+.1f}{u}" if remain_b is not None else "없음"
         self._dlog(f"[LEG] 씬{n} 반복{it} {label} 스텝{step_i} — "
                    f"명령 {cmd:+.1f}{u} / odom이동 {moved:+.1f}{u}"
                    f" / map잔여(직후) {remain_a:+.1f}{u}"
                    f" / map잔여(직전) {b_txt}"
-                   f" / Δt {time.time() - t_a:.2f}s / {mp} / {odom}")
+                   f" / Δt {time.time() - t_a:.2f}s / {dtxt}"
+                   f" / {mp} / odomA{_otxt(axy, ayaw)} odomB{_otxt(bxy, byaw)}")
 
     def _run_scene_moves(self, n, run_seq=None):
         """여정 단계 자동 안무 재생 (별도 스레드) — 티칭값에서 단계 누적을 뺀
@@ -3162,13 +3180,16 @@ class ElevatorTracker(Node):
                 moved = new_done - done               # odom 누적의 증분 = 실제 이동량
                 done = new_done
                 remain = residual_fn()
-                t_a = time.time()                     # A(이동 직후)를 읽은 시각
+                # A(이동 직후) 시각과 그때의 odom 스냅샷. 콜백이 매번 새 튜플을 대입하므로
+                # 참조만 잡아 둬도 그 순간의 값이 그대로 남는다(제자리 수정이 아니다).
+                t_a = time.time()
+                o_a = (getattr(self, "_odom_xy", None), getattr(self, "_odom_yaw", None))
                 if remain is None:
                     self._dlog(f"[AUTO] 씬{n} 반복{it} {label} — 자세 조회 실패, 중단")
                     return "abort"
                 # 계측 전용 — 클램프 검사보다 앞에 담는다. 클램프에 걸려 중단되는 스텝이야말로
                 # 자료가 필요한 스텝인데, 아래 finally 가 어느 종료 경로에서든 찍어 준다.
-                pend = (n, it, label, steps, step, moved, remain, u, t_a)
+                pend = (n, it, label, steps, step, moved, remain, u, t_a, o_a)
                 if not clamp_fn(remain):              # 이동 중 측위가 튄 경우
                     return "abort"
                 # 진동 감지 — 부호가 뒤집혀도 '잔여가 계속 줄고 있으면' 정상 수렴이다.
