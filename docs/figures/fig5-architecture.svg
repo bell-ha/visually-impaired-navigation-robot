@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560" width="1000" height="560" font-family="-apple-system,'Helvetica Neue',Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif">
+<rect width="1000" height="560" fill="#ffffff"/>
+<rect x="40" y="72" width="232" height="300" rx="7" fill="#fafafa" stroke="#dcdcdc" stroke-dasharray="5 4"/>
+<text x="52" y="94" font-size="13" fill="#8a8a8a" font-weight="700">입력</text>
+<rect x="60" y="104" width="192" height="62" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="132" y="132" font-size="16" fill="#1a1a1a" font-weight="600">마이크</text>
+<text x="104" y="152" font-size="13" fill="#666" font-weight="400">STT · ReSpeaker</text>
+<rect x="60" y="186" width="192" height="62" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="97" y="214" font-size="16" fill="#1a1a1a" font-weight="600">아두이노 손잡이</text>
+<text x="109" y="234" font-size="13" fill="#666" font-weight="400">버튼 · 압력센서</text>
+<rect x="60" y="268" width="192" height="62" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="97" y="296" font-size="16" fill="#1a1a1a" font-weight="600">운영자 대시보드</text>
+<text x="117" y="316" font-size="13" fill="#666" font-weight="400">Flask :8080</text>
+<rect x="316" y="72" width="236" height="300" rx="7" fill="#fafafa" stroke="#dcdcdc" stroke-dasharray="5 4"/>
+<text x="328" y="94" font-size="13" fill="#8a8a8a" font-weight="700">핵심 로직  ·  프로세스 1</text>
+<rect x="336" y="120" width="196" height="74" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="2.0"/>
+<text x="378" y="148" font-size="16" fill="#1a1a1a" font-weight="700">오케스트레이터</text>
+<text x="385" y="168" font-size="13" fill="#666" font-weight="400">여정 · 지도 전환</text>
+<rect x="330" y="230" width="208" height="74" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="2.0"/>
+<text x="399" y="273" font-size="16" fill="#1a1a1a" font-weight="700">상태 기계</text>
+<text x="345" y="282" font-size="12" fill="#666" font-weight="400">LOCKED · READY · NAV · PAUSED</text>
+<rect x="596" y="44" width="364" height="150" rx="7" fill="#fafafa" stroke="#dcdcdc" stroke-dasharray="5 4"/>
+<text x="608" y="66" font-size="13" fill="#8a8a8a" font-weight="700">인지  ·  별도 프로세스</text>
+<rect x="614" y="76" width="160" height="62" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="631" y="104" font-size="16" fill="#1a1a1a" font-weight="600">people_tracker</text>
+<text x="631" y="124" font-size="13" fill="#666" font-weight="400">YOLOv8 + ByteTrack</text>
+<rect x="788" y="76" width="154" height="62" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="825" y="104" font-size="16" fill="#1a1a1a" font-weight="600">엘리베이터</text>
+<text x="808" y="124" font-size="13" fill="#666" font-weight="400">OCR · Flask :5000</text>
+<rect x="596" y="214" width="364" height="158" rx="7" fill="#fafafa" stroke="#dcdcdc" stroke-dasharray="5 4"/>
+<text x="608" y="236" font-size="13" fill="#8a8a8a" font-weight="700">주행</text>
+<rect x="614" y="246" width="160" height="62" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="648" y="274" font-size="16" fill="#1a1a1a" font-weight="600">Nav2 · AMCL</text>
+<text x="653" y="294" font-size="13" fill="#666" font-weight="400">층별 map 전환</text>
+<rect x="788" y="246" width="154" height="62" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="788" y="274" font-size="16" fill="#1a1a1a" font-weight="600">navigation_client</text>
+<text x="824" y="294" font-size="13" fill="#666" font-weight="400">경유지 재계획</text>
+<rect x="614" y="318" width="328" height="40" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="569" y="344" font-size="16" fill="#1a1a1a" font-weight="600">bell-ha/human-nav  포크 — nav2_params_human.yaml</text>
+<rect x="40" y="400" width="920" height="110" rx="7" fill="#fafafa" stroke="#dcdcdc" stroke-dasharray="5 4"/>
+<text x="52" y="422" font-size="13" fill="#8a8a8a" font-weight="700">관측  ·  독립 프로세스</text>
+<rect x="60" y="430" width="272" height="60" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="133" y="458" font-size="16" fill="#1a1a1a" font-weight="600">robot_diag_nav</text>
+<text x="109" y="478" font-size="13" fill="#666" font-weight="400">/rosout 블랙박스 · 7일 보관</text>
+<rect x="354" y="430" width="272" height="60" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="449" y="458" font-size="16" fill="#1a1a1a" font-weight="600">snapshots</text>
+<text x="407" y="478" font-size="13" fill="#666" font-weight="400">카메라 2대 + 로봇 상태 묶음</text>
+<rect x="648" y="430" width="292" height="60" rx="5" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.4"/>
+<text x="722" y="458" font-size="16" fill="#1a1a1a" font-weight="600">vision_assistant</text>
+<text x="727" y="478" font-size="13" fill="#666" font-weight="400">GPT-4o Vision → TTS</text>
+<line x1="252.0" y1="135.0" x2="327.1" y2="148.4" stroke="#1a1a1a" stroke-width="1.5"/>
+<polygon points="336.0,150.0 326.3,153.3 328.0,143.5" fill="#1a1a1a"/>
+<line x1="252.0" y1="217.0" x2="321.4" y2="237.5" stroke="#1a1a1a" stroke-width="1.5"/>
+<polygon points="330.0,240.0 320.0,242.3 322.8,232.7" fill="#1a1a1a"/>
+<line x1="252.0" y1="299.0" x2="322.0" y2="262.2" stroke="#1a1a1a" stroke-width="1.5"/>
+<polygon points="330.0,258.0 324.4,266.6 319.7,257.8" fill="#1a1a1a"/>
+<line x1="434.0" y1="194.0" x2="434.0" y2="219.0" stroke="#1a1a1a" stroke-width="1.5"/>
+<polygon points="434.0,228.0 429.0,219.0 439.0,219.0" fill="#1a1a1a"/>
+<line x1="532.0" y1="150.0" x2="605.9" y2="113.9" stroke="#1a1a1a" stroke-width="1.5"/>
+<polygon points="614.0,110.0 608.1,118.4 603.7,109.5" fill="#1a1a1a"/>
+<line x1="532.0" y1="150.0" x2="779.1" y2="111.4" stroke="#1a1a1a" stroke-width="1.5"/>
+<polygon points="788.0,110.0 779.9,116.3 778.3,106.4" fill="#1a1a1a"/>
+<line x1="538.0" y1="264.0" x2="605.0" y2="271.1" stroke="#1a1a1a" stroke-width="1.5"/>
+<polygon points="614.0,272.0 604.5,276.0 605.6,266.1" fill="#1a1a1a"/>
+<line x1="862.0" y1="140.0" x2="713.6" y2="235.1" stroke="#1a1a1a" stroke-width="1.5" stroke-dasharray="5 4"/>
+<polygon points="706.0,240.0 710.9,230.9 716.3,239.4" fill="#1a1a1a"/>
+<text x="321" y="540" font-size="15" fill="#1a1a1a" font-weight="400">Fig. 5   시스템 구성 — 프로세스 경계와 데이터 흐름</text>
+<text x="596" y="204" font-size="12.5" fill="#8a8a8a" font-weight="400">제어권을 넘기면 Nav2 정지</text>
+</svg>

@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1020 620" width="1020" height="620" font-family="-apple-system,'Helvetica Neue',Arial,'Apple SD Gothic Neo','Malgun Gothic',sans-serif">
+<rect width="1020" height="620" fill="#ffffff"/>
+<path d="M418,104 L418,171" fill="none" stroke="#1a1a1a" stroke-width="1.4"/>
+<polygon points="418,180 413.97,173.5 422.03,173.5" fill="#1a1a1a"/>
+<circle cx="418" cy="132" r="6.5" fill="#ffffff"/><circle cx="418" cy="132" r="3.8" fill="#1a1a1a"/>
+<path d="M418,244 L418,311" fill="none" stroke="#1a1a1a" stroke-width="1.4"/>
+<polygon points="418,320 413.97,313.5 422.03,313.5" fill="#1a1a1a"/>
+<circle cx="418" cy="272" r="6.5" fill="#ffffff"/><circle cx="418" cy="272" r="3.8" fill="#1a1a1a"/>
+<path d="M570,340 L691,340" fill="none" stroke="#1a1a1a" stroke-width="1.4"/>
+<polygon points="700,340 693.5,335.97 693.5,344.03" fill="#1a1a1a"/>
+<circle cx="635" cy="340" r="6.5" fill="#ffffff"/><circle cx="635" cy="340" r="3.8" fill="#1a1a1a"/>
+<path d="M700,366 L579,366" fill="none" stroke="#1a1a1a" stroke-width="1.4"/>
+<polygon points="570,366 576.5,361.97 576.5,370.03" fill="#1a1a1a"/>
+<circle cx="635" cy="366" r="6.5" fill="#ffffff"/><circle cx="635" cy="366" r="3.8" fill="#1a1a1a"/>
+<path d="M540,180 L540,113" fill="none" stroke="#a8a8a8" stroke-width="1.4"/>
+<polygon points="540,104 535.97,110.5 544.03,110.5" fill="#a8a8a8"/>
+<path d="M390,352 L214,352 Q200,352 200,338 L200,86 Q200,72 214,72 L381,72" fill="none" stroke="#a8a8a8" stroke-width="1.4"/>
+<polygon points="390,72 383.5,67.97 383.5,76.03" fill="#a8a8a8"/>
+<path d="M788,320 L788,224 Q788,210 774,210 L579,210" fill="none" stroke="#a8a8a8" stroke-width="1.4"/>
+<polygon points="570,210 576.5,205.97 576.5,214.03" fill="#a8a8a8"/>
+<circle cx="788" cy="262" r="6.5" fill="#ffffff"/><circle cx="788" cy="262" r="3.8" fill="#1a1a1a"/>
+<path d="M880,352 L946,352 Q960,352 960,338 L960,86 Q960,72 946,72 L579,72" fill="none" stroke="#a8a8a8" stroke-width="1.4"/>
+<polygon points="570,72 576.5,67.97 576.5,76.03" fill="#a8a8a8"/>
+<rect x="390" y="40" width="180" height="64" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.7"/>
+<rect x="395" y="45" width="170" height="54" rx="2" fill="none" stroke="#1a1a1a" stroke-width="0.9"/>
+<text x="451" y="69" font-size="17" fill="#1a1a1a" font-weight="600">LOCKED</text>
+<text x="437" y="88" font-size="11.5" fill="#666" font-weight="400">대기 · 초기 상태</text>
+<rect x="390" y="180" width="180" height="64" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.7"/>
+<text x="456" y="209" font-size="17" fill="#1a1a1a" font-weight="600">READY</text>
+<text x="431" y="228" font-size="11.5" fill="#666" font-weight="400">목적지 입력 · 확인</text>
+<rect x="390" y="320" width="180" height="64" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.7"/>
+<text x="466" y="349" font-size="17" fill="#1a1a1a" font-weight="600">NAV</text>
+<text x="468" y="368" font-size="11.5" fill="#666" font-weight="400">이동</text>
+<rect x="700" y="320" width="180" height="64" rx="4" fill="#ffffff" stroke="#1a1a1a" stroke-width="1.7"/>
+<text x="761" y="349" font-size="17" fill="#1a1a1a" font-weight="600">PAUSED</text>
+<text x="765" y="368" font-size="11.5" fill="#666" font-weight="400">일시 정지</text>
+<text x="309" y="136" font-size="12.5" fill="#1a1a1a" font-weight="400">목적지 입력 의사</text>
+<text x="350" y="276" font-size="12.5" fill="#1a1a1a" font-weight="400">음성 확인</text>
+<text x="587" y="326" font-size="12.5" fill="#1a1a1a" font-weight="400">버튼 · Pull 입력</text>
+<text x="608" y="386" font-size="12.5" fill="#1a1a1a" font-weight="400">재개 확정</text>
+<text x="554" y="128" font-size="12.5" fill="#777" font-weight="400">종료 의사</text>
+<text x="554" y="144" font-size="12.5" fill="#999" font-weight="400">무응답 3회 · 30초</text>
+<text x="212" y="216" font-size="12.5" fill="#777" font-weight="400">목적지 도착</text>
+<text x="212" y="232" font-size="12.5" fill="#999" font-weight="400">또는 주행 중 오류</text>
+<text x="800" y="266" font-size="12.5" fill="#777" font-weight="400">목적지 변경</text>
+<text x="885" y="212" font-size="12.5" fill="#999" font-weight="400">무응답 3회</text>
+<text x="891" y="228" font-size="12.5" fill="#999" font-weight="400">30초 초과</text>
+<line x1="60" y1="452" x2="960" y2="452" stroke="#dcdcdc"/>
+<circle cx="68" cy="482" r="6.5" fill="#ffffff"/><circle cx="68" cy="482" r="3.8" fill="#1a1a1a"/>
+<text x="84" y="486" font-size="12.5" fill="#1a1a1a" font-weight="400">표시된 전이는 <tspan font-weight="600">사용자가 물리 버튼을 눌러야</tspan> 일어난다. 음성은 후보를 만들 뿐 상태를 바꾸지 못한다.</text>
+<line x1="60" y1="512" x2="76" y2="512" stroke="#a8a8a8" stroke-width="1.4"/>
+<text x="84" y="516" font-size="12.5" fill="#666" font-weight="400">회색 = 복귀·해제 경로.  이중 테두리 = 초기 상태.</text>
+<text x="68" y="542" font-size="12.5" fill="#666" font-weight="400">출발 전 오류(목적지 좌표 없음 · action server 미준비)는 NAV로 전이하지 않고 READY를 유지한다.</text>
+<text x="348" y="592" font-size="13" fill="#1a1a1a" font-weight="400">Fig. 1   안내 상태 기계 — 4개 최상위 상태와 전이 조건</text>
+</svg>
