@@ -1563,9 +1563,38 @@ SCENE_MAX_ITERS = 4
 # 2.0 = 관측 최대 초과(1.5cm) + 여유. 종료 조건 POSE_DONE_M(5cm)의 2.5분의 1이라
 # 횡오차 몫을 남겨 둔다(전진 2cm·횡 2cm면 dist 2.8cm < 5cm).
 SCENE_TOL_FWD_CM  = 2.0
-# 2026-09-04: 3.0 → 5.0. AMCL yaw 잡음이 실측 1.6°이고 회전
+# ③정렬(최종 자세) 전용. 2026-09-04: 3.0 → 5.0. AMCL yaw 잡음이 실측 1.6°이고 회전
 # 슬립까지 겹치면 3°는 빠듯하다. 문 감지는 전방 ±10°라 5°면 충분하다.
+# ※ ①정렬은 이 값을 쓰지 않는다 — 아래 _aim_tol_deg 참고.
 SCENE_TOL_ROT_DEG = 5.0
+
+# ── ①정렬(목표점 방위) 전용 허용오차 — 거리에 따라 달라진다 ──────────────
+# ①과 ③은 같은 '회전'이지만 잡음 특성과 실패 대가가 다르다.
+#   ③ = 로봇 자기 yaw 를 맞추는 것. 남는 오차는 그냥 자세 오차다.
+#   ① = 목표점 '방위'를 맞추는 것. 남는 오차 θ 는 이어지는 주행 d 에서
+#        d·sin(θ) 만큼의 '횡오차'로 증폭된다. 그래서 먼 거리일수록 빡빡해야 한다.
+# 고정 5.0°가 실제로 만든 일 (2026-09-08 확인):
+#   ⑥ 시뮬 d=2.07m — 조준 오차 2.77°가 문턱보다 작아 ①이 한 스텝도 안 돌았고,
+#                    그 2.77°가 그대로 10.0cm 횡오차가 됐다.
+#   실기 씬④      — ①정렬 turn=+1.1°로 사실상 안 돌았고 잔여 횡 9.1cm.
+# 그래서 '허용 횡오차'를 고정하고 각도로 환산한다: tol = atan(AIM_TOL_LAT_M / d).
+# 다만 바닥이 필요하다 — ①정렬 잔여에는 목표 방위 잡음뿐 아니라 **로봇 자기 yaw
+# 추정 잡음(실측 1.6°)이 거리와 무관하게 그대로 들어간다.** 그 아래로 조이면
+# 잡음을 쫓아 제자리 왕복만 한다. 그래서 2.0°(1.6° + 여유)를 바닥으로 둔다.
+# 가까울수록 느슨해지는 것은 의도한 것이다 — d 가 작으면 같은 각도가 만드는
+# 횡오차도 작고, 반대로 방위 자체가 잡음에 지배당하기 때문이다.
+AIM_TOL_LAT_M     = 0.03   # ①정렬이 허용하는 '이어지는 주행에서의 횡오차'
+AIM_TOL_FLOOR_DEG = 2.0    # 바닥 — AMCL yaw 잡음 실측 1.6° + 여유
+
+
+def _aim_tol_deg(dist_m):
+    """①정렬 허용오차(°). 먼 거리일수록 빡빡, 가까울수록 느슨. 바닥 2.0°.
+
+    d=2.07m → 2.0°(바닥) / d=0.86m → 2.0°(교차점) / d=0.15m → 11.3° / d=0.06m → 26.6°
+    """
+    if not dist_m or dist_m <= 0.0:
+        return AIM_TOL_FLOOR_DEG
+    return max(AIM_TOL_FLOOR_DEG, math.degrees(math.atan2(AIM_TOL_LAT_M, dist_m)))
 
 # ───────── 종료 조건 (반드시 구간 허용오차보다 느슨해야 한다) ─────────
 # 불변식: SCENE_TOL_* ≤ POSE_DONE_*.
@@ -1589,7 +1618,7 @@ POSE_DONE_DEG = max(3.0,  SCENE_TOL_ROT_DEG)
 # '⚠ 미달'로 끝났다(오늘 실기: 씬② dist 0.150m·전진 -10.8cm·횡 +10.4cm,
 #  씬④ dist 0.115m·전진 +6.9cm·횡 +9.1cm — 반복2~4가 6~8밀리초 만에 종료).
 # 0.20의 원래 근거("가까우면 방위가 잡음에 지배당한다")는 유효하지만, 그 처방은
-# ①②를 통째로 끄는 것이 아니라 ①정렬 문턱을 거리에 맞추는 것이어야 한다.
+# ①②를 통째로 끄는 것이 아니라 ①정렬 문턱을 거리에 맞추는 것이다(_aim_tol_deg).
 #
 # 불변식: POSE_SKIP_M ≤ POSE_DONE_M. 그래서 값을 따로 적지 않고 파생시킨다.
 # 깨지면 무슨 일이 나는지가 위 사각지대 그 자체다 — SKIP 이 DONE 보다 크면
@@ -3114,8 +3143,12 @@ class ElevatorTracker(Node):
         # 위 세 갈래(목표 없음 / TF 실패 / 티칭 전진값 없음)는 전부 여기로 내려온다.
         return self._run_scene_moves_legacy(n, moves)
 
-    def _scene_leg(self, n, it, label, kind, residual_fn, clamp_fn):
+    def _scene_leg(self, n, it, label, kind, residual_fn, clamp_fn, tol=None):
         """한 구간(회전 또는 주행)을 잔여가 허용오차에 들 때까지 실행.
+
+        tol 을 주면 그 값으로 수렴을 판정한다(없으면 kind 별 기본값). ①정렬만
+        거리 의존 문턱(_aim_tol_deg)을 쓰기 때문에 열어 둔 구멍이다 — ②주행과
+        ③정렬은 기존 상수 그대로다.
 
         Esc·진행불가·진동 감지·매 스텝 클램프 재검사를 여기 한 곳에 모았다 —
         ①정렬 / ②주행 / ③정렬 세 구간이 같은 안전장치를 공유해야 하기 때문이다.
@@ -3124,7 +3157,8 @@ class ElevatorTracker(Node):
 
         반환: "done"(도달) / "stop"(진동 — 이 정도로 마침) / "abort"(중단·거부·불가)
         """
-        tol = SCENE_TOL_FWD_CM if kind == "fwd" else SCENE_TOL_ROT_DEG
+        if tol is None:
+            tol = SCENE_TOL_FWD_CM if kind == "fwd" else SCENE_TOL_ROT_DEG
         key = "fwd_cm" if kind == "fwd" else "rot_deg"
         lim = 50.0 if kind == "fwd" else 90.0     # 한 스텝 최대치 (기존과 동일)
         u = "cm" if kind == "fwd" else "°"
@@ -3410,7 +3444,14 @@ class ElevatorTracker(Node):
 
                 # ①의 abort(조준 자체 실패)는 즉시 반환한다 — 조준이 안 되면 ②③도
                 # 의미가 없다. stop(진동)만 흐름을 바꿔 ③로 넘긴다.
-                st = self._scene_leg(n, it, "①정렬", "rot", _aim_residual, _turn_clamp)
+                # ①정렬만 거리 의존 문턱 — 남는 조준 오차가 이어지는 주행에서
+                # 횡오차로 증폭되므로 먼 거리일수록 빡빡해야 한다(_aim_tol_deg).
+                _aim_tol = _aim_tol_deg(dist)
+                self._dlog(f"[AUTO] 씬{n} 반복{it} ①정렬 허용오차 {_aim_tol:.1f}° "
+                           f"(dist {dist:.3f}m — 남으면 횡 "
+                           f"{dist * math.sin(math.radians(_aim_tol)) * 100:.1f}cm)")
+                st = self._scene_leg(n, it, "①정렬", "rot", _aim_residual, _turn_clamp,
+                                     tol=_aim_tol)
                 if st == "abort":
                     return _result(False, "①정렬 중단")
                 if st == "stop":
