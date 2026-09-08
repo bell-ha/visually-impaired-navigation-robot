@@ -1532,6 +1532,27 @@ SCENE_CLAMP_TURN_DEG = 90.0     # ①정렬에만 적용 (③는 클램프 없�
 # 대신 이 각도를 넘으면 로그로만 알린다(실행은 계속).
 SCENE_TURN_WARN_DEG = 100.0
 
+# 씬별 ①정렬 회전 한계 (여기 없으면 위 SCENE_CLAMP_TURN_DEG). 지금은 씬5만 다르다.
+# ⑥ 하차는 사람을 태운 채 187.8cm를 '후진'하는 유일한 구간이다 — 로봇도 사람도
+# 뒤를 안 본다. 그런데 위 ±90°는 측위 가드가 아니라 부호·정규화 버그 탐지기다
+# (전진안·후진안 중 작은 쪽을 고르므로 ①은 원리상 90°를 못 넘는다). 그래서 AMCL yaw
+# 오차가 그대로 통과하고, 후진 거리만큼 증폭돼 횡오차가 된다:
+#     yaw 오차 5° → 횡 16.4cm / 10° → 32.6cm / 20° → 64.2cm  (187.8cm 후진 기준)
+# 주행 클램프(±40cm)는 거리만 보므로 이걸 못 잡는다.
+# ⑥의 탈출 방향은 캐빈 벽에 물리적으로 구속돼 정상값이 ±10° 안쪽이다
+# (2026-09-04 ④ 실제 종료 자세 기준 +2.8°, ④목표 기준 +7.5°).
+# ±22° = 그 정상 범위의 두 배 남짓. 넘으면 횡오차가 70cm대로 가는 영역이다.
+SCENE_CLAMP_TURN_DEG_BY_SCENE = {5: 22.0}
+
+# 좌표 경로가 '클램프 거부'로 멈췄을 때 하드코딩(SCENE_MOVES)으로 물러설 씬.
+# ⑥ 하차뿐이다 — 여기서 안 움직이면 사람을 태운 채 엘리베이터 안에 서 있게 되고,
+# 문이 닫혀 엘리베이터가 다시 움직이는 것이 좌표를 조금 벗어나는 것보다 나쁘다.
+# ※ 폴백은 '클램프 거부'에만 한다. Esc·가드 정지·장애물·자세 조회 실패에는 폴백하지
+#   않는다 — 그것들은 "가면 안 되는 이유"이지 "좌표를 못 믿을 이유"가 아니다.
+#   장애물 앞에서 눈감고 186cm를 후진하는 것이야말로 최악이다.
+# ※ 폴백해도 ok 는 False 다. 탈출은 했어도 목표 자세는 아니다.
+SCENE_COORD_FALLBACK = {5}
+
 # 3단 go-to-pose 반복 상한 — 수렴하면 그 전에 끝난다.
 SCENE_MAX_ITERS = 4
 # 남은 거리가 이 이하면 ①②를 건너뛰고 ③정렬만 한다.
@@ -3039,12 +3060,13 @@ class ElevatorTracker(Node):
 
         반환: {"ok", "reason", ...} — _run_scene_moves 가 그대로 실행 기록에 옮긴다.
 
-        아래 '기존 경로' 부분은 2026-09-04 수정 전(HEAD) 본문이다. 2026-09-07에
-        종료 지점 3곳의 return 에 결과 dict를 실은 것 말고는 손대지 않았다 — 반환값은
-        원래 아무도 안 읽었으므로 동작은 그대로다(목표가 없는 씬 ⑥하차 등 보존).
-        좌표 로직은 _run_scene_gotopose 로 완전히 분리해 두 경로가 섞이지 않게 했다.
-        ※ 이 경로는 잔여 좌표(dist/yaw)를 낼 수 없다 — 좌표 목표가 없어서다.
-          결과에는 ok와 사유만 담기고 잔여값은 None으로 남는다.
+        여기는 '어느 경로로 갈지'만 고른다. 기존 경로 본문은 _run_scene_moves_legacy,
+        좌표 로직은 _run_scene_gotopose 로 각각 분리돼 두 경로가 섞이지 않는다.
+
+        SCENE_COORD_FALLBACK 에 든 씬(지금은 ⑥ 하차뿐)은 좌표 경로가 '클램프 거부'로
+        멈췄을 때 기존 경로로 물러선다. 거기서 안 움직이면 사람을 태운 채 엘리베이터
+        안에 남기 때문이다. 폴백은 클램프 거부에만 하고(Esc·가드·장애물·조회 실패는
+        폴백하지 않는다), 로그로 크게 알리며, 결과의 ok 는 False 로 남는다.
         """
         tgt = _scene_targets.get(str(n))
         if tgt is None:
@@ -3056,61 +3078,24 @@ class ElevatorTracker(Node):
             # 주행 클램프의 기준(티칭 전진값)이 없으면 좌표 주행을 허용하지 않는다
             self._dlog(f"[AUTO] 씬{n} 티칭 전진값이 없어 클램프 기준을 못 만듦 — 기존 방식")
         else:
-            return self._run_scene_gotopose(n, moves, tgt)
-
-        # ───────── 이하 기존 경로 (HEAD 원본 그대로) ─────────
-        for kind, target in moves:
-            key = "fwd_cm" if kind == "fwd" else "rot_deg"
-            with state_lock:
-                done = (state.get("scene_acc") or {}).get(key, 0.0)
-            remain = target - done
-            tol = 1.0 if kind == "fwd" else 3.0
-            if abs(remain) < tol:
-                continue
-            self._dlog(f"[AUTO] {SCENES[n]} — "
-                       + (f"{'전진' if remain > 0 else '후진'} {abs(remain):.0f}cm"
-                          if kind == "fwd" else f"회전 {remain:+.0f}°")
-                       + " 자동 실행 (Esc=중단)")
-            flips, last_sign = 0, (1 if remain > 0 else -1)
-            while abs(remain) >= tol:
-                if getattr(self, "_step_abort", False):
-                    self._dlog("[AUTO] 중단됨 — 패드 보정 후 같은 단계를 다시 누르면 "
-                               f"잔여({abs(remain):.0f}{'cm' if kind == 'fwd' else '°'})부터 이어감")
-                    return {"ok": False, "reason": "중단(Esc·단계전환)"}
-                if kind == "fwd":
-                    # 50cm 단위(클램프 최대) — 25cm 쪼개기는 정지·재출발 오버헤드만
-                    # 만들었음. 이동 중 26cm 비상정지 감시는 스텝 크기와 무관하게 연속.
-                    step = max(-50.0, min(50.0, remain))
-                    self._manual_step(step, 0.0)
-                else:
-                    step = max(-90.0, min(90.0, remain))
-                    self._manual_step(0.0, step)
-                with state_lock:
-                    new_done = (state.get("scene_acc") or {}).get(key, 0.0)
-                if abs(new_done - done) < 0.3:   # 스텝이 거부되거나 전혀 못 움직임
-                    self._dlog(f"[AUTO] 진행 불가 (가드/장애물) — 잔여 "
-                               f"{abs(target - new_done):.0f}{'cm' if kind == 'fwd' else '°'}. "
-                               "패드로 상황 정리 후 단계 재클릭")
-                    return {"ok": False, "reason": "진행 불가(가드·장애물)"}
-                done = new_done
-                remain = target - done
-                # 진동 감지: 잔여 부호가 2번 뒤집히면 (오버슛↔보정 왕복) 그만 —
-                # 무한 왕복으로 시간·배터리를 태우는 것보다 ±수° 오차가 낫다
-                # (2026-07-21 ② 안무 -85°↔-95° 16회 왕복 실측)
-                s_ = 1 if remain > 0 else -1
-                if abs(remain) >= tol and s_ != last_sign:
-                    flips += 1
-                    if flips >= 2:
-                        self._dlog(f"[AUTO] 잔여 {remain:+.0f}"
-                                   f"{'cm' if kind == 'fwd' else '°'} — 진동 감지, "
-                                   "이 정도로 마침 (필요하면 패드로 미세 보정)")
-                        break
-                last_sign = s_
-        self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓")
-        # ※ 이 경로는 진동 감지로 break 한 경우도 여기로 내려와 ✓를 찍는다(기존 동작).
-        #   좌표 목표가 없어 '얼마나 남았나'를 잴 수단이 없으므로 판정을 바꾸지 않고
-        #   로그와 같은 값을 그대로 실어 보낸다.
-        return {"ok": True, "reason": "완료(기존 경로)"}
+            res = self._run_scene_gotopose(n, moves, tgt)
+            if not (res or {}).get("clamp_rejected") or n not in SCENE_COORD_FALLBACK:
+                return res
+            # 클램프 거부 = 좌표를 못 믿는다는 뜻이다. 그런데 ⑥은 여기서 안 움직이면
+            # 사람을 태운 채 엘리베이터 안에 남는다. 하드코딩으로 물러서되 조용히
+            # 넘어가지 않는다 — 이 프로젝트는 조용한 폴백으로 이미 여러 번 데었다.
+            _fwd = next((v for k, v in moves if k == "fwd"), None)
+            self._dlog(f"[AUTO] ⚠⚠ 씬{n} 좌표 경로 거부 → 하드코딩 폴백으로 전환. "
+                       f"사유: {res.get('reason')}")
+            self._dlog(f"[AUTO] ⚠⚠ 폴백은 티칭값 {_fwd:+.0f}cm 를 그대로 실행한다 — "
+                       "목표 자세로 가지 않는다. 끝난 뒤 위치를 반드시 확인하라")
+            fb = self._run_scene_moves_legacy(n, moves) or {}
+            # 탈출은 했어도 목표 자세는 아니다 → ok 는 항상 False.
+            return dict(res, ok=False,
+                        reason=f"좌표 거부 → 하드코딩 폴백 [{res.get('reason')}] "
+                               f"/ 폴백 결과: {fb.get('reason')}")
+        # 위 세 갈래(목표 없음 / TF 실패 / 티칭 전진값 없음)는 전부 여기로 내려온다.
+        return self._run_scene_moves_legacy(n, moves)
 
     def _scene_leg(self, n, it, label, kind, residual_fn, clamp_fn):
         """한 구간(회전 또는 주행)을 잔여가 허용오차에 들 때까지 실행.
@@ -3215,6 +3200,69 @@ class ElevatorTracker(Node):
                 self._scene_leg_log(*pend, _probe())
         return "done"
 
+    def _run_scene_moves_legacy(self, n, moves):
+        """좌표 목표를 쓰지 않는 기존 경로 — 티칭값 − 누적 = 잔여를 그대로 실행.
+
+        본문은 2026-09-04 수정 전(HEAD) 그대로다(종료 지점 3곳의 return 에 결과 dict를
+        실은 것 제외 — 반환값은 원래 아무도 안 읽었으므로 동작은 같다). 2026-09-08에
+        _run_scene_moves_inner 안에서 여기로 옮겼는데 들여쓰기가 같아 본문은 무변경이다.
+
+        쓰이는 곳 둘: (a) 좌표 목표가 없는 씬, (b) 씬5에서 좌표 클램프가 거부했을 때의
+        폴백. 좌표 목표가 없으니 잔여(dist/yaw)를 낼 수 없다 — ok와 사유만 담긴다.
+        """
+        for kind, target in moves:
+            key = "fwd_cm" if kind == "fwd" else "rot_deg"
+            with state_lock:
+                done = (state.get("scene_acc") or {}).get(key, 0.0)
+            remain = target - done
+            tol = 1.0 if kind == "fwd" else 3.0
+            if abs(remain) < tol:
+                continue
+            self._dlog(f"[AUTO] {SCENES[n]} — "
+                       + (f"{'전진' if remain > 0 else '후진'} {abs(remain):.0f}cm"
+                          if kind == "fwd" else f"회전 {remain:+.0f}°")
+                       + " 자동 실행 (Esc=중단)")
+            flips, last_sign = 0, (1 if remain > 0 else -1)
+            while abs(remain) >= tol:
+                if getattr(self, "_step_abort", False):
+                    self._dlog("[AUTO] 중단됨 — 패드 보정 후 같은 단계를 다시 누르면 "
+                               f"잔여({abs(remain):.0f}{'cm' if kind == 'fwd' else '°'})부터 이어감")
+                    return {"ok": False, "reason": "중단(Esc·단계전환)"}
+                if kind == "fwd":
+                    # 50cm 단위(클램프 최대) — 25cm 쪼개기는 정지·재출발 오버헤드만
+                    # 만들었음. 이동 중 26cm 비상정지 감시는 스텝 크기와 무관하게 연속.
+                    step = max(-50.0, min(50.0, remain))
+                    self._manual_step(step, 0.0)
+                else:
+                    step = max(-90.0, min(90.0, remain))
+                    self._manual_step(0.0, step)
+                with state_lock:
+                    new_done = (state.get("scene_acc") or {}).get(key, 0.0)
+                if abs(new_done - done) < 0.3:   # 스텝이 거부되거나 전혀 못 움직임
+                    self._dlog(f"[AUTO] 진행 불가 (가드/장애물) — 잔여 "
+                               f"{abs(target - new_done):.0f}{'cm' if kind == 'fwd' else '°'}. "
+                               "패드로 상황 정리 후 단계 재클릭")
+                    return {"ok": False, "reason": "진행 불가(가드·장애물)"}
+                done = new_done
+                remain = target - done
+                # 진동 감지: 잔여 부호가 2번 뒤집히면 (오버슛↔보정 왕복) 그만 —
+                # 무한 왕복으로 시간·배터리를 태우는 것보다 ±수° 오차가 낫다
+                # (2026-07-21 ② 안무 -85°↔-95° 16회 왕복 실측)
+                s_ = 1 if remain > 0 else -1
+                if abs(remain) >= tol and s_ != last_sign:
+                    flips += 1
+                    if flips >= 2:
+                        self._dlog(f"[AUTO] 잔여 {remain:+.0f}"
+                                   f"{'cm' if kind == 'fwd' else '°'} — 진동 감지, "
+                                   "이 정도로 마침 (필요하면 패드로 미세 보정)")
+                        break
+                last_sign = s_
+        self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓")
+        # ※ 이 경로는 진동 감지로 break 한 경우도 여기로 내려와 ✓를 찍는다(기존 동작).
+        #   좌표 목표가 없어 '얼마나 남았나'를 잴 수단이 없으므로 판정을 바꾸지 않고
+        #   로그와 같은 값을 그대로 실어 보낸다.
+        return {"ok": True, "reason": "완료(기존 경로)"}
+
     def _run_scene_gotopose(self, n, moves, tgt):
         """좌표 목표로 가는 3단 방식 — ①목표점을 향해 정렬 ②직선 주행 ③목표 자세로 정렬.
 
@@ -3236,6 +3284,11 @@ class ElevatorTracker(Node):
         def _wrap(d):
             return (d + 180.0) % 360.0 - 180.0
 
+        # 클램프가 거부하면 사유가 여기 담긴다. 폴백 여부를 가르는 유일한 근거다 —
+        # Esc·가드·장애물로 인한 abort 와 섞이면 안 되기 때문에 따로 표시한다.
+        rejected = []
+        turn_lim = SCENE_CLAMP_TURN_DEG_BY_SCENE.get(n, SCENE_CLAMP_TURN_DEG)
+
         def _drive_clamp(remain_cm):
             """누적 주행이 티칭값에서 ±40cm 넘게 벗어나면 거부.
 
@@ -3252,21 +3305,28 @@ class ElevatorTracker(Node):
                        f"(계산 {remain_cm:+.0f}cm vs 기준 {ref:+.0f}cm) — 실행 거부. "
                        f"측위를 확인하라 [허용 ±{SCENE_CLAMP_FWD_CM:.0f}cm · "
                        f"티칭 원값 {base_fwd:+.0f}cm · 누적 {acc:+.0f}cm]")
+            rejected.append(f"주행 클램프(계산 {remain_cm:+.0f}cm vs 기준 {ref:+.0f}cm, "
+                            f"허용 ±{SCENE_CLAMP_FWD_CM:.0f}cm)")
             return False
 
         def _turn_clamp(deg):
-            """①정렬 전용 — 한 번의 회전이 ±90°를 넘으면 거부.
+            """①정렬 전용 — 한 번의 회전이 한계를 넘으면 거부.
 
-            전진안·후진안 중 작은 쪽을 고르므로 ①은 원리상 90°를 넘을 수 없다.
-            넘었다면 계산이 틀렸다는 신호라 움직이지 않는 쪽이 맞다.
+            기본 ±90°는 부호·정규화 버그 탐지기다: 전진안·후진안 중 작은 쪽을
+            고르므로 ①은 원리상 90°를 넘을 수 없고, 넘었다면 계산이 틀렸다는 신호다.
+            씬5(⑥ 하차)만 ±22°로 좁다 — 거기서는 이 검사가 버그 탐지기가 아니라
+            AMCL yaw 오차 가드로 쓰인다(상수 정의부 주석에 근거).
             ※ ③정렬에는 쓰지 않는다. ③는 원리적 상한이 없어서 이 검사가
               안전장치가 아니라 고장 유발기가 된다(상수 정의부 주석 참조).
             """
-            if abs(deg) <= SCENE_CLAMP_TURN_DEG:
+            if abs(deg) <= turn_lim:
                 return True
-            self._dlog(f"[AUTO] ⛔ 회전량 {deg:+.0f}°가 한계 "
-                       f"±{SCENE_CLAMP_TURN_DEG:.0f}°를 넘음 — 실행 거부. "
-                       "부호·정규화 계산을 확인하라")
+            self._dlog(f"[AUTO] ⛔ 씬{n} ①정렬 회전량 {deg:+.0f}°가 한계 "
+                       f"±{turn_lim:.0f}°를 넘음 — 실행 거부. "
+                       + ("후진 방향이 크게 어긋났다. 측위(AMCL yaw)를 확인하라"
+                          if n in SCENE_CLAMP_TURN_DEG_BY_SCENE
+                          else "부호·정규화 계산을 확인하라"))
+            rejected.append(f"①정렬 각도 클램프({deg:+.0f}° > ±{turn_lim:.0f}°)")
             return False
 
         def _result(ok, reason, res=None):
@@ -3276,15 +3336,20 @@ class ElevatorTracker(Node):
             정작 알아야 할 것이 그것이라서다(2026-09-04: yaw -97.3°가 로그에만 남고
             아무한테도 전달되지 않았다). 잔여를 못 재면 ok·사유만 담는다.
             """
+            d = {"ok": bool(ok), "reason": reason}
+            if rejected:
+                # 클램프 거부는 폴백 판단에 쓰이므로 표시와 사유를 같이 싣는다.
+                d["clamp_rejected"] = True
+                d["reason"] = f"{reason} — {rejected[-1]}"
             if res is None:
                 res = self._scene_residual(tgt)
             if res is None:
-                return {"ok": bool(ok), "reason": reason}
+                return d
             f_cm, l_cm, r_deg, (cx, cy, _c) = res
-            return {"ok": bool(ok), "reason": reason,
-                    "dist_m": round(math.hypot(tgt["x"] - cx, tgt["y"] - cy), 3),
-                    "yaw_deg": round(r_deg, 1),
-                    "lat_cm": round(l_cm, 1), "fwd_cm": round(f_cm, 1)}
+            d.update(dist_m=round(math.hypot(tgt["x"] - cx, tgt["y"] - cy), 3),
+                     yaw_deg=round(r_deg, 1),
+                     lat_cm=round(l_cm, 1), fwd_cm=round(f_cm, 1))
+            return d
 
         for it in range(1, SCENE_MAX_ITERS + 1):
             res = self._scene_residual(tgt)
