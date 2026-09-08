@@ -277,6 +277,9 @@ CLEAR_MARGIN     = 0.15   # m — 이동량 비례 가드: 여유 ≥ 이동량 
 #   최종판에선 "정렬 시작 시 스캔 스냅샷 대비 가까워진 것만 차단" 방식으로 교체 예정.
 SELF_HIT_MIN     = 0.25   # m — 이보다 가까운 레이는 로봇 자기 몸/부속물로 간주(무시)
 GUARD_HALF_ANG   = 0.5236 # rad(30°) — 이동 방향 ± 이 각도 섹터를 검사
+NARROW_HALF_ANG  = 0.175  # rad(10°) — 계측 전용 좁은섹터. 판정에는 쓰지 않는다.
+                          # ±30°는 0.95m에서 좌우 55cm씩 퍼져 옆 벽을 잡지만 ±10°는
+                          # ±17cm라 거의 1D 거리다. 문 열림 감지도 같은 각을 쓴다.
 # [실측 확정 2026-07-08] 그리퍼가 로봇 오른쪽을 향함 → 화면 오른쪽(+ex) = 로봇 뒤쪽 → 후진(-1)
 # (동쪽을 보고 서면 화면의 오른쪽 = 남쪽 = 몸의 뒤와 같은 기하)
 BASE_X_SIGN      = -1
@@ -2737,6 +2740,13 @@ class ElevatorTracker(Node):
             self._dlog(f"[MOVE] {lbl} {abs(move_m)*100:.0f}cm 거부 — {side} 여유 "
                        f"{'측정불가' if c0 is None else '%.2fm' % c0} < 이동+5cm")
             return
+        # 계측 전용: 좁은섹터(±10°) 여유. 위 c0(±30°)는 가드용이라 그대로 두고 나란히 잰다.
+        # ±30°는 0.95m에서 좌우 55cm씩 퍼져 옆 벽을 잡으므로 이동량 계기로 못 쓴다
+        # (그걸로 오판한 적이 있다). ±10°는 거의 1D 거리라 odom·map과 독립인 지상진실이
+        # 되고, 이동 전후 차이가 곧 '실제로 얼마나 갔나'다. 특히 ④탑승은 정면에 캐빈
+        # 뒷벽이 있어 최적 조건이다.
+        # 위치: 주행 루프 '밖'이다 — 루프 안에 넣으면 15Hz 감시 주기에 영향을 준다.
+        n0 = self._clearance(direction, half_ang=NARROW_HALF_ANG)
         self._last_motion_ts = time.time()
         start_xy = self._odom_xy
         msg = Twist(); msg.linear.x = direction * spd
@@ -2771,10 +2781,20 @@ class ElevatorTracker(Node):
             state["scene_acc"] = acc
             acc_now = acc["fwd_cm"]
         c1 = self._clearance(direction)
+        n1 = self._clearance(direction, half_ang=NARROW_HALF_ANG)   # 계측 전용
+        if n0 is not None and n1 is not None:
+            # Δ여유 ÷ Δodom 이 1에 가까우면 odom이 맞고, 크게 벗어나면 odom이 튄 것이다.
+            narrow = (f" · 좁은섹터 {n0:.2f}→{n1:.2f}m (Δ{n1 - n0:+.2f}m"
+                      + (f", Δ여유/Δodom {abs(n1 - n0) / moved:.2f}" if moved > 0.005 else "")
+                      + ")")
+        else:
+            narrow = f" · 좁은섹터 {'?' if n0 is None else '%.2fm' % n0}→" \
+                     f"{'?' if n1 is None else '%.2fm' % n1}"
         self._dlog(f"[MOVE] {lbl} {direction*moved*100:+.1f}cm"
                    + (f" ({stopped})" if stopped else "")
                    + f" — 단계 누적 {acc_now:+.1f}cm · {side} 여유 "
-                   + ("?" if c1 is None else f"{c1:.2f}m"))
+                   + ("?" if c1 is None else f"{c1:.2f}m")
+                   + narrow)
 
     def _manual_rot(self, deg, guard_off):
         ang = max(-1.6, min(1.6, deg * 3.14159265 / 180.0))   # 1회 최대 ~90°
@@ -2843,8 +2863,13 @@ class ElevatorTracker(Node):
                    + (f" ({stopped})" if stopped else "")
                    + f" — 단계 누적 회전 {acc_now:+.0f}°")
 
-    def _map_pose(self):
+    def _map_pose(self, timeout_s=1.0):
         """map→base_link TF에서 현재 자세 (x_m, y_m, yaw_deg). 실패하면 None.
+
+        timeout_s: TF 대기 상한(초). 기본 1.0은 판정에 쓰는 조회용이다. **계측 전용
+        조회는 반드시 0.0을 넘겨라** — 계측이 TF를 기다리며 1초 멈추면 그 사이 로봇이
+        정지 상태로 정착해 AMCL이 따라잡는다. 즉 계측이 관측 대상(오버슛)을 지워버린다.
+        0.0이면 기다리지 않고 지금 있는 값을 쓰거나 즉시 실패한다.
 
         yaw_deg는 map 프레임 기준 도(°). scene_targets.yaml의 yaw_deg와 같은 규약이다.
 
@@ -2864,7 +2889,7 @@ class ElevatorTracker(Node):
                 self._scene_tf_buf, self._scene_tf_lis = buf, lis
             t = self._scene_tf_buf.lookup_transform(
                 SNAPSHOT_FRAMES["map"], SNAPSHOT_FRAMES["base"],
-                RclpyTime(), timeout=Duration(seconds=1.0))
+                RclpyTime(), timeout=Duration(seconds=timeout_s))
             tr, q = t.transform.translation, t.transform.rotation
             yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
                              1.0 - 2.0 * (q.y * q.y + q.z * q.z))
@@ -2873,8 +2898,10 @@ class ElevatorTracker(Node):
             # 미측위·TF 미수신 등 — 실패는 실패로 돌려준다. 추정값으로 때우지 않는다.
             return None
 
-    def _scene_residual(self, tgt):
+    def _scene_residual(self, tgt, timeout_s=1.0):
         """목표까지의 잔여 → (전진cm, 횡cm, 회전deg, (x, y, yaw_deg)). 자세 실패 시 None.
+
+        timeout_s 는 _map_pose 로 그대로 넘어간다 — 계측 전용 호출은 0.0을 쓴다.
 
         부호 규약 (틀리면 로봇이 반대로 간다):
           로컬 좌표 = R(-yaw) · (목표 - 현재).  +x = 로봇이 바라보는 쪽(전진), +y = 왼쪽.
@@ -2884,7 +2911,7 @@ class ElevatorTracker(Node):
           회전은 목표yaw − 현재yaw 를 ±180으로 정규화. _manual_step(0, deg)와 부호 일치.
         횡(lat)은 이번 범위가 아니다 — 계산해서 로그로만 남긴다(각도 정렬 실측치).
         """
-        cur = self._map_pose()
+        cur = self._map_pose(timeout_s)
         if cur is None:
             return None
         x, y, yaw_deg = cur
@@ -2910,6 +2937,45 @@ class ElevatorTracker(Node):
         self._dlog(f"[AUTO] 씬{n} 스텝 — map({mx:+.3f},{my:+.3f},{myaw:+.1f}°) / {odom}"
                    f" / 잔여 전진 {fwd_cm:+.1f}cm 횡 {lat_cm:+.1f}cm 회전 {rot_deg:+.1f}°"
                    f" / 기준 {ref_remain:+.1f}{u}")
+
+    def _scene_leg_log(self, n, it, label, step_i, cmd, moved, remain_a, u,
+                       t_a, remain_b):
+        """스텝 단위 계측 한 줄 — '명령 / 실제 이동 / 잔여'를 나란히 놓는다.
+
+        _scene_step_log 는 반복 1회당 한 번만 불려서 스텝 단위 자료가 아예 없었다.
+        그래서 2026-09-07 오버슛(1런 +14.6cm / 2런 +12.1cm)의 원인이 전부 타이밍
+        역산으로만 좁혀졌다. 이 값들을 스텝마다 나란히 놓으면 다음 실기에서
+        역산 없이 바로 보인다:
+          명령과 실제(odom)가 맞는데 잔여만 안 줄면 → map(AMCL)이 늦거나 편향된 것.
+          명령과 실제가 어긋나면 → 슬립·가드 쪽이다.
+        계측 전용이다 — 판정에 쓰지 않는다.
+
+        잔여를 두 번 찍는 이유 (반증용):
+          A = 이동 직후 읽은 값,  B = 다음 이동 명령 직전에 다시 읽은 값.
+          그 사이 바퀴는 멈춰 있으므로 **odom 운동은 0**이다. 그런데도 값이 움직이면
+          map 쪽이 뒤늦게 따라온 것이고(시간지연), 안 움직이면 시간지연이 아니라
+          AMCL 보정 자체의 편향이다(1런 레그 odom 63.6cm vs map 57.8cm = 9%).
+          ※ Δt 를 반드시 같이 보라 — A와 B 사이는 루프 오버헤드뿐이라 짧다.
+            Δt 가 AMCL 갱신 주기보다 짧으면 A=B 는 "지연 없음"이 아니라
+            "창이 짧아 갱신이 안 들어옴"이다. 그 판별을 위해 Δt 를 찍는다.
+
+        cmd/moved 는 클램프까지 적용해 실제로 _manual_step 에 넘긴 값과 scene_acc
+        (odom 누적)의 증분이다. map 자세는 B 시점 값이고, 계측이 주행을 멈춰 세우지
+        않도록 TF 대기 없이(timeout 0) 읽는다 — 못 읽으면 그냥 '없음'이다.
+        """
+        cur = self._map_pose(0.0)
+        mp = (f"map({cur[0]:+.3f},{cur[1]:+.3f},{cur[2]:+.1f}°)"
+              if cur is not None else "map(없음)")
+        oxy = getattr(self, "_odom_xy", None)
+        oyaw = getattr(self, "_odom_yaw", None)
+        odom = (f"odom({oxy[0]:+.3f},{oxy[1]:+.3f},{math.degrees(oyaw):+.1f}°)"
+                if oxy is not None and oyaw is not None else "odom(없음)")
+        b_txt = f"{remain_b:+.1f}{u}" if remain_b is not None else "없음"
+        self._dlog(f"[LEG] 씬{n} 반복{it} {label} 스텝{step_i} — "
+                   f"명령 {cmd:+.1f}{u} / odom이동 {moved:+.1f}{u}"
+                   f" / map잔여(직후) {remain_a:+.1f}{u}"
+                   f" / map잔여(직전) {b_txt}"
+                   f" / Δt {time.time() - t_a:.2f}s / {mp} / {odom}")
 
     def _run_scene_moves(self, n, run_seq=None):
         """여정 단계 자동 안무 재생 (별도 스레드) — 티칭값에서 단계 누적을 뺀
@@ -3055,51 +3121,77 @@ class ElevatorTracker(Node):
         flips, last_sign = 0, (1 if remain > 0 else -1)
         best = abs(remain)      # 지금까지 도달한 최소 잔여 — '개선 중인가' 판정용
         steps = 0               # 스텝 상한 (개선이 계속되면 flips가 안 쌓이므로 별도 상한)
-        while abs(remain) >= tol:
-            steps += 1
-            if steps > SCENE_LEG_MAX_STEPS:
-                self._dlog(f"[AUTO] 잔여 {remain:+.0f}{u} — 스텝 상한"
-                           f"({SCENE_LEG_MAX_STEPS}회) 도달, 이 정도로 마침")
-                return "stop"
-            if getattr(self, "_step_abort", False):
-                self._dlog(f"[AUTO] 중단됨 — 패드 보정 후 같은 단계를 다시 누르면 "
-                           f"잔여({abs(remain):.0f}{u})부터 이어감")
-                return "abort"
-            step = max(-lim, min(lim, remain))
-            if kind == "fwd":
-                self._manual_step(step, 0.0)      # 음수 = 후진 (사용자 명시 허용)
-            else:
-                self._manual_step(0.0, step)
-            with state_lock:
-                new_done = (state.get("scene_acc") or {}).get(key, 0.0)
-            if abs(new_done - done) < 0.3:        # 스텝이 거부되거나 전혀 못 움직임
-                self._dlog(f"[AUTO] 진행 불가 (가드/장애물) — 잔여 "
-                           f"{abs(remain):.0f}{u}. 패드로 상황 정리 후 단계 재클릭")
-                return "abort"
-            done = new_done
-            remain = residual_fn()
-            if remain is None:
-                self._dlog(f"[AUTO] 씬{n} 반복{it} {label} — 자세 조회 실패, 중단")
-                return "abort"
-            if not clamp_fn(remain):              # 이동 중 측위가 튄 경우
-                return "abort"
-            # 진동 감지 — 부호가 뒤집혀도 '잔여가 계속 줄고 있으면' 정상 수렴이다.
-            # 바퀴 슬립 때문에 회전은 한 번에 안 맞고 넘었다 되돌아오며 좁혀지는 게
-            # 정상 거동인데, 부호 뒤집힘만 세면 그걸 고장으로 오판한다.
-            # (2026-09-04 실기: -63°→-35°→-13°로 수렴 중이었는데 flips>=2로 중단,
-            #  yaw -12.5° 미달로 끝났다.) 그래서 '개선이 없을 때만' 카운트한다.
-            s_ = 1 if remain > 0 else -1
-            if abs(remain) >= tol and s_ != last_sign:
-                if abs(remain) < best * 0.8:      # 최소 잔여 대비 20% 이상 줄었다
-                    flips = 0                     # 진전이 있으면 카운터를 되돌린다
+        # 계측 전용. 한 스텝의 로그는 '다음 이동 명령 직전'에 잔여를 한 번 더 읽어야
+        # 완성되므로(그 사이 odom 운동 0), 여기 담아 뒀다가 다음 바퀴에서 찍는다.
+        # 판정에는 일절 쓰지 않는다 — 아래 while 조건·진동 감지는 전부 remain(A)만 본다.
+        pend = None
+
+        def _probe():
+            """계측용 잔여 재조회 — TF 대기 없이(0.0), 실패하면 None.
+            여기서 기다리면 로봇이 정지 상태로 정착해 관측 대상이 지워진다."""
+            try:
+                return residual_fn(fast=True)
+            except Exception:
+                return None
+
+        try:
+            while abs(remain) >= tol:
+                if pend is not None:            # B = 다음 이동 명령 직전 (odom 운동 0)
+                    self._scene_leg_log(*pend, _probe())
+                    pend = None
+                steps += 1
+                if steps > SCENE_LEG_MAX_STEPS:
+                    self._dlog(f"[AUTO] 잔여 {remain:+.0f}{u} — 스텝 상한"
+                               f"({SCENE_LEG_MAX_STEPS}회) 도달, 이 정도로 마침")
+                    return "stop"
+                if getattr(self, "_step_abort", False):
+                    self._dlog(f"[AUTO] 중단됨 — 패드 보정 후 같은 단계를 다시 누르면 "
+                               f"잔여({abs(remain):.0f}{u})부터 이어감")
+                    return "abort"
+                step = max(-lim, min(lim, remain))
+                if kind == "fwd":
+                    self._manual_step(step, 0.0)      # 음수 = 후진 (사용자 명시 허용)
                 else:
-                    flips += 1
-                    if flips >= 2:
-                        self._dlog(f"[AUTO] 잔여 {remain:+.0f}{u} — 진동 감지(개선 없음), "
-                                   "이 정도로 마침 (필요하면 패드로 미세 보정)")
-                        return "stop"
-            best = min(best, abs(remain))
-            last_sign = s_
+                    self._manual_step(0.0, step)
+                with state_lock:
+                    new_done = (state.get("scene_acc") or {}).get(key, 0.0)
+                if abs(new_done - done) < 0.3:        # 스텝이 거부되거나 전혀 못 움직임
+                    self._dlog(f"[AUTO] 진행 불가 (가드/장애물) — 잔여 "
+                               f"{abs(remain):.0f}{u}. 패드로 상황 정리 후 단계 재클릭")
+                    return "abort"
+                moved = new_done - done               # odom 누적의 증분 = 실제 이동량
+                done = new_done
+                remain = residual_fn()
+                t_a = time.time()                     # A(이동 직후)를 읽은 시각
+                if remain is None:
+                    self._dlog(f"[AUTO] 씬{n} 반복{it} {label} — 자세 조회 실패, 중단")
+                    return "abort"
+                # 계측 전용 — 클램프 검사보다 앞에 담는다. 클램프에 걸려 중단되는 스텝이야말로
+                # 자료가 필요한 스텝인데, 아래 finally 가 어느 종료 경로에서든 찍어 준다.
+                pend = (n, it, label, steps, step, moved, remain, u, t_a)
+                if not clamp_fn(remain):              # 이동 중 측위가 튄 경우
+                    return "abort"
+                # 진동 감지 — 부호가 뒤집혀도 '잔여가 계속 줄고 있으면' 정상 수렴이다.
+                # 바퀴 슬립 때문에 회전은 한 번에 안 맞고 넘었다 되돌아오며 좁혀지는 게
+                # 정상 거동인데, 부호 뒤집힘만 세면 그걸 고장으로 오판한다.
+                # (2026-09-04 실기: -63°→-35°→-13°로 수렴 중이었는데 flips>=2로 중단,
+                #  yaw -12.5° 미달로 끝났다.) 그래서 '개선이 없을 때만' 카운트한다.
+                s_ = 1 if remain > 0 else -1
+                if abs(remain) >= tol and s_ != last_sign:
+                    if abs(remain) < best * 0.8:      # 최소 잔여 대비 20% 이상 줄었다
+                        flips = 0                     # 진전이 있으면 카운터를 되돌린다
+                    else:
+                        flips += 1
+                        if flips >= 2:
+                            self._dlog(f"[AUTO] 잔여 {remain:+.0f}{u} — 진동 감지(개선 없음), "
+                                       "이 정도로 마침 (필요하면 패드로 미세 보정)")
+                            return "stop"
+                best = min(best, abs(remain))
+                last_sign = s_
+        finally:
+            # 레그가 어떻게 끝나든(done/stop/abort/예외) 마지막 스텝 한 줄은 남긴다.
+            if pend is not None:
+                self._scene_leg_log(*pend, _probe())
         return "done"
 
     def _run_scene_gotopose(self, n, moves, tgt):
@@ -3204,8 +3296,9 @@ class ElevatorTracker(Node):
                 self._dlog(f"[AUTO] 씬{n} 반복{it} ①정렬 turn={turn:+.1f}° ({why}) "
                            f"/ dist={dist:.3f}m")
 
-                def _aim_residual():
-                    r = self._scene_residual(tgt)
+                def _aim_residual(fast=False):
+                    # fast=True 는 계측 전용 재조회 — TF를 기다리지 않는다(0.0).
+                    r = self._scene_residual(tgt, 0.0 if fast else 1.0)
                     if r is None:
                         return None
                     _f, _l, _r, (cx, cy, cyaw) = r
@@ -3227,9 +3320,11 @@ class ElevatorTracker(Node):
                     drive_cm = d0[0] if d0 else 0.0
                     self._dlog(f"[AUTO] 씬{n} 반복{it} ②주행 {drive_cm/100.0:+.3f}m "
                                + ("(후진)" if drive_cm < 0 else "(전진)"))
-                    st = self._scene_leg(n, it, "②주행", "fwd",
-                                         lambda: (self._scene_residual(tgt) or [None])[0],
-                                         _drive_clamp)
+                    st = self._scene_leg(
+                        n, it, "②주행", "fwd",
+                        lambda fast=False: (self._scene_residual(
+                            tgt, 0.0 if fast else 1.0) or [None])[0],
+                        _drive_clamp)
                     if st == "abort":
                         return _result(False, "②주행 중단")
                     if st == "stop":
@@ -3248,9 +3343,11 @@ class ElevatorTracker(Node):
                 # 틀린 채로 서서 다음 씬의 방위 계산이 틀어진다.
                 self._dlog(f"[AUTO] ⚠ ③정렬 회전이 큼 ({r3[2]:+.0f}°) — "
                            "출발 자세가 많이 어긋났을 수 있다")
-            st = self._scene_leg(n, it, "③정렬", "rot",
-                                 lambda: (self._scene_residual(tgt) or [None, None, None])[2],
-                                 lambda _d: True)   # ③는 회전 클램프 없음
+            st = self._scene_leg(
+                n, it, "③정렬", "rot",
+                lambda fast=False: (self._scene_residual(
+                    tgt, 0.0 if fast else 1.0) or [None, None, None])[2],
+                lambda _d: True)   # ③는 회전 클램프 없음
             if st == "abort":
                 return _result(False, "③정렬 중단")
             if st == "stop" or oscillated:
