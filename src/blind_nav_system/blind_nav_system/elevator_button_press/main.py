@@ -246,6 +246,106 @@ USE_HEIGHT_PRIOR = False
 LIFT_PRIOR_CALL  = 0.94   # 호출 버튼(▲▼) lift — 실측(2026-07-15): 실물 홀 press 0.92~0.97
 LIFT_PRIOR_PANEL = 0.94   # 차내 층 버튼 lift — 실측: 실물 차내 press 0.91('5')~0.98('3' 부근)
 # (실물 엘리베이터 실측 기반. 태블릿 연습 환경은 0.43~0.50이었음 — 장소 다르면 +/-로 조정)
+
+# ── 차내 층버튼: 목표 버튼의 '행'에 맞춘 lift 높이 ───────────────────────────
+# 위 LIFT_PRIOR_PANEL 은 "어느 버튼인지 모를 때" 쓰는 탐색 높이다. 버튼이 정해지면
+# 그 버튼이 몇 번째 행인지는 이미 아는 정보이므로(배치 = button_layout.json) 높이를
+# 바로 맞출 수 있다. 2026-09-08 실기에서 1층·3층이 "누르기"가 아예 안 켜진 원인이
+# 이것이다 — 세 행을 한 높이(0.94)로 찾으려 했고, 팔이 틀린 행 앞에 서 있었다.
+#
+# 행 간격(m) — 스냅샷 3개 독립 측정의 중앙값.
+#     20260828T180736   62.6 / 53.5 mm
+#     20260828T180746   58.9 / 57.6 mm
+#     20260902T183106   60.6 / 56.8 mm
+#   → 중앙값 60.6 / 56.8 mm (표본 폭 3.7 / 4.1mm)
+#   세 스냅샷 전부 fill [●●·/·●●/●●●], labels [문열림,3,2,5,종,1,4] 로 동일하다.
+#   compare.py:147 의 pitches(rowc) 가 행 중심의 순차 차분이므로 이 둘은
+#   [row0→row1, row1→row2] 순서다.
+LIFT_ROW_PITCH_M = (0.0606, 0.0568)
+# 기준점(앵커): 2026-09-08 실기 18:18:25~18:18:36, '5'가 ex=-3 / ey=-9 로 정조준되고
+# 실제로 눌린 구간 내내 lift=0.930 으로 고정이었다(정렬 중·누르는 중·복귀 중 전부).
+# '5'는 배치의 row1 이므로 이것이 row1 의 실측값이다.
+# ※ 절대 높이 캘리브레이션을 하지 않는다. row1 실측을 앵커로 두고 행 간격만 더하고
+#   뺀다(상대 앵커링). 절대 체인(base z + 카메라 오프셋 + 손끝 오프셋)은 세 오프셋이
+#   섞여 들어오므로 쓰지 않는다. 상대 방식이면 그 셋이 전부 약분된다.
+LIFT_ROW1_M = 0.930
+# 교차검증: 위 LIFT_PRIOR_PANEL 주석의 독립 실측이 "0.91('5')~0.98('3' 부근)"이다.
+# 이 표의 계산값은 '5'=0.930 / '3'=0.991 — 각각 2cm·1cm 안에서 맞는다.
+# 그리고 '3'이 '5'보다 높다는 것이 두 소스 모두에서 같다 = 위아래 부호가 맞다.
+#
+# 조작반 높이대 밖에서는 행 보정을 하지 않는다 — 큰 점프는 이 기능의 일이 아니다.
+# (연습용 태블릿 환경은 0.43~0.50 이라 이 대역 밖이고, 따라서 영향을 받지 않는다)
+LIFT_PANEL_BAND     = (0.80, 1.10)
+# 이 이하 차이면 안 움직인다. 행 간격의 절반(2.8cm)보다 작아야 행 보정이 의미가 있다.
+LIFT_ROW_DEADBAND_M = 0.015
+
+
+def _lift_for_row(ri, nrows):
+    """행 인덱스 → lift(m). row1 앵커에서 행 간격을 누적한다. 모르면 None.
+
+    측정한 배치(3행)가 아니면 None 을 준다 — UI 로 배치를 바꿔 행 수가 달라지면
+    행 간격 표가 맞지 않으므로, 추측하지 않고 폴백시킨다.
+    """
+    if ri is None or nrows != len(LIFT_ROW_PITCH_M) + 1 or not (0 <= ri < nrows):
+        return None
+    h = LIFT_ROW1_M
+    for i in range(ri, 1):        # ri < 1 → 위로 (lift 증가)
+        h += LIFT_ROW_PITCH_M[i]
+    for i in range(1, ri):        # ri > 1 → 아래로 (lift 감소)
+        h -= LIFT_ROW_PITCH_M[i]
+    return h
+
+
+def _row_of_label(tok):
+    """배치(_layout_rows)에서 그 라벨이 몇 번째 행인지. 없으면 None."""
+    t = (tok or "").strip()
+    if not t:
+        return None
+    for ri, row in enumerate(_layout_rows):
+        if any(x.strip() == t for x in row):
+            return ri
+    return None
+
+
+def _lift_row_prior(node, place, tok):
+    """차내 층버튼: 목표 버튼의 행 높이로 lift 를 맞춘다. 홀(▲▼)은 건드리지 않는다.
+
+    USE_HEIGHT_PRIOR 와 무관하게 동작한다 — 그 플래그는 "탐색 높이로 크게 점프"를
+    켜고 끄는 것이고, 이쪽은 이미 조작반 높이대에 있는 팔을 행에 맞춰 수 cm 다듬는
+    것이라 성질이 다르다. 대역(LIFT_PANEL_BAND) 밖이면 아무것도 하지 않으므로
+    연습 환경에서 큰 점프가 생길 여지도 없다.
+    행을 못 찾거나 대역 밖이면 기존 높이를 그대로 두고 사유를 로그로 남긴다 —
+    지금보다 나빠지지 않는 것이 이 함수의 하한이다.
+    """
+    if place != "cab":
+        return
+    ri  = _row_of_label(tok)
+    tgt = _lift_for_row(ri, len(_layout_rows))
+    with state_lock:
+        cur = state["lift"]
+    if tgt is None:
+        node._dlog(f"[PRIOR] '{tok}' 의 행을 배치에서 못 찾음 — 행 보정 생략, "
+                   f"규정 높이({LIFT_PRIOR_PANEL:.2f}) 그대로")
+        return
+    if cur is None:
+        node._dlog(f"[PRIOR] lift 현재값 미수신 — 행 보정 생략 "
+                   f"('{tok}' = {ri}행, 목표였던 값 {tgt:.3f})")
+        return
+    if not (LIFT_PANEL_BAND[0] <= cur <= LIFT_PANEL_BAND[1]):
+        node._dlog(f"[PRIOR] lift {cur:.3f} 가 조작반 높이대 "
+                   f"{LIFT_PANEL_BAND[0]:.2f}~{LIFT_PANEL_BAND[1]:.2f} 밖 — 행 보정 생략 "
+                   "(여기서 큰 점프는 하지 않는다)")
+        return
+    if abs(cur - tgt) <= LIFT_ROW_DEADBAND_M:
+        node._dlog(f"[PRIOR] '{tok}' = {ri}행, 목표 lift {tgt:.3f} — 이미 그 높이 "
+                   f"({cur:.3f}, 차이 {(tgt - cur) * 100:+.1f}cm)")
+        return
+    node._dlog(f"[PRIOR] '{tok}' = {ri}행 → lift {cur:.3f}→{tgt:.3f} "
+               f"({(tgt - cur) * 100:+.1f}cm · 행 간격 실측 기준)")
+    if not node._send_goal(["joint_lift"], [tgt]):
+        node._dlog("[PRIOR] ⛔ lift 명령이 안 나갔다 — 행 높이 미적용")
+
+
 PRESS_DEPTH        = 0.015  # m — 버튼 표면을 지나 밀어넣는 깊이 (버튼 스트로크)
 PRESS_DIST_MAX     = 0.60   # m — 이보다 멀면 누르기 거부
 ARM_EXT_MIN, ARM_EXT_MAX = 0.00, 0.50  # wrist_extension 안전 범위
@@ -1393,6 +1493,10 @@ def select():
             if cur_lift is not None and abs(cur_lift - prior) > 0.12:
                 node._dlog(f"[PRIOR] 규정 높이 선이동: lift {cur_lift:.2f}→{prior:.2f}")
                 node._send_goal(["joint_lift"], [prior])
+        # 타겟이 정해지는 유일한 지점이다 — 여기서만 '어느 버튼인지'를 안다.
+        # (_set_place 와 /scene 은 바로 앞에서 target_text 를 None 으로 비우므로
+        #  그 두 곳에서는 행을 알 수 없고, 탐색 높이 LIFT_PRIOR_PANEL 이 맞다.)
+        _lift_row_prior(node, _pl0, text)
     return jsonify(ok=True)
 
 @app.route("/decisions")
