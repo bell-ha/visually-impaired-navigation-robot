@@ -1921,6 +1921,15 @@ SCENE_COORD_FALLBACK = {5}
 
 # 3단 go-to-pose 반복 상한 — 수렴하면 그 전에 끝난다.
 SCENE_MAX_ITERS = 4
+# 반복이 '의미 있게' 줄이지 못하면 상한을 기다리지 않고 끊는다.
+# 2026-09-09 씬3: 반복2·3·4 의 dist 가 0.097 → 0.104 → 0.071 이었다 — 3은 오히려
+# 나빠졌고 4가 겨우 되돌렸는데 그 둘에 약 25초를 썼다.
+# 기준을 '직전 대비 20% 이상 감소'로 잡은 이유: 한 반복은 ①정렬·②주행·③정렬을 다
+# 돌아 10초 이상 걸린다. 그 값을 쓸 만한 개선이라면 남은 오차의 1/5 정도는 지워야
+# 한다. 측위 잡음(수 cm)만으로도 ±10% 는 흔들리므로 그보다 위에 둬야 잡음을 개선으로
+# 오인하지 않는다. 반복1→2 는 늘 허용한다(2회는 돌려 본다) — 반복1 은 조준 없이
+# 시작하는 경우가 있어 한 번의 보정 기회는 줘야 한다.
+SCENE_ITER_GAIN = 0.8
 
 # 각 구간의 허용오차 — _scene_leg 가 이 값으로 수렴을 판정한다.
 # 2026-09-08: 1.0 → 2.0. 1cm는 이 로봇이 한 스텝으로 도달할 수 없는 값이다 —
@@ -3810,6 +3819,8 @@ class ElevatorTracker(Node):
                      lat_cm=round(l_cm, 1), fwd_cm=round(f_cm, 1))
             return d
 
+        prev_dist = None      # 직전 반복 시작 시점의 dist — 무진전 판정용
+        stop_why = None       # 조기 중단 사유 (최종 결과에 실린다)
         for it in range(1, SCENE_MAX_ITERS + 1):
             res = self._scene_residual(tgt)
             if res is None:
@@ -3819,6 +3830,16 @@ class ElevatorTracker(Node):
             self._scene_step_log(n, "fwd", res, fwd_cm, base_fwd)
             dx, dy = tgt["x"] - px, tgt["y"] - py
             dist = math.hypot(dx, dy)
+            # 무진전 중단: 직전 반복이 dist 를 20% 이상 못 줄였으면 더 돌지 않는다.
+            # 조용히 끝내지 않는다 — 사유를 로그와 결과에 남긴다.
+            if it >= 3 and prev_dist is not None and dist > prev_dist * SCENE_ITER_GAIN:
+                stop_why = (f"무진전 중단 (반복{it-1} dist {prev_dist:.3f}m → "
+                            f"{dist:.3f}m, {(1-dist/prev_dist)*100:+.0f}% — "
+                            f"{(1-SCENE_ITER_GAIN)*100:.0f}% 이상 줄어야 계속)")
+                self._dlog(f"[AUTO] 씬{n} 반복{it} 진입 전 {stop_why}. "
+                           f"남은 반복({SCENE_MAX_ITERS - it + 1}회)을 건너뛴다")
+                break
+            prev_dist = dist
             if dist <= POSE_DONE_M and abs(rot_deg) <= POSE_DONE_DEG:
                 self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓ ({it}회) — "
                            f"잔여 dist={dist:.3f}m yaw={rot_deg:+.1f}° 횡={lat_cm:+.1f}cm")
@@ -3950,8 +3971,12 @@ class ElevatorTracker(Node):
         ok = (dist <= POSE_DONE_M and abs(rot_deg) <= POSE_DONE_DEG)
         self._dlog(f"[AUTO] {SCENES[n]} 안무 " + ("완료 ✓" if ok else "⚠ 미달")
                    + f" — 잔여 dist={dist:.3f}m yaw={rot_deg:+.1f}° "
-                     f"횡={lat_cm:+.1f}cm 전진={fwd_cm:+.1f}cm")
-        return _result(ok, "완료" if ok else "미달", res)
+                     f"횡={lat_cm:+.1f}cm 전진={fwd_cm:+.1f}cm"
+                   + (f" [{stop_why}]" if stop_why else ""))
+        _rsn = "완료" if ok else "미달"
+        if stop_why:
+            _rsn = f"{_rsn} — {stop_why}"
+        return _result(ok, _rsn, res)
 
     def _maybe_base_nudge(self, ex: float, dist):
         """좌우 픽셀 오차 → 안전 확인 후 베이스 소폭 전/후진 (별도 스레드)."""
