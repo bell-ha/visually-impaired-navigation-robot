@@ -1580,26 +1580,16 @@ def _elev_wait_press_done(timeout=30):
         time.sleep(0.3)
     return False
 
-# ⑥ 하차(후진 186cm) 완료 판정용. 목표값은 엘베앱 SCENE_MOVES[5]와 같은 수치다.
-_EXIT_TARGET_CM = -186.0
-_EXIT_TOL_CM    = 1.0     # 도달 허용 오차. 넓히지 않는다 — scene_acc는 연속이 아니라
-                          # 스텝 완료마다 점프하므로(0 → -51.9 → -102.9 → -153.8 →
-                          # -187.2 → -184.0) tol을 넓히면 done이 오버슛 시점(-187.2)에
-                          # 터진다. 앱이 +3.1cm 보정을 하러 가기 직전이다 — 대시보드가
-                          # 완료를 선언하고 리스를 회수해 그 보정이 "제어권 없음"으로
-                          # 거부된다. #92가 없애려던 구조를 게이트 안에 다시 심는 꼴이라,
-                          # 오차는 tol이 아니라 아래 강등(_EXIT_NEAR_CM)으로 흡수한다.
-# 진동 break로 스스로 멈춘 완주를 실패로 오판하지 않기 위한 강등 임계.
-# 유도가 아니라 실측이다 (~/.ros/log/python3_12606_1784856324677.log:217, ⑥ 하차):
-#   - 스텝 오버슛: 명령 -50cm → 실제 -51.9 / -51.0 / -50.8 = 1~2cm
-#   - 진동 break 시점 잔여: 최대 2cm. 관측 2건 — ⑥ 하차 1건(잔여 2.0cm, 위 로그)과
-#     ② 문앞 정렬 1건(잔여 1cm, python3_303226_1784871041433.log:97). 씬은 다르지만
-#     둘 다 같은 _run_scene_moves_inner 진동 감지 경로다. ⑥ 완주 4건 중 이 경로는 1건.
-#   - 5.0 = 관측 최대의 2.5배 마진
-# "186cm면 문틀 마진이 얼마"라는 근거가 아니다 — 그건 아무도 잰 적이 없다.
-# 근거는 "관측된 진동 잔여가 최대 2cm"뿐이다. #92가 잡으려는 진짜 실패는 잔여
-# 136cm 이상이라 27배 떨어져 있어 이 창으로 새어나올 수 없다.
-_EXIT_NEAR_CM   = 5.0
+# ⑥ 하차 완료 판정은 2026-09-09 부터 엘베앱의 실행 기록(scene_result)으로 한다.
+# 그래서 _EXIT_TARGET_CM(-186.0) · _EXIT_TOL_CM(1.0) · _EXIT_NEAR_CM(5.0) 을 지웠다.
+#   왜: 그 셋은 "scene_acc 누적이 하드코딩 -186cm 에 닿았나"를 재는 자였다. 좌표
+#   경로가 들어오자 누적이 시작점에 따라 -147~-226cm 로 변해서, 하필 좌표가 잘 될
+#   때만 'stall' → 구조 절차가 도는 역전이 났다(91a3bfb. 실측 -206.9cm → stall).
+#   이제 도달 여부는 엘베앱이 POSE_DONE_M(5cm)/POSE_DONE_DEG(5°)로 판정해
+#   scene_result.ok 에 싣는다 — 데이터가 있는 곳에서 판정하는 것이 맞고, 오버슛·
+#   진동 강등도 거기서 흡수된다(그게 _EXIT_TOL_CM/_EXIT_NEAR_CM 가 하던 일이다).
+# scene_acc 는 버리지 않는다 — 아래 _EXIT_STALL_SEC 의 '진행이 멎었나'(생존 판정)에
+# 계속 쓴다. 완료 판정에는 쓰지 않는다. 두 역할을 분리한 것이 이번 변경의 핵심이다.
 _EXIT_STALL_SEC = 10.0    # 첫 진행이 기록된 뒤, 이만큼 진행이 없으면 실패
 # 첫 진행이 기록되기 전에만 쓰는 유예. scene_acc는 스텝이 '끝나야' 갱신되므로
 # (엘베앱 _manual_trans 말미) 그 전까지는 정상 동작 중에도 진행이 0으로 보인다.
@@ -1620,7 +1610,13 @@ _EXIT_STALL_SEC = 10.0    # 첫 진행이 기록된 뒤, 이만큼 진행이 없
 #     ⑥ 하차 완주 로그는 python3_{313116,117654,12606,57478}_*.log 넷이다.
 #   - 20.0 = 관측 최대 11.7s에 8.3s, 이론 최악 16.5s에 3.5s 여유
 _EXIT_START_GRACE = 20.0
-_EXIT_MAX_SEC   = 60.0    # 절대 상한(무한대기 방지 백스톱)
+# 절대 상한(무한대기 방지 백스톱). 2026-09-09: 60.0 → 120.0.
+# 60초는 좌표 경로에 너무 빡빡하다 — 9/9 오전 씬3(1.9m 주행)이 52.7초였고 ⑥도 같은
+# 3단 방식·같은 거리다. 정상과 7초 차로 두면 정상 완주를 timeout 으로 죽인다.
+# 반대로 _SCENE_MAX_SEC(240) 을 그대로 쓰면 문턱에 걸친 로봇의 구조 호출이 3분 뒤다.
+# 120 = 관측 최악(52.7s)의 2.3배. 무진전 중단(엘베앱 SCENE_ITER_GAIN)이 반복3에서
+# 끊으므로 반복 4회 완주는 드물고, 이 값은 정상 경로가 아니라 백스톱이다.
+_EXIT_MAX_SEC   = 120.0
 _EXIT_POLL_SEC  = 0.4
 _EXIT_MISS_MAX  = 2       # /status 무응답이 이만큼 연속되면 앱이 죽은 것으로 본다
 
@@ -1629,59 +1625,97 @@ _EXIT_MISS_MAX  = 2       # /status 무응답이 이만큼 연속되면 앱이 �
 _rescue_hold = False
 
 
-def _elev_wait_exit_done():
-    """⑥ 하차(후진 186cm)를 '진행량'으로 확인. (사유, 진행cm) 반환.
+def _elev_wait_exit_done(seq=None):
+    """⑥ 하차 완료를 엘베앱 실행 기록으로 확인. (사유, 결과dict, 진행cm) 반환.
 
-    사유: "done"=목표 도달 / "stall"=무진행 / "timeout"=절대상한 /
-          "cancel"=사용자 취소 / "noapp"=엘베앱 상태 조회 불가
+    사유: "done"=목표 자세 도달 / "fallback"=좌표 거부 후 하드코딩 폴백으로 탈출
+          완주(목표 자세는 아니다) / "fail"=끝났지만 미달 / "noanmu"=안무가 안 떴다 /
+          "stall"=진행이 멎음 / "timeout"=절대상한 / "cancel"=사용자 취소 /
+          "forced"=사용자 강제 / "noapp"=엘베앱 상태 조회 불가
 
-    /scene은 안무 스레드를 start한 뒤 즉시 ok를 돌려준다 — 접수이지 완료가 아니다.
-    상수 총시간으로 대신할 수도 없다: _manual_step 한 스텝의 자체 타임아웃만
-    50cm 최악 8.5s라 총합이 ~40s까지 늘어난다(25~30s 상수는 정상 완주를 실패로
-    오판한다). 그래서 '얼마나 걸렸나'가 아니라 '진행이 멎었나'로 본다."""
+    ■ 두 신호를 같이 보는 이유 — 역할이 다르다
+      · 성공 판정 = scene_result. 엘베앱이 POSE_DONE_M/DEG 로 이미 판정한 값이다.
+        2026-09-08 까지는 여기서 scene_acc 누적을 하드코딩 -186cm 와 비교했는데,
+        좌표 경로의 누적은 시작점에 따라 -147~-226cm 로 변해서 좌표가 잘 될 때만
+        실패로 뜨는 역전이 났다(91a3bfb).
+      · 생존 판정 = scene_acc. scene_result.running 만 보면 엘베앱이 스텝 중간에
+        굳었을 때 10초가 아니라 절대상한(120초)까지 기다린다. 사람을 태운 채 문턱에
+        걸친 상황에서 그 차이가 크다. 그래서 '진행이 멎었나'는 계속 본다.
+        완료 판정에는 절대 쓰지 않는다.
+
+    ■ 강제(forced)는 ⑥에서 'done' 이 아니다 — 규칙의 귀결이다
+      강제는 "이 대기를 건너뛴다"이지 "전제조건이 충족됐다고 선언한다"가 아니다.
+      ②③④는 다음 행위가 가역적(다음 씬, 여전히 엘베앱 안)이라 대기만 건너뛰어도
+      된다. ⑥은 다음이 비가역·자동이다 — 리스 반납 → /switch_map{init_exit}(AMCL
+      재초기화) → /elevator_app{running:False}(구조용 조종 패드가 사라진다) →
+      /goto(사람 태운 채 Nav2 출발). 그리고 버튼을 누른 사람에게는 "로봇이 실제로
+      나왔나"를 확인할 정보가 없다. 그래서 ⑥의 강제는 _exit_failed 로 보낸다:
+      제어권·앱을 유지하고 여정만 끊는다 = "그만 묻고 수동 제어를 달라".
+
+    ※ seq 는 _elev_scene(5) 가 돌려준 실행번호다. 반드시 넘겨라 — 안 넘기면 직전
+      회차의 낡은 기록을 자기 것으로 오독할 수 있다(_elev_wait_scene_done 과 같은 사유).
+    """
     t0 = time.monotonic()
     last_prog = t0
-    best = None          # 지금까지 진행한 최대 거리(cm, 절대값)
+    best = None          # 지금까지 진행한 최대 거리(cm, 절대값) — 생존 판정용
     cur  = None          # 마지막으로 읽은 누적 진행량 — 실패 통보에 그대로 실린다
+    last_res = None      # 마지막으로 본 실행 기록(실행중이어도 담는다)
     miss = 0             # /status 연속 무응답 횟수
     while True:
+        with _auto_lock:
+            if _AUTO.get("force"):
+                _AUTO["force"] = False      # 1회용 — 다음 씬으로 새어나가면 안 된다
+                return "forced", last_res, cur
         if _AUTO["cancel"]:
-            return "cancel", cur
+            return "cancel", last_res, cur
         st = _elev_status(timeout=1.0)
         if st is None:
-            # 1회 표본으로 단정하지 않는다. noapp은 stall과 달리 _rescue_hold를
-            # 세우지 않아 finally가 리스를 반납하는데, 일시적 끊김에 오탐하면
+            # 1회 표본으로 단정하지 않는다. noapp 은 stall 과 달리 _rescue_hold 를
+            # 세우지 않아 finally 가 리스를 반납하는데, 일시적 끊김에 오탐하면
             # 이 함수가 지키려던 구조용 조종 패드를 그대로 잃는다.
-            # 그렇다고 60초 상한까지 헛돌지도 않는다 — 2회면 충분하다. 비용은
-            # 최악 ≈2.4s(무응답이 _elev_status timeout 1.0s를 다 쓸 때 1.0+0.4+1.0),
-            # 포트가 닫혀 즉시 거부되면 ≈0.4s다.
             miss += 1
             if miss >= _EXIT_MISS_MAX:
-                return "noapp", cur
+                return "noapp", last_res, cur
         else:
             miss = 0
+            # (1) 생존 신호 — 진행이 있었나
             v = (st.get("scene_acc") or {}).get("fwd_cm")
             if isinstance(v, (int, float)):
                 cur = float(v)
-                if abs(cur - _EXIT_TARGET_CM) <= _EXIT_TOL_CM:
-                    return "done", cur
                 if best is None or abs(cur) - best > 0.5:   # 0.5cm = 진행으로 칠 최소량
                     best = abs(cur)
                     last_prog = time.monotonic()
+            # (2) 완료 판정 — 실행 기록
+            res = st.get("scene_result") or {}
+            if res:
+                last_res = res
+            if seq is not None and res.get("seq") != seq:
+                # 내가 시킨 회차가 아니다 = 안무가 안 떴다. /scene 라우트가 응답
+                # 전에 기록을 세우므로 '아직 안 생김'은 아니다. 옛 코드는 이 경우
+                # scene_acc 가 0 인 채로 유예 20초를 태운 뒤 stall 로 잡았다.
+                return "noanmu", res, cur
+            if res.get("n") != 5:
+                return "noanmu", res, cur
+            if not res.get("running", True):
+                if res.get("ok"):
+                    return "done", res, cur
+                # 좌표 거부 → 하드코딩 폴백. 폴백이 완주했으면 목표 자세는 아니어도
+                # 엘리베이터에서는 나왔다. 거기서 구조 절차를 부르는 것은 오경보다.
+                # 폴백이 중간에 멈춘 경우(fallback_ok=False)는 진짜 실패다.
+                if res.get("fallback") and res.get("fallback_ok"):
+                    return "fallback", res, cur
+                return "fail", res, cur
         now = time.monotonic()
-        # best > 0.5 = 실제 진행이 한 번이라도 기록됨. 첫 폴링에서 0.0을 읽은 것은
+        # best > 0.5 = 실제 진행이 한 번이라도 기록됨. 첫 폴링에서 0.0 을 읽은 것은
         # 진행이 아니므로 그때까지는 유예를 쓴다.
         limit = _EXIT_STALL_SEC if (best is not None and best > 0.5) else _EXIT_START_GRACE
         if now - last_prog >= limit:
-            # 진동 감지로 안무가 스스로 마친 완주는 여기서 무진행으로 보인다.
-            # 잔여가 충분히 작으면 성공으로 강등해 정상 경로에 합류시킨다.
-            if cur is not None and abs(_EXIT_TARGET_CM - cur) <= _EXIT_NEAR_CM:
-                _log("AUTO", f"⑥ 하차 완료 (잔여 {abs(_EXIT_TARGET_CM - cur):.1f}cm "
-                             f"— 진동 보정으로 안무가 스스로 마침, 누적 {cur:+.1f}cm)")
-                return "done", cur
-            return "stall", cur
+            # 옛 코드는 여기서 _EXIT_NEAR_CM 강등("진동 보정으로 스스로 마침")을 했다.
+            # 이제 그 경우는 엘베앱이 running=False 로 닫고 ok 를 실어 주므로 위
+            # 완료 분기에서 먼저 잡힌다 — 강등 창이 필요 없다.
+            return "stall", last_res, cur
         if now - t0 >= _EXIT_MAX_SEC:
-            return "timeout", cur
+            return "timeout", last_res, cur
         time.sleep(_EXIT_POLL_SEC)
 
 
@@ -1764,10 +1798,13 @@ def _scene_res_txt(res):
 _EXIT_WHY = {"stall":   "후진이 멈췄습니다",
              "timeout": "제한 시간을 넘겼습니다",
              "cancel":  "취소되었습니다",
-             "noapp":   "엘리베이터 앱 응답이 없습니다"}
+             "noapp":   "엘리베이터 앱 응답이 없습니다",
+             "fail":    "목표 자세까지 가지 못했습니다",
+             "noanmu":  "하차 동작이 시작되지 않았습니다",
+             "forced":  "사람이 대기를 강제로 넘겼습니다 — 하차는 확인되지 않았습니다"}
 
 
-def _exit_failed(reason: str, cur):
+def _exit_failed(reason: str, cur, res=None):
     """⑥ 하차 미완료 — 여기서 여정을 끊고, 사람이 로봇을 빼낼 수단을 남긴다.
 
     _auto_abort_elev()를 부르지 않는다: 그건 엘베앱을 종료시켜 조종 패드·상태·
@@ -1790,7 +1827,15 @@ def _exit_failed(reason: str, cur):
     유령 갱신이 된다. 그 경우엔 finally의 정상 반납 경로로 보낸다.
 
     통보에는 형용사가 아니라 숫자를 싣는다 — 구조하러 오는 사람에게 필요한 건
-    '완료되지 않았다'가 아니라 '186cm 중 몇 cm까지 나왔나'다."""
+    '완료되지 않았다'가 아니라 '어디까지 나왔나'다. 2026-09-09 부터 목표가 하드코딩
+    거리가 아니라 좌표이므로 '목표까지 몇 cm 남았나'(scene_result.dist_m)를 먼저 쓰고,
+    그 값이 없을 때(stall·noanmu 등 기록이 안 닫힌 경우)만 누적 진행량으로 적는다.
+
+    TODO(무인 운전): 실전에는 화면을 보는 조작자가 없다 — 로봇을 잡고 있는 사람이
+    시각장애인이다. 지금 이 함수의 종착점은 '제어권을 유지한 채 여정 중단'이고,
+    그건 조작자가 패드로 빼내 주기를 전제한다. 무인이면 여기서 **음성 안내**가
+    나가야 한다(현재 위치·상황·무엇을 해야 하는지). 호출 지점은 아래 _auto_notify
+    자리다 — 문구와 TTS 경로는 별건으로 정한다. 이 함수를 최종형으로 보지 마라."""
     global _rescue_hold
     # 무엇보다 먼저 바퀴를 멈춘다. 구코드는 3초 뒤 리스를 반납해 엘베앱
     # _revoke_authority가 _step_abort + Twist() 정지를 대신 해줬다 — 우연히
@@ -1806,15 +1851,19 @@ def _exit_failed(reason: str, cur):
                  ("전송됨(_step_abort) — 안무·현재 스텝 중단"
                   if stopped else "🚨 전송 실패 — 로봇이 계속 움직일 수 있다"))
     moved = f"{abs(cur):.0f}cm" if isinstance(cur, float) else "확인 불가"
+    _d    = (res or {}).get("dist_m")
+    where = (f"목표까지 {_d * 100:.0f}cm 남은 상태" if isinstance(_d, (int, float))
+             else f"{moved} 후진한 상태")
     why   = _EXIT_WHY.get(reason, reason)
     if reason != "noapp":
         _rescue_hold = True
-    _auto_notify(f"하차가 끝나지 않았습니다 — 186cm 중 {moved}만 후진했습니다. "
+    # TODO(무인 운전): 아래 _auto_notify 가 음성으로도 나가야 한다. 위 독스트링 참고.
+    _auto_notify(f"하차가 끝나지 않았습니다 — {where}입니다. "
                  f"{why}. 로봇이 엘리베이터에 걸쳐 있을 수 있으니 도움을 요청하세요")
-    _log("AUTO", f"⑥ 하차 미완료({reason}) 진행 {moved}/186cm — "
+    _log("AUTO", f"⑥ 하차 미완료({reason}) {where} (누적 진행 {moved}) — "
                  + ("제어권 유지(구조용 조종 패드 보존) — 엘베앱 종료 시 해제"
                     if reason != "noapp" else "앱 응답 없음 — 리스는 이미 소멸"))
-    _auto_set("오류", f"🚨 하차 미완료({reason}) — 186cm 중 {moved} · 여정 중단"
+    _auto_set("오류", f"🚨 하차 미완료({reason}) — {where} · 여정 중단"
                       + (" · 제어권 유지, 엘베앱 조종 패드로 빼낼 것"
                          if reason != "noapp" else ""))
 
@@ -2109,15 +2158,28 @@ def _auto_run(dest):
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(⑥ 하차)")
             _auto_abort_elev(); return
         _auto_set("⑥ 하차", "하차(후진) 중...", phase="exit")
-        _elev_scene(5)
+        # seq 를 받아 넘긴다 — 내가 시킨 그 회차의 기록만 인정하기 위해서다.
+        # /scene POST 자체가 실패하면 seq 가 None 이고, 그러면 아래가 "noanmu" 로
+        # 즉시 끊는다(옛 코드는 유예 20초를 태운 뒤 stall 로 잡았다).
+        _sent5, _seq5 = _elev_scene(5)
         # 상수 대기로 넘기면(#92) 후진 186cm가 10초 넘게 걸리는 동안 리스가 반납돼
         # 이동이 통째로 거부되고, 그 실패가 여기로 전파될 길이 없어 사람을 태운 채
         # 캐빈/문턱에서 /switch_map·/goto로 넘어간다. 씬 ①②③④와 ⑥직전이 전부
         # 확인 대기를 거치는데 이 한 자리만 상수였다.
-        ex_reason, ex_cm = _elev_wait_exit_done()
-        if ex_reason != "done":
+        ex_reason, ex_res, ex_cm = _elev_wait_exit_done(_seq5)
+        if ex_reason == "fallback":
+            # 좌표가 거부돼 하드코딩(-186cm)으로 물러섰지만 그 후진은 완주했다 =
+            # 엘리베이터에서는 나왔다. 목표 자세는 아니므로 경고는 하되 구조 절차는
+            # 부르지 않는다 — 나온 로봇을 두고 "도움을 요청하세요"는 오경보다.
+            # 그리고 바로 뒤 /switch_map{init_exit} 가 AMCL 을 하차지점으로
+            # 재초기화하므로, 폴백을 유발한 측위 오류는 그 단계에서 교정된다.
+            _log("AUTO", f"⑥ 하차 — 좌표 경로 거부 → 하드코딩 폴백으로 탈출 완주 "
+                         f"(누적 {ex_cm:+.1f}cm). 사유: {(ex_res or {}).get('reason')}")
+            _auto_notify("엘리베이터에서 나왔습니다. 정확한 자세는 아니니 "
+                         "다음 주행 시작 위치를 확인하세요")
+        elif ex_reason != "done":
             # 지도전환·AMCL 초기화·앱 종료·목적지 주행은 하나도 실행하지 않는다.
-            _exit_failed(ex_reason, ex_cm)
+            _exit_failed(ex_reason, ex_cm, ex_res)
             return
 
         # 리스 반납 — 지도전환·AMCL초기화·목적지주행은 가드(라이다 충돌가드)가

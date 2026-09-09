@@ -2209,12 +2209,16 @@ def _scene_run_begin(n):
             "started": time.time(), "finished": None,
             "ok": None, "reason": None,
             "dist_m": None, "yaw_deg": None, "lat_cm": None, "fwd_cm": None,
+            # 폴백 경로를 탔는지 / 그 폴백이 완주했는지. 대시보드가 ⑥ 하차에서
+            # "구조 절차를 돌릴 상황인가"를 가르는 데 쓴다 — 폴백은 목표 자세가
+            # 아니어도 엘리베이터에서는 나왔으므로 구조가 아니라 경고가 맞다.
+            "fallback": False, "fallback_ok": None,
         }
     return seq
 
 
 def _scene_run_end(seq, ok, reason, dist_m=None, yaw_deg=None,
-                   lat_cm=None, fwd_cm=None):
+                   lat_cm=None, fwd_cm=None, fallback=False, fallback_ok=None):
     """안무 종료 기록. 잔여값은 좌표 목표가 있는 경로에서만 채워진다(없으면 None).
 
     seq가 현재 회차와 다르면 무시한다 — 이전 회차 스레드가 늦게 끝나며 새 회차의
@@ -2230,7 +2234,8 @@ def _scene_run_end(seq, ok, reason, dist_m=None, yaw_deg=None,
             return
         state["scene_result"] = dict(
             r, running=False, finished=time.time(), ok=bool(ok), reason=reason,
-            dist_m=dist_m, yaw_deg=yaw_deg, lat_cm=lat_cm, fwd_cm=fwd_cm)
+            dist_m=dist_m, yaw_deg=yaw_deg, lat_cm=lat_cm, fwd_cm=fwd_cm,
+            fallback=bool(fallback), fallback_ok=fallback_ok)
 
 
 @app.route("/scene", methods=["POST"])
@@ -3566,7 +3571,8 @@ class ElevatorTracker(Node):
             r = res or {"ok": False, "reason": "결과 없음"}
             _scene_run_end(run_seq, r.get("ok"), r.get("reason"),
                            r.get("dist_m"), r.get("yaw_deg"),
-                           r.get("lat_cm"), r.get("fwd_cm"))
+                           r.get("lat_cm"), r.get("fwd_cm"),
+                           r.get("fallback", False), r.get("fallback_ok"))
 
     def _run_scene_moves_inner(self, n, moves):
         """좌표 목표가 있으면 3단 go-to-pose, 없으면 기존 경로.
@@ -3603,8 +3609,16 @@ class ElevatorTracker(Node):
             self._dlog(f"[AUTO] ⚠⚠ 폴백은 티칭값 {_fwd:+.0f}cm 를 그대로 실행한다 — "
                        "목표 자세로 가지 않는다. 끝난 뒤 위치를 반드시 확인하라")
             fb = self._run_scene_moves_legacy(n, moves) or {}
+            # 폴백 자신의 성패를 반드시 올려보낸다. 이 값이 없으면 대시보드가
+            # "폴백이 완주했나(= 엘리베이터에서 나왔나)"와 "폴백도 20cm 에서
+            # 멈췄나"를 구분할 수 없고, ⑥에서 그 구분이 '구조 절차를 부르나'를
+            # 가른다. 예전에는 fb 를 reason 문자열에만 넣고 버렸다.
+            _fb_ok = bool(fb.get("ok"))
+            self._dlog(f"[AUTO] ⚠⚠ 씬{n} 폴백 종료 — "
+                       + ("완주(탈출은 했다. 목표 자세는 아니다)" if _fb_ok
+                          else f"미완주 ⛔ [{fb.get('reason')}]"))
             # 탈출은 했어도 목표 자세는 아니다 → ok 는 항상 False.
-            return dict(res, ok=False,
+            return dict(res, ok=False, fallback=True, fallback_ok=_fb_ok,
                         reason=f"좌표 거부 → 하드코딩 폴백 [{res.get('reason')}] "
                                f"/ 폴백 결과: {fb.get('reason')}")
         # 위 세 갈래(목표 없음 / TF 실패 / 티칭 전진값 없음)는 전부 여기로 내려온다.
