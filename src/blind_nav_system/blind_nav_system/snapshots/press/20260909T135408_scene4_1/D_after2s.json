@@ -1,0 +1,28 @@
+{
+ "tag": "D_after2s",
+ "ts": 1788929655.507561,
+ "time": "2026-09-09T13:54:15",
+ "scene": 4,
+ "target": null,
+ "press_status": "✅ 누르기 완료",
+ "lift": 0.9010866398398389,
+ "arm_ext": 0.25841426095818393,
+ "frame_source": "raw_full(rotated)",
+ "rot_grip": 0,
+ "letterbox": {
+  "scale": 0.7547169811320755,
+  "off_x": 0,
+  "off_y": 59
+ },
+ "roi_ocr": null,
+ "jpeg_quality": 75,
+ "missing": [],
+ "roi_raw": null,
+ "note": "C+2초 — 점등 지연 대비",
+ "image": "D_after2s.jpg",
+ "frame_hw": [
+  480,
+  848
+ ],
+ "frame_mean": 115.261
+}
