@@ -1949,6 +1949,29 @@ SCENE_TOL_ROT_DEG = 5.0
 # 잡음을 쫓아 제자리 왕복만 한다. 그래서 2.0°(1.6° + 여유)를 바닥으로 둔다.
 # 가까울수록 느슨해지는 것은 의도한 것이다 — d 가 작으면 같은 각도가 만드는
 # 횡오차도 작고, 반대로 방위 자체가 잡음에 지배당하기 때문이다.
+# ── ②주행 중 스텝별 재조준 ───────────────────────────────────────────────────
+# 2026-09-09 실기: 씬3 ②주행에서 스텝마다 진행방향이 로봇 헤딩보다 2~6° 벗어났다.
+#     스텝    진행방향   헤딩     차이
+#     1→2     71.5°    75.6°   -4.1°
+#     2→3     67.9°    74.0°   -6.1°   ← 최대. y 6.112→6.550, 지도상 문 개구부 y 6.0~6.2
+#     3→4     72.5°    74.8°   -2.3°
+#     4→5     73.8°    74.5°   -0.7°
+# 헤딩 자체는 75.6→74.0→74.8→74.5 로 1.7° 변화뿐이다 — 헤딩은 잘 지켰고 **몸이 옆으로
+# 미끄러졌다**(사용자 증언: "엘리베이터 탈 때 턱 때문에 랜덤하게 틀어지거든").
+# 옆미끄러짐은 엔코더에 안 나타나므로 odom 으로는 못 본다. map(라이다)만 안다.
+# 그런데 ②주행은 매 스텝 _scene_residual 을 이미 부르면서 [0](전진)만 쓰고 [1][2]를
+# 버렸다. 재조준은 바깥 for it 루프에서만, 즉 1.9m 를 다 간 뒤에 일어났고, 그때는 이미
+# 22.7cm 옆이라 ①정렬이 +86.2° 를 명령했다 — 그게 와리가리 296° 의 출처다.
+# ⇒ 스텝 사이에 목표점 방위 편차를 보고, 문턱을 넘으면 '짧게' 돌고 주행을 계속한다.
+# 문턱은 _aim_tol_deg(남은거리) 를 재사용한다 — 허용 횡오차를 고정하고 각도로 환산하는
+# 그 함수가 여기에 정확히 맞는 자다. 남은 거리가 줄면 같은 각도의 대가도 줄어 문턱이
+# 자동으로 느슨해진다(1.4m 에서 5° = 12cm, 0.2m 에서 5° = 1.7cm).
+SCENE_REAIM_MAX_DEG = 8.0   # 한 번의 재조준 상한. 관측된 스텝당 밀림이 2~6° 라 그 위로
+                            # 약간 여유. 여기서 크게 돌면 와리가리를 스텝 단위로 옮기는
+                            # 것뿐이라 상한이 핵심이다.
+SCENE_REAIM_MAX_N   = 3     # 한 주행 구간에서 허용하는 재조준 횟수. 50cm 스텝이면
+                            # 1.9m 가 4스텝이라 스텝 사이가 3곳 — 매 틈에 한 번까지다.
+
 AIM_TOL_LAT_M     = 0.03   # ①정렬이 허용하는 '이어지는 주행에서의 횡오차'
 AIM_TOL_FLOOR_DEG = 2.0    # 바닥 — AMCL yaw 잡음 실측 1.6° + 여유
 
@@ -3515,12 +3538,17 @@ class ElevatorTracker(Node):
         # 위 세 갈래(목표 없음 / TF 실패 / 티칭 전진값 없음)는 전부 여기로 내려온다.
         return self._run_scene_moves_legacy(n, moves)
 
-    def _scene_leg(self, n, it, label, kind, residual_fn, clamp_fn, tol=None):
+    def _scene_leg(self, n, it, label, kind, residual_fn, clamp_fn, tol=None,
+                   step_hook=None):
         """한 구간(회전 또는 주행)을 잔여가 허용오차에 들 때까지 실행.
 
         tol 을 주면 그 값으로 수렴을 판정한다(없으면 kind 별 기본값). ①정렬만
         거리 의존 문턱(_aim_tol_deg)을 쓰기 때문에 열어 둔 구멍이다 — ②주행과
         ③정렬은 기존 상수 그대로다.
+
+        step_hook(step_i) 를 주면 매 스텝 뒤(클램프 검사 통과 후)에 불린다. True 를
+        돌려주면 잔여를 다시 읽는다 — 훅이 자세를 바꿨다는 뜻이다. ②주행의 스텝별
+        재조준이 이 통로를 쓴다.
 
         Esc·진행불가·진동 감지·매 스텝 클램프 재검사를 여기 한 곳에 모았다 —
         ①정렬 / ②주행 / ③정렬 세 구간이 같은 안전장치를 공유해야 하기 때문이다.
@@ -3600,6 +3628,14 @@ class ElevatorTracker(Node):
                 pend = (n, it, label, steps, step, moved, remain, u, t_a, o_a)
                 if not clamp_fn(remain):              # 이동 중 측위가 튄 경우
                     return "abort"
+                # 스텝 사이 재조준(②주행 전용). 자세가 바뀌면 잔여를 다시 읽는다 —
+                # 돌고 나면 '헤딩 방향 성분'이 달라지기 때문이다.
+                if step_hook is not None and step_hook(steps):
+                    remain = residual_fn()
+                    if remain is None:
+                        self._dlog(f"[AUTO] 씬{n} 반복{it} {label} — "
+                                   "재조준 후 자세 조회 실패, 중단")
+                        return "abort"
                 # 진동 감지 — 부호가 뒤집혀도 '잔여가 계속 줄고 있으면' 정상 수렴이다.
                 # 바퀴 슬립 때문에 회전은 한 번에 안 맞고 넘었다 되돌아오며 좁혀지는 게
                 # 정상 거동인데, 부호 뒤집힘만 세면 그걸 고장으로 오판한다.
@@ -3832,6 +3868,41 @@ class ElevatorTracker(Node):
                 if not oscillated:
                     # ② 직선 주행 — 정렬을 마쳤으므로 헤딩 방향 성분이 곧 주행량이다.
                     #    후진안이면 이 값이 음수로 나와 그대로 후진한다.
+                    _reaim_n = [0]
+
+                    def _drive_reaim(step_i):
+                        """스텝 사이 재조준. 실제로 돌았으면 True.
+
+                        턱·미끄러짐으로 진행방향이 목표 방위에서 벗어난 만큼만 '짧게'
+                        돌고 주행을 계속한다. 부호는 ①정렬과 같은 식이다 — 후진안이면
+                        방위에 180° 를 더해 비교하므로 후진에서도 같은 부호가 나온다.
+                        """
+                        if _reaim_n[0] >= SCENE_REAIM_MAX_N:
+                            return False
+                        r = self._scene_residual(tgt)
+                        if r is None:
+                            return False
+                        _f, _l, _r, (cx, cy, cyaw) = r
+                        dleft = math.hypot(tgt["x"] - cx, tgt["y"] - cy)
+                        b = math.degrees(math.atan2(tgt["y"] - cy, tgt["x"] - cx))
+                        dev = _wrap((b if fwd_plan else b + 180.0) - cyaw)
+                        thr = _aim_tol_deg(dleft)
+                        if abs(dev) <= thr:
+                            return False
+                        turn = max(-SCENE_REAIM_MAX_DEG,
+                                   min(SCENE_REAIM_MAX_DEG, dev))
+                        _reaim_n[0] += 1
+                        self._dlog(
+                            f"[LEG] 씬{n} 반복{it} ②주행 스텝{step_i} 재조준 "
+                            f"{_reaim_n[0]}/{SCENE_REAIM_MAX_N} — 방위 편차 {dev:+.1f}° "
+                            f"> 허용 {thr:.1f}° (남은 {dleft:.2f}m, 그대로 가면 횡 "
+                            f"{dleft * math.sin(math.radians(dev)) * 100:+.1f}cm) "
+                            f"→ {turn:+.1f}° 회전"
+                            + (f" [편차가 상한 {SCENE_REAIM_MAX_DEG:.0f}°를 넘어 잘렸다]"
+                               if abs(dev) > SCENE_REAIM_MAX_DEG else ""))
+                        self._manual_step(0.0, turn)
+                        return True
+
                     d0 = self._scene_residual(tgt)
                     drive_cm = d0[0] if d0 else 0.0
                     self._dlog(f"[AUTO] 씬{n} 반복{it} ②주행 {drive_cm/100.0:+.3f}m "
@@ -3840,7 +3911,7 @@ class ElevatorTracker(Node):
                         n, it, "②주행", "fwd",
                         lambda fast=False: (self._scene_residual(
                             tgt, 0.0 if fast else 1.0) or [None])[0],
-                        _drive_clamp)
+                        _drive_clamp, step_hook=_drive_reaim)
                     if st == "abort":
                         return _result(False, "②주행 중단")
                     if st == "stop":
