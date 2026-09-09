@@ -1528,7 +1528,10 @@ def _elev_scene(n):
     없다. 자동 안무가 없는 씬(SCENE_MOVES 에 없는 ①③⑤)은 None 이다.
     ※ 반환을 bool 하나로 두면 '전송 실패'와 '안무 없음'을 못 가른다. 그래서 튜플이다.
     자세 전송이 블로킹(~10s)이라 여유 타임아웃."""
-    r = _elev_post("/scene", {"n": int(n)}, timeout=20)
+    # 현재 층을 같이 보낸다 — 엘베앱이 승강장 버튼 높이를 층별로 고르는 데 쓴다.
+    # 엘베앱은 층을 스스로 알 길이 없다. 이 값의 신뢰도는 이미 여정 전체가 의존하는
+    # 것과 같다(상/하행 버튼 선택 `up = int(dest_floor) > int(_current_floor)`, 지도 전환).
+    r = _elev_post("/scene", {"n": int(n), "floor": _current_floor}, timeout=20)
     if r is None:
         return False, None
     return True, r.get("run_seq")

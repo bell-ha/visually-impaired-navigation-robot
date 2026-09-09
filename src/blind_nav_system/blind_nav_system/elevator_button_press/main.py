@@ -269,6 +269,46 @@ LIFT_ROW_PITCH_M = (0.0606, 0.0568)
 #   뺀다(상대 앵커링). 절대 체인(base z + 카메라 오프셋 + 손끝 오프셋)은 세 오프셋이
 #   섞여 들어오므로 쓰지 않는다. 상대 방식이면 그 셋이 전부 약분된다.
 LIFT_ROW1_M = 0.930
+
+# ── 승강장(홀) 버튼 높이 — 층별·방향별 ──────────────────────────────────────
+# 위 LIFT_PRIOR_CALL(0.94) 단일값이 중간층에서 크게 빗나간다. 2026-09-09 14:00 사용자
+# 스냅샷 4장을 extract3d.py 파이프라인으로 풀어 얻은 값:
+#     중간층 ▲ map z 0.9698 → lift 0.875   /   ▼ map z 0.9076 → lift 0.813
+#     ▲▼ 간격 62.2mm (σ 1.5mm),  4장 교차검증 σ 0.8mm
+# 교차검증이 강하다 — lift 가 0.902~0.960 으로 58mm 다른 4장에서 같은 물리 버튼이
+# map z 0.8mm 안에 모이고, 픽셀도 맞물린다(+57.8mm lift ↔ +33px, 1px=1.75mm,
+# 이론값 z/fy=1.81mm/px 와 일치).
+# 환산 앵커는 홀 것을 썼다: 1.0279(5층 ▼ 3D) − 0.9334(오늘 5층 ▼ 점등 확인된 press)
+# = 0.0945. 차내 앵커(0.1029)를 쓰면 0.867/0.805 이고 차이 8mm 는 버튼 지름 30mm 의
+# 1/4 이라 실용상 무해하다.
+#
+# ⚠ 출처가 항목마다 다르다. 섞어 읽지 말 것:
+#   중간층 0.875 / 0.813 = **1개 층에서 3D 실측**(촬영 층은 특정되지 않았다) +
+#                          **2·3·4층 패널이 모두 같다는 사용자 확인**
+#   5층 ▼ 0.933            = 오늘 실측이고 점등 사진으로 확인까지 된 값
+#   1층 ▲ 0.933            = **사용자 증언뿐이다(실측 아님).** 5층과 같은 구조라는 진술.
+#
+# 현재 0.94 대비: 중간층 ▲ 는 +65mm, ▼ 는 +127mm 높다. 9/8 차내 1층 실패가 +28mm
+# 였으니 그 2~4배다.
+LIFT_HALL_BY_FLOOR = {
+    "1": {"^": 0.933},                  # 종점 — ▲ 하나 (증언)
+    "2": {"^": 0.875, "s": 0.813},
+    "3": {"^": 0.875, "s": 0.813},
+    "4": {"^": 0.875, "s": 0.813},
+    "5": {"s": 0.933},                  # 종점 — ▼ 하나 (실측·점등 확인)
+}
+
+
+def _lift_hall_for(floor, tok):
+    """승강장 버튼 높이 → lift(m). 층이나 방향을 모르면 None(= 기존 0.94 유지).
+
+    모르면 추측하지 않는다. 틀린 층 값으로 틀린 높이에 가는 것이 한 값으로 버티는
+    것보다 나쁘기 때문이다.
+    """
+    t = (tok or "").strip()
+    if t not in ("^", "s") or not floor:
+        return None
+    return LIFT_HALL_BY_FLOOR.get(str(floor), {}).get(t)
 # 교차검증: 위 LIFT_PRIOR_PANEL 주석의 독립 실측이 "0.91('5')~0.98('3' 부근)"이다.
 # 이 표의 계산값은 '5'=0.930 / '3'=0.991 — 각각 2cm·1cm 안에서 맞는다.
 # 그리고 '3'이 '5'보다 높다는 것이 두 소스 모두에서 같다 = 위아래 부호가 맞다.
@@ -362,7 +402,10 @@ def _lift_prior_for(place):
     두 goal 의 **순서와 무관하게** 올바른 높이로 수렴한다.
     """
     if place == "hall":
-        return LIFT_PRIOR_CALL, None
+        with state_lock:
+            _fl, _tk = state.get("floor"), state.get("target_text")
+        _h = _lift_hall_for(_fl, _tk)
+        return (_h, None) if _h is not None else (LIFT_PRIOR_CALL, None)
     with state_lock:
         tok = state.get("target_text")
     ri = _row_of_label(tok) if tok else None
@@ -380,6 +423,29 @@ def _lift_row_prior(node, place, tok):
     행을 못 찾거나 대역 밖이면 기존 높이를 그대로 두고 사유를 로그로 남긴다 —
     지금보다 나빠지지 않는 것이 이 함수의 하한이다.
     """
+    if place == "hall":
+        # 승강장은 행 모델이 아니라 층별·방향별 표를 쓴다. 층이나 방향을 모르면
+        # 아무것도 하지 않는다(기존 0.94 그대로) — 추측해서 움직이지 않는다.
+        with state_lock:
+            fl, cur = state.get("floor"), state["lift"]
+        h = _lift_hall_for(fl, tok)
+        if h is None:
+            node._dlog(f"[PRIOR] 승강장 '{tok}' 높이를 모름 "
+                       f"(층={fl or '미수신'}) — 규정 높이({LIFT_PRIOR_CALL:.2f}) 그대로")
+            return
+        if cur is None:
+            node._dlog(f"[PRIOR] lift 현재값 미수신 — 승강장 높이 보정 생략 "
+                       f"(목표였던 값 {h:.3f})")
+            return
+        if abs(cur - h) <= LIFT_ROW_DEADBAND_M:
+            node._dlog(f"[PRIOR] 승강장 {fl}층 '{tok}' 목표 lift {h:.3f} — "
+                       f"이미 그 높이 ({cur:.3f}, 차이 {(h - cur) * 100:+.1f}cm)")
+            return
+        node._dlog(f"[PRIOR] 승강장 {fl}층 '{tok}' → lift {cur:.3f}→{h:.3f} "
+                   f"({(h - cur) * 100:+.1f}cm · 3D 실측 기준)")
+        if not node._send_goal(["joint_lift"], [h]):
+            node._dlog("[PRIOR] ⛔ lift 명령이 안 나갔다 — 승강장 높이 미적용")
+        return
     if place != "cab":
         return
     ri  = _row_of_label(tok)
@@ -707,6 +773,8 @@ state = {
     "place":        "hall", # 장소 모드: hall(홀, ▲▼만) / cab(차내, 숫자만) — 팔레트·prior 분기
     "scene":        None,   # 여정 단계 (0~5, SCENES 인덱스) — 조종 패드 티칭 구간 표시
     "scene_acc":    {"fwd_cm": 0.0, "rot_deg": 0.0},  # 현재 단계 누적 이동량 (티칭 기록)
+    "floor":        None,   # 대시보드가 알려주는 현재 층("1"~"5"). 승강장 버튼 높이를
+                            # 층별로 고르는 데만 쓴다. 못 받았으면 None → 기존 0.94.
     "scene_result": None,   # 마지막 자동 안무의 실행 상태·결과 (_scene_run_begin/_end 참고)
                             # — /scene 응답의 ok는 "명령 접수"라서 정렬 성공을 못 알린다.
                             #   대시보드가 /status로 이걸 읽어 성공/실패를 판단한다.
@@ -2182,8 +2250,15 @@ def _scene_run_end(seq, ok, reason, dist_m=None, yaw_deg=None,
 def scene_set():
     """여정 단계 전환 — 이전 단계의 누적 이동량을 로그로 매듭짓고 카운터 리셋.
     성공 리허설의 [SCENE] 매듭 로그가 곧 시나리오 고정 거리의 티칭값이 된다."""
-    n = int((request.json or {}).get("n", 0))
+    _body = request.json or {}
+    n = int(_body.get("n", 0))
     n = max(0, min(len(SCENES) - 1, n))
+    # 대시보드가 알려주는 현재 층 — 승강장 버튼 높이를 층별로 고르는 데만 쓴다.
+    # 엘베앱은 층을 스스로 알 길이 없어서 받아 둔다. 안 오면 기존 동작(0.94).
+    _fl = _body.get("floor")
+    if _fl is not None:
+        with state_lock:
+            state["floor"] = str(_fl)
     node = _node_ref[0]
     with state_lock:
         prev = state.get("scene")
