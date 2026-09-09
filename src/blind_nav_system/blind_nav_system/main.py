@@ -1610,12 +1610,23 @@ _EXIT_STALL_SEC = 10.0    # 첫 진행이 기록된 뒤, 이만큼 진행이 없
 #     ⑥ 하차 완주 로그는 python3_{313116,117654,12606,57478}_*.log 넷이다.
 #   - 20.0 = 관측 최대 11.7s에 8.3s, 이론 최악 16.5s에 3.5s 여유
 _EXIT_START_GRACE = 20.0
+# 진행(생존) 판정 임계 — scene_acc 의 두 채널 각각.
+# 근거(9/8·9/9 로그 [MOVE] 전수): scene_acc 는 스텝이 **끝날 때만** 갱신되는 계단
+# 함수라 연속 잡음이 없다. 그래서 임계는 '가장 작은 실제 스텝보다 작게'만 잡으면 된다.
+#   회전 1회 크기 표본 30개: 최소 3° · 5퍼센타일 5° · 중앙 23° · 최대 91° → 1.0° = 3배 여유
+#   병진 보정 스텝 관측 최소 1.7cm                                      → 0.5cm = 3.4배 여유
+# (0.5cm 는 2026-09-08 이전 코드가 쓰던 값 그대로다 — 바꿀 이유가 없었다.)
+_EXIT_PROG_CM   = 0.5
+_EXIT_PROG_DEG  = 1.0
 # 절대 상한(무한대기 방지 백스톱). 2026-09-09: 60.0 → 120.0.
-# 60초는 좌표 경로에 너무 빡빡하다 — 9/9 오전 씬3(1.9m 주행)이 52.7초였고 ⑥도 같은
-# 3단 방식·같은 거리다. 정상과 7초 차로 두면 정상 완주를 timeout 으로 죽인다.
-# 반대로 _SCENE_MAX_SEC(240) 을 그대로 쓰면 문턱에 걸친 로봇의 구조 호출이 3분 뒤다.
-# 120 = 관측 최악(52.7s)의 2.3배. 무진전 중단(엘베앱 SCENE_ITER_GAIN)이 반복3에서
-# 끊으므로 반복 4회 완주는 드물고, 이 값은 정상 경로가 아니라 백스톱이다.
+# 근거 강도를 정확히 적는다 —
+#   · **씬5(⑥) 좌표 경로 실측은 0건이다.** 씬5 좌표 목표는 오늘 처음 들어갔다.
+#   · 가장 가까운 실측은 같은 좌표를 쓰는 ② 문앞(씬1)이다: 9/8·9/9 3건 중 최악 58.6s.
+#     60초는 그 최악과 1.4초 차라 정상 완주를 timeout 으로 죽인다.
+#   · 유사 씬 ④ 탑승(1.9m)이 52.7s — 거리는 비슷하지만 같은 씬이 아니다.
+#   · 반대로 _SCENE_MAX_SEC(240)을 쓰면 문턱에 걸친 로봇의 구조 호출이 3분 뒤다.
+#   120 = ② 최악 58.6s 의 2.0배. 정상 경로가 아니라 백스톱이다.
+#   ⑥ 좌표 실측이 쌓이면 이 값을 다시 보라.
 _EXIT_MAX_SEC   = 120.0
 _EXIT_POLL_SEC  = 0.4
 _EXIT_MISS_MAX  = 2       # /status 무응답이 이만큼 연속되면 앱이 죽은 것으로 본다
@@ -1631,14 +1642,15 @@ def _elev_wait_exit_done(seq=None):
     사유: "done"=목표 자세 도달 / "fallback"=좌표 거부 후 하드코딩 폴백으로 탈출
           완주(목표 자세는 아니다) / "fail"=끝났지만 미달 / "noanmu"=안무가 안 떴다 /
           "stall"=진행이 멎음 / "timeout"=절대상한 / "cancel"=사용자 취소 /
-          "forced"=사용자 강제 / "noapp"=엘베앱 상태 조회 불가
+          "forced"=사용자 강제 / "noapp"=엘베앱 상태 조회 불가 /
+          "noseq"=실행번호 없이 불렸다(호출부 오류 — 방어)
 
     ■ 두 신호를 같이 보는 이유 — 역할이 다르다
       · 성공 판정 = scene_result. 엘베앱이 POSE_DONE_M/DEG 로 이미 판정한 값이다.
         2026-09-08 까지는 여기서 scene_acc 누적을 하드코딩 -186cm 와 비교했는데,
         좌표 경로의 누적은 시작점에 따라 -147~-226cm 로 변해서 좌표가 잘 될 때만
         실패로 뜨는 역전이 났다(91a3bfb).
-      · 생존 판정 = scene_acc. scene_result.running 만 보면 엘베앱이 스텝 중간에
+      · 생존 판정 = scene_acc **두 채널 모두**(fwd_cm·rot_deg). running 만 보면 엘베앱이 스텝 중간에
         굳었을 때 10초가 아니라 절대상한(120초)까지 기다린다. 사람을 태운 채 문턱에
         걸친 상황에서 그 차이가 크다. 그래서 '진행이 멎었나'는 계속 본다.
         완료 판정에는 절대 쓰지 않는다.
@@ -1655,10 +1667,16 @@ def _elev_wait_exit_done(seq=None):
     ※ seq 는 _elev_scene(5) 가 돌려준 실행번호다. 반드시 넘겨라 — 안 넘기면 직전
       회차의 낡은 기록을 자기 것으로 오독할 수 있다(_elev_wait_scene_done 과 같은 사유).
     """
+    if seq is None:
+        # 방어 — 호출부가 이미 걸러야 하지만, seq 없이 들어오면 '남의 회차'를 자기
+        # 것으로 읽을 수 있다. 특히 같은 앱 세션에서 ⑥을 한 번 성공시킨 뒤 다시
+        # 돌면 n=5/running=False/ok=True 기록이 남아 **후진 0cm 로 done 이 난다.**
+        return "noseq", None, None
     t0 = time.monotonic()
     last_prog = t0
-    best = None          # 지금까지 진행한 최대 거리(cm, 절대값) — 생존 판정용
-    cur  = None          # 마지막으로 읽은 누적 진행량 — 실패 통보에 그대로 실린다
+    cur  = None          # 마지막으로 읽은 누적 전진량 — 실패 통보에 그대로 실린다
+    prev_f = prev_r = None   # 직전 폴링의 누적값 — '변했나'의 기준
+    started = False      # 이 씬에서 실제 이동이 한 번이라도 기록됐나
     last_res = None      # 마지막으로 본 실행 기록(실행중이어도 담는다)
     miss = 0             # /status 연속 무응답 횟수
     while True:
@@ -1679,12 +1697,36 @@ def _elev_wait_exit_done(seq=None):
         else:
             miss = 0
             # (1) 생존 신호 — 진행이 있었나
-            v = (st.get("scene_acc") or {}).get("fwd_cm")
-            if isinstance(v, (int, float)):
-                cur = float(v)
-                if best is None or abs(cur) - best > 0.5:   # 0.5cm = 진행으로 칠 최소량
-                    best = abs(cur)
-                    last_prog = time.monotonic()
+            # 🔴 2026-09-09 수정. 이전 판정은 **정상 하차를 끊었다**(실측 3/6, 최악 29.2초):
+            #   (a) fwd_cm 만 읽어서 **회전 레그가 통째로 무진행으로 보였다.** ③정렬은
+            #       몇 초~수십 초 동안 회전만 한다. ⑥은 후진이라 마지막 ③정렬이 통째로
+            #       무갱신 구간이고, 씬5 목표는 씬1과 **같은 좌표**다 — 29.2s·17.2s 를
+            #       낸 바로 그 씬이다.
+            #   (b) '지금까지의 최댓값 갱신'만 진행으로 쳐서, 목표를 넘었다 되돌아오는
+            #       보정 스텝(뒤로 갔다 앞으로)이 생존 신호가 되지 못했다.
+            # ⇒ 두 채널 모두 읽고 **방향 무관 |Δ|** 로 본다. 9/8·9/9 좌표 경로 씬 전수
+            #   6건 재생: 최대 무진행 창 29.2s → 6.0s (문턱 10s 초과 3건 → 0건).
+            #   상수를 늘리지 않았다 — 늘리면 '진짜 정지'도 그만큼 기다린다(문에 끼인 채로).
+            acc = st.get("scene_acc") or {}
+            _f, _r = acc.get("fwd_cm"), acc.get("rot_deg")
+            moved = False
+            if isinstance(_f, (int, float)):
+                cur = float(_f)
+                if prev_f is not None and abs(cur - prev_f) > _EXIT_PROG_CM:
+                    moved = True
+                prev_f = cur
+            if isinstance(_r, (int, float)):
+                _rv = float(_r)
+                if prev_r is not None and abs(_rv - prev_r) > _EXIT_PROG_DEG:
+                    moved = True
+                prev_r = _rv
+            if moved:
+                last_prog = time.monotonic()
+            # started = 이 씬이 실제로 움직인 적이 있다. 누적은 단계 진입 때 0 으로
+            # 리셋되므로, 누적이 0 이 아니면 그 자체가 '움직였다'는 증거다.
+            if moved or abs(prev_f or 0.0) > _EXIT_PROG_CM \
+                     or abs(prev_r or 0.0) > _EXIT_PROG_DEG:
+                started = True
             # (2) 완료 판정 — 실행 기록
             res = st.get("scene_result") or {}
             if res:
@@ -1706,9 +1748,8 @@ def _elev_wait_exit_done(seq=None):
                     return "fallback", res, cur
                 return "fail", res, cur
         now = time.monotonic()
-        # best > 0.5 = 실제 진행이 한 번이라도 기록됨. 첫 폴링에서 0.0 을 읽은 것은
-        # 진행이 아니므로 그때까지는 유예를 쓴다.
-        limit = _EXIT_STALL_SEC if (best is not None and best > 0.5) else _EXIT_START_GRACE
+        # 첫 폴링에서 0.0 을 읽은 것은 진행이 아니므로 그때까지는 유예를 쓴다.
+        limit = _EXIT_STALL_SEC if started else _EXIT_START_GRACE
         if now - last_prog >= limit:
             # 옛 코드는 여기서 _EXIT_NEAR_CM 강등("진동 보정으로 스스로 마침")을 했다.
             # 이제 그 경우는 엘베앱이 running=False 로 닫고 ok 를 실어 주므로 위
@@ -1801,7 +1842,9 @@ _EXIT_WHY = {"stall":   "후진이 멈췄습니다",
              "noapp":   "엘리베이터 앱 응답이 없습니다",
              "fail":    "목표 자세까지 가지 못했습니다",
              "noanmu":  "하차 동작이 시작되지 않았습니다",
-             "forced":  "사람이 대기를 강제로 넘겼습니다 — 하차는 확인되지 않았습니다"}
+             "forced":  "사람이 대기를 강제로 넘겼습니다 — 하차는 확인되지 않았습니다",
+             "post":    "엘리베이터 앱에 하차 명령이 전달되지 않았습니다",
+             "noseq":   "하차 동작이 접수되지 않았습니다"}
 
 
 def _exit_failed(reason: str, cur, res=None):
@@ -1852,8 +1895,12 @@ def _exit_failed(reason: str, cur, res=None):
                   if stopped else "🚨 전송 실패 — 로봇이 계속 움직일 수 있다"))
     moved = f"{abs(cur):.0f}cm" if isinstance(cur, float) else "확인 불가"
     _d    = (res or {}).get("dist_m")
+    # cur 도 dist_m 도 없을 수 있다 — 첫 폴링 전에 강제·취소가 들어오거나, /scene
+    # 전송 자체가 실패해 실행 기록이 없는 경우다. 그때 "확인 불가 후진한 상태입니다"
+    # 로 문장이 깨지지 않게 갈래를 셋으로 둔다(구조하러 오는 사람이 읽는 문장이다).
     where = (f"목표까지 {_d * 100:.0f}cm 남은 상태" if isinstance(_d, (int, float))
-             else f"{moved} 후진한 상태")
+             else f"{moved} 후진한 상태" if isinstance(cur, float)
+             else "진행량을 확인할 수 없는 상태")
     why   = _EXIT_WHY.get(reason, reason)
     if reason != "noapp":
         _rescue_hold = True
@@ -2159,9 +2206,25 @@ def _auto_run(dest):
             _auto_abort_elev(); return
         _auto_set("⑥ 하차", "하차(후진) 중...", phase="exit")
         # seq 를 받아 넘긴다 — 내가 시킨 그 회차의 기록만 인정하기 위해서다.
-        # /scene POST 자체가 실패하면 seq 가 None 이고, 그러면 아래가 "noanmu" 로
-        # 즉시 끊는다(옛 코드는 유예 20초를 태운 뒤 stall 로 잡았다).
+        # 🔴 반환 둘을 **모두** 확인한다. _elev_scene 독스트링이 "bool 하나면 '전송
+        # 실패'와 '안무 없음'을 못 가른다. 그래서 튜플이다"라고 적어 둔 그 구분을
+        # 여기서 버리면 양방향으로 틀린다:
+        #   · seq=None 로 폴링에 들어가면 첫 검사(seq 비교)가 통째로 건너뛰어지고
+        #     n 비교만 남는다. ⑤ press 는 SCENE_MOVES 에 없어 ⑥ 직전 마지막 기록은
+        #     항상 ④(n=3) → 즉시 noanmu → **후진 중인 로봇을 세운다.**
+        #   · 더 나쁜 쪽: 같은 앱 세션에서 ⑥을 한 번 성공시킨 뒤 다시 돌면 기록이
+        #     n=5/running=False/ok=True 로 남아 **후진 0cm 로 done 이 난다.** 그 뒤
+        #     리스 반납 → switch_map{init_exit} → 앱 종료(구조 패드 소멸) → /goto 가
+        #     사람을 태운 채 돈다. #92 그 자체다.
+        # ※ POST 실패(_sent5=False)는 "안 떴다"와 "떴는데 응답만 늦다"를 **가르지
+        #   못한다** — /scene 라우트가 자세 전환을 블로킹으로 끝낸 뒤에야
+        #   _scene_run_begin 을 부르므로 타임아웃이 두 경우에 다 걸린다. 그래서
+        #   추측하지 않고 _exit_failed 로 보낸다: 거기서 /step_stop 이 먼저 나가
+        #   혹시 움직이고 있었다면 멈춘다.
         _sent5, _seq5 = _elev_scene(5)
+        if not _sent5 or _seq5 is None:
+            _exit_failed("post" if not _sent5 else "noseq", None, None)
+            return
         # 상수 대기로 넘기면(#92) 후진 186cm가 10초 넘게 걸리는 동안 리스가 반납돼
         # 이동이 통째로 거부되고, 그 실패가 여기로 전파될 길이 없어 사람을 태운 채
         # 캐빈/문턱에서 /switch_map·/goto로 넘어간다. 씬 ①②③④와 ⑥직전이 전부
@@ -2173,8 +2236,22 @@ def _auto_run(dest):
             # 부르지 않는다 — 나온 로봇을 두고 "도움을 요청하세요"는 오경보다.
             # 그리고 바로 뒤 /switch_map{init_exit} 가 AMCL 을 하차지점으로
             # 재초기화하므로, 폴백을 유발한 측위 오류는 그 단계에서 교정된다.
-            _log("AUTO", f"⑥ 하차 — 좌표 경로 거부 → 하드코딩 폴백으로 탈출 완주 "
-                         f"(누적 {ex_cm:+.1f}cm). 사유: {(ex_res or {}).get('reason')}")
+            # ex_cm 은 None 일 수 있다(첫 폴링 전에 끝난 경우). 포맷에서 터지면
+            # except 로 떨어져 _rescue_hold=False 로 리스가 반납된다 — 도달 가능성은
+            # 사실상 0 이지만 결과가 나쁘므로 방어한다.
+            _log("AUTO", "⑥ 하차 — 좌표 경로 거부 → 하드코딩 폴백으로 탈출 완주 "
+                         + ("(누적 확인 불가)" if not isinstance(ex_cm, float)
+                            else f"(누적 {ex_cm:+.1f}cm)")
+                         + f". 사유: {(ex_res or {}).get('reason')}"
+                         # ⚠ fallback_ok 의 의미가 약하다 — 별건으로 고친다.
+                         # _run_scene_moves_legacy 는 _step_abort 와 '스텝이 0.3cm 도
+                         # 안 움직임' 둘에서만 ok=False 다. 진동 break 도, 잔여가 남은
+                         # 채 끝나도 ok=True 이고, ⑥은 guard_off=True 라 가드 분기도
+                         # 죽는다. 즉 fallback_ok=True 는 "엘베에서 나왔다"가 아니라
+                         # "명령을 다 쐈고 odom 이 조금 늘었다"에 가깝다. 그런데 이
+                         # 값 하나로 구조 절차를 건너뛰고 지도전환·앱종료·/goto 로
+                         # 직행한다. 다음 회차에 '나왔는지'의 직접 증거로 바꿔야 한다.
+                         )
             _auto_notify("엘리베이터에서 나왔습니다. 정확한 자세는 아니니 "
                          "다음 주행 시작 위치를 확인하세요")
         elif ex_reason != "done":
