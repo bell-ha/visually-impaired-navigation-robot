@@ -275,6 +275,14 @@ LIFT_ROW1_M = 0.930
 #
 # 조작반 높이대 밖에서는 행 보정을 하지 않는다 — 큰 점프는 이 기능의 일이 아니다.
 # (연습용 태블릿 환경은 0.43~0.50 이라 이 대역 밖이고, 따라서 영향을 받지 않는다)
+# 서보가 행 기준값에서 벗어날 수 있는 최대치. 행 간격이 56.8mm 이므로 그 절반인
+# 28.4mm 가 "이웃 행을 누르기 시작하는" 경계다. 2026-09-09 실기가 그 경계를 실증했다 —
+# 실패판이 +27.9mm, 성공판이 +3.9mm 였다. ±15mm 면 경계까지 13mm 여유가 남는다.
+# 사용자 결정: "완전 고정인데 상한 추천 괜찮은 거 같아 … 우리가 맵핑을 해서 얻어낸
+# 정보로 간다는거니까" — 모델을 기준으로 삼고 보정은 상한 안에서만 허용한다.
+# 모델 신뢰 근거: 3D 매핑 계산 vs 이 코드의 행 높이 모델이 최대 2.7mm,
+#                3D 계산 vs 오늘 실제 눌린 lift 가 1.2mm (verifier 독립 검증).
+LIFT_ROW_SERVO_MAX_M = 0.015
 LIFT_PANEL_BAND     = (0.80, 1.10)
 # 이 이하 차이면 안 움직인다. 행 간격의 절반(2.8cm)보다 작아야 행 보정이 의미가 있다.
 LIFT_ROW_DEADBAND_M = 0.015
@@ -305,6 +313,61 @@ def _row_of_label(tok):
         if any(x.strip() == t for x in row):
             return ri
     return None
+
+
+def _lift_row_clamp(node, want, where):
+    """서보가 명령하려는 lift 를 '행 기준값 ±LIFT_ROW_SERVO_MAX_M' 안으로 묶는다.
+
+    행 기준값(L_row)은 목표 버튼이 정해져 있을 때만 존재한다 — 없으면 그대로 통과시킨다
+    (탐색 중에는 묶을 기준이 없다). 홀 패널도 행 모델이 없으므로 통과다.
+    클램프가 걸리면 얼마나 벗어나려 했는지 로그로 남긴다.
+    """
+    try:
+        with state_lock:
+            pl = state["place"]
+        if pl != "cab":
+            return want
+        l_row, ri = _lift_prior_for("cab")
+        if ri is None:            # 목표 미정 = 묶을 기준이 없다
+            return want
+        lo, hi = l_row - LIFT_ROW_SERVO_MAX_M, l_row + LIFT_ROW_SERVO_MAX_M
+        if lo <= want <= hi:
+            return want
+        out = max(lo, min(hi, want))
+        node._dlog(f"[LIFT] ⛔ {where} 보정을 {ri}행 기준 {l_row:.3f}m ±"
+                   f"{LIFT_ROW_SERVO_MAX_M*1000:.0f}mm 로 클램프 — "
+                   f"명령 {want:.3f}({(want-l_row)*1000:+.0f}mm) → {out:.3f}"
+                   f"({(out-l_row)*1000:+.0f}mm). 행 간격 절반(28mm)을 넘으면 이웃 행을 누른다")
+        return out
+    except Exception:
+        return want
+
+
+def _lift_prior_for(place):
+    """그 시점에 써야 할 lift 규정 높이 → (높이, 행인덱스 또는 None).
+
+    목표 버튼이 이미 정해져 있으면 **그 버튼의 행 높이**를 쓴다. 목표가 없으면
+    (아직 어느 버튼인지 모를 때) 기존 탐색 높이다.
+
+    왜 이 함수가 필요한가 — 2026-09-09 실기 1층 1차 실패의 직접 원인:
+        13:53:36.445  [PRIOR] '1' = 2행 → lift 0.933→0.873
+        13:53:36.458  -> joint_lift=0.873                        ← 행별 PRIOR
+        13:53:36.625  -> ...gripper, joint_lift=0.940            ← 167ms 뒤 덮어씀
+        13:53:36.697  [GOAL] ⛔ 거부됨 — 로봇이 움직이지 않음
+        press 실측 lift 0.9011 (목표 0.873 대비 +27.9mm) → 두 행 사이 평면을 눌렀다
+    뒤의 0.940 은 인식 자세 goal 에 얹혀 나가는 일반 탐색 높이였다. 단일-goal 서버라
+    앞의 lift goal 이 선점·유실됐다(_set_place 독스트링이 이미 경고하던 그 사고다).
+    그래서 "lift 를 쏘는 모든 곳이 같은 함수로 높이를 구한다"로 고쳤다. 타임스탬프나
+    유예 창을 쓰지 않는다 — 목표가 정해져 있으면 누가 언제 쏘든 같은 답이 나오므로
+    두 goal 의 **순서와 무관하게** 올바른 높이로 수렴한다.
+    """
+    if place == "hall":
+        return LIFT_PRIOR_CALL, None
+    with state_lock:
+        tok = state.get("target_text")
+    ri = _row_of_label(tok) if tok else None
+    h = _lift_for_row(ri, len(_layout_rows))
+    return (h, ri) if h is not None else (LIFT_PRIOR_PANEL, None)
 
 
 def _lift_row_prior(node, place, tok):
@@ -1685,7 +1748,7 @@ def select():
                 pass
         threading.Thread(target=_stop_armleft, daemon=True).start()
         if USE_HEIGHT_PRIOR:
-            prior = LIFT_PRIOR_CALL if _pl0 == "hall" else LIFT_PRIOR_PANEL
+            prior, _ = _lift_prior_for(_pl0)
             with state_lock:
                 cur_lift = state["lift"]
             if cur_lift is not None and abs(cur_lift - prior) > 0.12:
@@ -1765,12 +1828,13 @@ def _set_place(pl, send_lift=True):
         node._dlog(f"[MODE] 장소: {'🛗 차내 (층 숫자)' if pl == 'cab' else '🏢 홀 (호출 ▲▼)'}")
         # 모드 전환 = 새 패널 앞에 섰다는 뜻 → lift를 실측 규정 높이로 선이동
         # (탐색 스캔이 0.5m 아래에서 헤매는 시간 절약; 타겟은 방금 해제돼 서보와 충돌 없음)
-        prior = LIFT_PRIOR_CALL if pl == "hall" else LIFT_PRIOR_PANEL
+        prior, _pri_row = _lift_prior_for(pl)
         with state_lock:
             cur_lift = state["lift"]
         if send_lift and (cur_lift is None or abs(cur_lift - prior) > 0.03):
             node._dlog(f"[MODE] 규정 높이 선이동: lift "
-                       f"{('%.2f' % cur_lift) if cur_lift is not None else '?'}→{prior:.2f}")
+                       f"{('%.2f' % cur_lift) if cur_lift is not None else '?'}→{prior:.3f}"
+                       + (f" ({_pri_row}행 높이)" if _pri_row is not None else ""))
             sent = node._send_goal(["joint_lift"], [prior])
             if not sent:
                 node._dlog("[MODE] ⛔ 규정 높이 선이동 실패 — lift 명령이 안 나갔다")
@@ -2130,7 +2194,13 @@ def scene_set():
         # press 단계: 홀/차내 모드 + 그리퍼 전방(인식 자세) + 열기 + lift 규정 높이
         _set_place("hall" if n == 0 else "cab", send_lift=False)
         if node and _auth:
-            prior = LIFT_PRIOR_CALL if n == 0 else LIFT_PRIOR_PANEL
+            # 이 goal 에 lift 가 함께 실려 나간다. 목표 버튼이 이미 정해져 있으면
+            # 그 행 높이를 실어야 한다 — 일반 탐색 높이를 실으면 방금 나간 행별 PRIOR 를
+            # 덮어써 버린다(2026-09-09 1층 1차 실패. _lift_prior_for 주석에 타임라인).
+            prior, _pri_row = _lift_prior_for("hall" if n == 0 else "cab")
+            if _pri_row is not None:
+                node._dlog(f"[SCENE] 인식 자세 lift = {_pri_row}행 높이 {prior:.3f} "
+                           "(목표가 이미 정해져 있어 탐색 높이를 쓰지 않는다)")
             node._dlog("[SCENE] 인식 자세 — 그리퍼 닫고→손목 전방→그리퍼 열기 (충돌·과부하 방지)")
             # #1 과부하 방지: 손목 회전은 반드시 그리퍼 닫힌 채로. 몸통 근처에서 그리퍼가
             # 열린 채 회전하면 손가락이 몸통에 닿아 과부하 → 닫기→회전→열기로 순서 분리.
@@ -5408,10 +5478,15 @@ class ElevatorTracker(Node):
                 e_pol = self._det_mem.get(target)
                 if e_pol and e_pol["ts"] != getattr(self, "_polish_ts", None):
                     self._polish_ts = e_pol["ts"]
-                    if abs(ey) >= act:
+                    # 모양 전용 정합(앵커 0)으로 추론된 위치를 향해 높이를 움직이지
+                    # 않는다 — 2026-09-09 실패판이 그것이었다(글자를 하나도 못 읽은
+                    # 추론 위치로 +28mm 까지 흘러 두 행 사이 평면을 눌렀다).
+                    if abs(ey) >= act and not det.get("shape"):
                         self._send_goal(["joint_lift"],
-                            [max(0.15, min(1.10,
-                                           float(lift) - KP_LIFT * ey * 0.7))])
+                            [_lift_row_clamp(self,
+                                max(0.15, min(1.10,
+                                              float(lift) - KP_LIFT * ey * 0.7)),
+                                "polish 높이")])
                     if abs(ex) >= act:
                         self._maybe_base_nudge(ex, tdist)
             return
@@ -5441,9 +5516,17 @@ class ElevatorTracker(Node):
         if e_mem:
             self._servo_acted_ts = e_mem["ts"]
         # 상하(ey) → lift 서보. yaw는 고정(카메라만 돌 뿐 손끝 경로를 못 옮김).
-        if abs(ey) >= dz:
+        # 앵커 조건: 모양 전용 정합(글자 미판독)으로 추론된 위치에는 높이를 안 맞춘다.
+        if abs(ey) >= dz and det.get("shape"):
+            if time.time() - getattr(self, "_shape_lift_log_ts", 0) > 5.0:
+                self._shape_lift_log_ts = time.time()
+                self._dlog(f"[LIFT] 모양 추론(앵커 0) 위치라 높이 보정 생략 "
+                           f"(y{ey:+.0f}px) — 글자가 읽히면 재개한다")
+        elif abs(ey) >= dz:
             self._send_goal(["joint_lift"],
-                            [max(0.15, min(1.10, float(lift) - KP_LIFT * ey))])
+                            [_lift_row_clamp(self,
+                                max(0.15, min(1.10, float(lift) - KP_LIFT * ey)),
+                                "추적 높이")])
         # 좌우(ex) → 라이다-가드 베이스 전/후진 (토글 ON일 때만, 안전 확인 후)
         if abs(ex) >= dz:
             self._maybe_base_nudge(ex, tdist)
@@ -5641,7 +5724,10 @@ class ElevatorTracker(Node):
                             lift_now = state["lift"]
                         if lift_now is not None:
                             self._move_joint_wait("joint_lift",
-                                max(0.15, min(1.10, float(lift_now) - KP_LIFT * bym)),
+                                _lift_row_clamp(self,
+                                    max(0.15, min(1.10,
+                                                  float(lift_now) - KP_LIFT * bym)),
+                                    "접근 중 높이"),
                                 1, 6.0)
                     if abs(bxm) > dzm:
                         mvm = max(-0.02, min(0.02,
@@ -5700,7 +5786,10 @@ class ElevatorTracker(Node):
                         if lift_now is not None:
                             st(f"근접 재정렬 {_i+1}/5: 높이 보정 (y{by2:+.0f}px)")
                             self._move_joint_wait("joint_lift",
-                                max(0.15, min(1.10, float(lift_now) - KP_LIFT * by2)),
+                                _lift_row_clamp(self,
+                                    max(0.15, min(1.10,
+                                                  float(lift_now) - KP_LIFT * by2)),
+                                    "근접 재정렬 높이"),
                                 1, 6.0)
                             moved = True
                     if abs(bx2) > max(6, int(dz2 * 0.75)):   # 좌우 → 베이스 (가드 존중)
