@@ -2251,6 +2251,10 @@ def scene_set():
     if _fl is not None:
         with state_lock:
             state["floor"] = str(_fl)
+    # move=False → 단계만 전환하고 자동 안무는 띄우지 않는다. 다른 주체(Nav2)가
+    # 이미 그 자리로 데려다 놨을 때 쓴다. 자세 전환(이동 자세·팔 수납)·누적 리셋·
+    # 매듭 로그는 그대로 한다 — 단계 기록이 비면 나중에 로그를 읽을 수 없다.
+    _do_move = bool(_body.get("move", True))
     node = _node_ref[0]
     with state_lock:
         prev = state.get("scene")
@@ -2343,7 +2347,10 @@ def scene_set():
     # run_seq = 이번 안무의 실행번호. 안무를 실제로 띄웠을 때만 발급하므로,
     # 받는 쪽은 None이면 "기다릴 안무 없음(자세 전환만 한 씬)"으로 읽으면 된다.
     run_seq = None
-    if node and n in SCENE_MOVES:
+    if node and n in SCENE_MOVES and not _do_move:
+        node._dlog(f"[SCENE] {SCENES[n]} — 자동 안무 생략 (move=false: "
+                   "다른 주체가 이미 이동시켰다). 단계 표시·누적 리셋만 한다")
+    if node and n in SCENE_MOVES and _do_move:
         run_seq = _scene_run_begin(n)
         threading.Thread(target=node._run_scene_moves, args=(n, run_seq),
                          daemon=True).start()
@@ -2532,6 +2539,8 @@ def _revoke_authority(reason: str, expired: bool = False):
         state["guard_off"]     = False   # 엘베 밖 = 충돌 보호 가드 다시 ON
         state["lease_expired"] = expired
     if node and prev:
+        # 회수 쪽도 찍는다 — 한쪽만 있으면 '가려진 구간'의 길이를 못 잰다.
+        node._dlog(f"[GUARD] guard_off=False (리스 회수: {reason}) — 라이다 가드 복원")
         node._step_abort = True                # 수동 스텝·자동 안무 즉시 탈출
         try:
             node._cmd_pub.publish(Twist())     # 바퀴 정지 (안전 최우선)
@@ -2560,9 +2569,11 @@ def authority_route():
     if request.method == "GET":
         with state_lock:
             return jsonify(granted=bool(state.get("authority", False)))
-    granted = bool((request.json or {}).get("granted", False))
+    _abody  = request.json or {}
+    granted = bool(_abody.get("granted", False))
+    _why    = str(_abody.get("reason") or "")     # 대시보드가 실어 보내는 사유
     if not granted:
-        _revoke_authority("대시보드")
+        _revoke_authority("대시보드" + (f": {_why}" if _why else ""))
         return jsonify(ok=True, granted=False)
     node = _node_ref[0]
     with state_lock:
@@ -2576,6 +2587,15 @@ def authority_route():
         state["lease_expired"]  = False
     if node and not prev:
         node._dlog("[AUTH] ✅ 제어권 부여됨 — 이동 가능 (몸체이동 ON + 가드 OFF 자동)")
+        # guard_off 는 여기서 조용히 켜져 왔고, 그래서 사고 조사 때 "언제부터
+        # 가려졌나"를 잴 수 없었다. 가리는 검사가 하나가 아니다 — _manual_trans
+        # 사전검사·비상정지, _manual_rot·_nudge_rot 의 전방향 최소거리, _base_move·
+        # _do_nudge 다섯 곳이다. 전이 때만 찍는다(하트비트마다 재POST 되므로).
+        with state_lock:
+            _sc = state.get("scene")
+        node._dlog(f"[GUARD] guard_off=True 재설정 (리스 부여, 씬 {_sc}) — "
+                   "라이다 가드 5곳이 가려진다"
+                   + (f" · 사유: {_why}" if _why else ""))
     return jsonify(ok=True, granted=True)
 
 @app.route("/wrist_forward", methods=["POST"])

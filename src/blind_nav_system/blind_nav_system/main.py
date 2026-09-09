@@ -797,7 +797,7 @@ def _set_elev_authority(granted: bool, reason: str = "", quiet: bool = False):
         import urllib.request
         req = urllib.request.Request(
             "http://localhost:5000/authority",
-            data=json.dumps({"granted": granted}).encode(),
+            data=json.dumps({"granted": granted, "reason": reason}).encode(),
             headers={"Content-Type": "application/json"}, method="POST")
         urllib.request.urlopen(req, timeout=1)
         if not quiet:
@@ -1465,6 +1465,105 @@ def manual_arm_state():
                    lift=lift, arm_ext=arm_ext)
 
 
+# ── Nav2 파라미터 '평소값' 복원 — 복원을 '해제 시점'이 아니라 '사용 시점'에 보장 ──
+# 엘베 구간에서 Nav2 파라미터를 바꿨다가 되돌리는 설계(B안)를 넣게 되면, try/finally 는
+# 1겹도 못 된다(SIGKILL·전원·예외 중 예외). 그래서 **복도 주행이 시작되는 자리**에서
+# 무조건 평소값을 확인한다. 해제 경로의 성공을 전혀 가정하지 않는다.
+#   1겹: nav2 yaml 을 고치지 않는다 → Nav2 재시작이 곧 자가복구다. 이 전제가 깨지면
+#        1겹이 사라지므로, 엘베값을 yaml 에 넣는 변경은 하지 말 것.
+#   2겹: 여기 — /goto 직전. 복도 주행은 /goto 로만 일어난다(호출처 4곳).
+#   3겹: 준비상태 폴러의 주기 확인 (아직 없음 — B안 때 추가).
+# ※ 지금(2026-09-09, C안 1주차)은 파라미터를 **하나도 바꾸지 않는다.** 이 함수는 그때
+#   무해한 no-op 이고, 나중에 누가 엘베값을 넣었을 때 유일한 방어선이 된다.
+# ※ 복원 실패의 결과는 "로봇이 사람을 치는 것"이 아니라 "로봇이 안 가는 것"이다 —
+#   footprint 가 작아지면 footprint_clearing_enabled 가 동반자를 못 지워서 동반자가
+#   장애물이 되고 로봇이 멈춘다. 물리 위험이 아니라 기능 고장이라 fail-open 으로 둔다.
+# ※ 값은 yaml 에서 읽는다(하드코딩하지 않는다) — _EXIT_TARGET_CM 처럼 상수로 박으면
+#   나중에 yaml 을 튜닝했을 때 조용히 되돌려 버린다. 같은 함정을 또 밟지 않는다.
+_NAV2_PARAMS_YAML = Path("/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/"
+                         "config/nav2_params_human.yaml")
+_NAV2_PAD_NODE  = "/local_costmap/local_costmap"
+_NAV2_PAD_PARAM = "footprint_padding"
+
+
+def _nav_normal_padding():
+    """nav2 yaml 이 말하는 local costmap footprint_padding. 못 읽으면 None."""
+    try:
+        import yaml as _yaml
+        d = _yaml.safe_load(_NAV2_PARAMS_YAML.read_text("utf-8")) or {}
+        v = ((d.get("local_costmap") or {}).get("local_costmap") or {}) \
+            .get("ros__parameters", {}).get(_NAV2_PAD_PARAM)
+        return float(v) if v is not None else None
+    except Exception as e:
+        _log("NAV2", f"파라미터 yaml 읽기 실패 — 평소값 확인 생략 ({e!r})")
+        return None
+
+
+def _nav_param_get(node, name):
+    """ros2 param get 한 번. 값(float) 또는 None(모른다). 예외를 던지지 않는다.
+
+    ※ 2026-09-09 실측: nav2 실행 중이면 **데몬이 있어도 즉시 응답한다**(읽기 3/3,
+      local 0.08 / global 0.01). 오히려 `ros2 param get --no-daemon` 쪽이
+      /global_costmap/global_costmap 을 "Node not found" 로 놓쳤다(같은 노드를
+      ros2 node list 는 보여준다). 그래서 여기서는 데몬 경로를 그대로 쓴다.
+    """
+    try:
+        r = subprocess.run(["ros2", "param", "get", node, name],
+                           capture_output=True, timeout=5, text=True)
+        if r.returncode != 0:
+            return None
+        return float((r.stdout or "").rsplit(":", 1)[-1].strip())
+    except Exception:
+        return None
+
+
+def _nav_params_restore_normal(why=""):
+    """/goto 직전 호출. **반환: 주행해도 되는가(bool).** False 면 호출부가 거부해야 한다.
+
+    **읽어서 다를 때만 쓴다.** 같은 값을 매번 쓰면 살아 있는 코스트맵에 불필요한
+    footprint 갱신을 넣는 셈이고, 이 함수는 사람을 태운 여정의 주행 직전에 돈다.
+    정상 상태(= 아무도 안 바꿨을 때)의 라이브 쓰기는 **0 회**다.
+
+    🔴 읽기 실패를 '같다'로 넘기지 않는다. 읽기 실패는 "모른다"이지 "정상"이 아니다.
+       모르면 쓴다. 쓰기까지 실패하면 **주행을 거부한다** — 반환값을 안 보고 이동으로
+       진행하는 것이 이 프로젝트의 뿌리 A(실패·취소 시 안전복귀 실패)다.
+    """
+    want = _nav_normal_padding()
+    if want is None:
+        # 목표값을 모르면 쓸 수도 없다. 다만 이 빌드는 엘베 구간에서 파라미터를
+        # 하나도 바꾸지 않으므로(2026-09-09 C안) 되돌릴 것도 없다 — 경고만 하고
+        # 주행은 허용한다.
+        # 🔴 엘베용 파라미터 전환을 넣는 날, 이 분기는 **거부**로 바뀌어야 한다.
+        #    그때 이 주석을 지우지 말고 고쳐라.
+        _log("NAV2", "🚨 nav2 파라미터 yaml 을 못 읽어 평소값을 확인하지 못했다 — "
+                     "이 빌드는 엘베 파라미터를 바꾸지 않으므로 주행은 계속한다"
+                     + (f" [{why}]" if why else ""))
+        return True
+    cur = _nav_param_get(_NAV2_PAD_NODE, _NAV2_PAD_PARAM)
+    if cur is not None and abs(cur - want) <= 1e-6:
+        return True                 # 평소값이다 — 아무것도 쓰지 않는다(정상 경로)
+    unknown = (cur is None)
+    _log("NAV2", (f"⚠ {_NAV2_PAD_NODE} {_NAV2_PAD_PARAM} 조회 실패 — '모른다'이므로 "
+                  f"평소값 {want} 을 그대로 쓴다" if unknown else
+                  f"🚨 {_NAV2_PAD_PARAM} 이 평소값과 다름 {cur} → {want} 복원 시도 "
+                  "— 엘베값이 복도로 새어 나온 것이다. 원인을 찾아라")
+                 + (f" [{why}]" if why else ""))
+    try:
+        w = subprocess.run(["ros2", "param", "set", _NAV2_PAD_NODE, _NAV2_PAD_PARAM,
+                            str(want)], capture_output=True, timeout=5, text=True)
+        ok = (w.returncode == 0)
+        err = (w.stderr or w.stdout or "").strip()[:120]
+    except Exception as e:
+        ok, err = False, repr(e)
+    if ok:
+        _log("NAV2", f"{_NAV2_PAD_PARAM} = {want} 재설정 성공"
+                     + (f" [{why}]" if why else ""))
+        return True
+    _log("NAV2", f"🚨 {_NAV2_PAD_PARAM} 재설정 실패 → **주행 거부**. {err}"
+                 + (f" [{why}]" if why else ""))
+    return False
+
+
 def _auto_scene_step(label, n, busy_msg, noanmu_msg, phase):
     """씬 n 을 '잠금 → 실행 → 완료 대기 → 결과와 함께 개방' 순서로 돌린다.
 
@@ -1520,7 +1619,7 @@ def _elev_status(timeout=3):
     except Exception:
         return None
 
-def _elev_scene(n):
+def _elev_scene(n, move=True):
     """엘베앱 씬 n 트리거(자세 전환·자동안무). **(전송성공, run_seq)** 반환.
 
     run_seq 는 이번 안무의 실행번호다. _elev_wait_scene_done 에 그대로 넘기면 '내가
@@ -1531,7 +1630,10 @@ def _elev_scene(n):
     # 현재 층을 같이 보낸다 — 엘베앱이 승강장 버튼 높이를 층별로 고르는 데 쓴다.
     # 엘베앱은 층을 스스로 알 길이 없다. 이 값의 신뢰도는 이미 여정 전체가 의존하는
     # 것과 같다(상/하행 버튼 선택 `up = int(dest_floor) > int(_current_floor)`, 지도 전환).
-    r = _elev_post("/scene", {"n": int(n), "floor": _current_floor}, timeout=20)
+    # move=False → 단계 표시·누적 리셋·자세 전환만. 자동 안무는 띄우지 않는다
+    # (다른 주체가 이미 그 자리로 데려다 놨을 때. 예: ② 를 Nav2 로 가는 경로).
+    r = _elev_post("/scene", {"n": int(n), "floor": _current_floor, "move": bool(move)},
+                   timeout=20)
     if r is None:
         return False, None
     return True, r.get("run_seq")
@@ -1822,6 +1924,99 @@ def _elev_wait_scene_done(n, seq=None, timeout=None):
         time.sleep(_SCENE_POLL_SEC)
 
 
+_FRONT_LOC        = "엘리베이터 문앞"
+# ② 는 승차지점에서 80.8cm 다. 0.26m/s 면 회전까지 넣어도 20초대다. 60초는 그 3배이고,
+# 동시에 '목적지를 interface 가 모를 때' 를 빨리 드러내는 값이다 — 기본 200초로 두면
+# 조용히 3분 넘게 서 있다가 실패한다.
+_FRONT_ARRIVE_SEC = 60.0
+
+
+def _auto_front_nav2():
+    """② 문앞 — 3단 안무 대신 Nav2 로 간다. 계속할지(bool) 반환.
+
+    ■ 왜 바꾸나 (2026-09-09 사용자)
+      "좌표로 이동하는 게 너무 이상했어… 문 앞에 위치하는 것도 너무 멀리 떨어져있었고"
+      9/9 실기 ② 기록: 잔여 dist 0.100m / yaw +2.4° / 회전 13회 · |회전|합 297°.
+      Nav2 는 같은 구간을 xy_goal_tolerance 0.03 · yaw_goal_tolerance 0.05(2.9°)로 선다.
+      ② 는 엘베 **밖**이고 문을 통과하지 않는다 — 지도 실측으로 현재 파라미터 그대로
+      목표·경로·회전이 전부 통과한다(승차지점→문앞 80.8cm 스윕, 필요 회전 168.4°→83.3°).
+      **그래서 1주차는 Nav2 파라미터를 하나도 바꾸지 않는다.**
+      ④ 탑승·⑥ 하차는 Nav2 로 넘기지 않는다 — 뒤 0.9m footprint 꼬리는 사용자가
+      "동반자를 장애물로 안 보게" 직접 넣은 설계(footprint_clearing_enabled)라,
+      캐빈 선회를 얻으려고 줄이면 **로봇을 잡고 있는 시각장애인이 장애물이 된다.**
+
+    ■ 바퀴를 누가 잡나 — /cmd_vel 에 중재자가 없다
+      실측 cmd_vel_pubs=8. Nav2 와 엘베앱이 같은 토픽에 동시에 쓸 수 있고 막는 것이
+      없다. 지금까지는 순차 운영(엘베앱 토글)으로 우연히 피해 왔다. ② 를 Nav2 로
+      바꾸면 여정 **중간에** Nav2 주행이 처음으로 끼어들므로 규칙을 명시한다:
+          Nav2 가 바퀴를 잡는 구간 ⟺ 엘베앱 authority=False
+      회수(_revoke_authority)가 _step_abort + Twist() 정지를 하므로 전환은 안전하다.
+      대가: guard_off 가 ② 전후로 두 번 더 뒤집힌다. 그래서 엘베앱에 [GUARD] 전이
+      로그를 넣었다 — 지금까지 조용히 켜져서 사고 조사 때 안 보였다.
+
+    ■ 합격선 (못 넘으면 되돌린다)
+      3단의 9/9 기록(dist 0.100m / yaw +2.4° / 회전 13회 297°)을 **거리와 회전 횟수
+      둘 다** 이겨야 한다. 아래에서 도착 잔여를 기준선과 나란히 로그에 남긴다.
+      회전 횟수는 Nav2 가 보고하지 않는다 — 영상·[MOVE] 로그로 사람이 센다.
+    """
+    with _auto_lock:
+        _AUTO["force"] = False
+    p = _loc(_FRONT_LOC)
+    if not p:
+        _auto_set("오류", f"'{_FRONT_LOC}' 좌표가 location.yaml 에 없음 — ② 중단")
+        return False
+    _auto_set("② 문앞정렬", "Nav2 주행 준비 — 엘베앱 제어권 회수 중...",
+              wait=False, phase="front")
+    # 제어권 회수가 실패하면 주행을 시작하지 않는다. 두 주체가 /cmd_vel 을 동시에
+    # 쓰는 것은 사람 옆에서 절대 허용할 수 없다(fail-closed).
+    if not _grant_elev_lease(False, "② 문앞 Nav2 주행"):
+        _auto_set("오류", "🚨 제어권 회수 실패 — Nav2 와 엘베앱이 /cmd_vel 을 "
+                          "동시에 쓸 수 있다. ② 중단")
+        return False
+    if not _nav_params_restore_normal("② 문앞"):
+        # 여기서 거부하면 제어권은 이미 회수된 상태다 — 되돌려 놓고 나간다.
+        _grant_elev_lease(True, "② 파라미터 복원 실패 — 엘베 모드 복귀")
+        _auto_set("오류", "🚨 Nav2 파라미터를 평소값으로 되돌리지 못했다 — ② 주행 거부")
+        return False
+    _auto_set("② 문앞정렬", "문 앞으로 Nav2 주행 중... 로봇이 멈추면 '다음'이 열립니다",
+              wait=False, phase="front")
+    _write("iface", f"/goto {_FRONT_LOC}")
+    arrived = _auto_wait_arrival(_FRONT_LOC, timeout=_FRONT_ARRIVE_SEC)
+    # 도착 여부와 무관하게 제어권은 되돌린다 — ③ 문대기·④ 탑승이 엘베앱이고,
+    # 실패해도 사람이 엘베UI 조종 패드로 수습해야 한다(패드는 제어권이 있어야 듣는다).
+    if not _grant_elev_lease(True, "② 문앞 구간 종료 — 엘베 모드 복귀"):
+        _auto_set("오류", "제어권 재부여 실패 — 여정 중단")
+        return False
+    if not arrived:
+        # 가장 흔한 원인을 문구에 박는다: interface 는 location.yaml 을 **init 에 한 번만**
+        # 읽는다(interface.py:1177). 장소를 새로 추가했으면 interface 를 재시작해야
+        # _handle_goto 가 받는다 — 아니면 "목록에 없는 목적지 무시"로 조용히 버린다.
+        _auto_set("② 문앞정렬",
+                  f"⚠ 문앞 도착 실패(≤{_FRONT_ARRIVE_SEC:.0f}s) — interface 가 "
+                  f"'{_FRONT_LOC}' 를 모를 수 있다(장소 추가 후 interface 재시작 필요). "
+                  "엘베UI 로 수동 정렬 후 '다음'", wait=True, phase="front")
+        return _auto_wait_confirm()
+    # 단계 기록만 ② 로 넘긴다 — 안무는 띄우지 않는다(Nav2 가 이미 데려다 놨다).
+    # 건너뛰면 [SCENE] 매듭·누적 리셋이 없어 다음 단계 로그가 ① 로 남는다.
+    _elev_scene(1, move=False)
+    d = _dist_to(p.get("x"), p.get("y"))
+    try:
+        tgt_yaw = math.degrees(2.0 * math.atan2(float(p.get("z") or 0.0),
+                                                float(p.get("w") or 1.0)))
+        dy = (_robot_pose["yaw_deg"] - tgt_yaw + 180.0) % 360.0 - 180.0
+    except Exception:
+        dy = None
+    _log("AUTO", "② 문앞 Nav2 도착 — 잔여 위치 "
+                 + ("?" if d is None else f"{d:.3f}m")
+                 + " 방향 " + ("?" if dy is None else f"{dy:+.1f}°")
+                 + "  (3단 기준선 2026-09-09: 0.100m / +2.4° / 회전 13회 297°)")
+    _auto_set("② 문앞정렬", "문 앞 도착 ✅ (Nav2) — 잔여 "
+                            + ("?" if d is None else f"{d*100:.1f}cm")
+                            + ("" if dy is None else f" / {dy:+.1f}°") + " · '다음'",
+              wait=True, phase="front")
+    return _auto_wait_confirm()
+
+
 def _scene_res_txt(res):
     """실행 기록의 **잔여값만** 사람이 읽는 한 줄로. 좌표 목표가 없는 씬은 빈 문자열.
 
@@ -2088,6 +2283,10 @@ def _auto_run(dest):
             with _auto_lock:
                 _AUTO["mode"] = "same"
             _auto_set("주행", f"{dest} 바로 이동 (같은 층)", phase="drive")
+            if not _nav_params_restore_normal(f"같은 층 {dest}"):
+                _auto_set("오류", "🚨 Nav2 파라미터를 평소값으로 되돌리지 못했다 — "
+                                  "주행 거부(좁은 안전거리로 복도를 달릴 수 있다)")
+                return
             _write("iface", f"/goto {dest}")
             _auto_set("완료", f"{dest} 도착 ✅" if _auto_wait_arrival(dest) else "도착 실패",
                       phase="done")
@@ -2102,6 +2301,10 @@ def _auto_run(dest):
 
         # 1) 승차지점 주행 (자동)
         _auto_set("주행", "엘리베이터 탑승지점으로 이동 중...", phase="board")
+        if not _nav_params_restore_normal("승차지점"):
+            _auto_set("오류", "🚨 Nav2 파라미터를 평소값으로 되돌리지 못했다 — "
+                              "승차지점 주행 거부")
+            return
         _write("iface", "/goto 엘리베이터 탑승지점")
         if not _auto_wait_arrival("엘리베이터 탑승지점"):
             _auto_set("오류", "승차지점 도착 실패(취소/시간초과)"); return
@@ -2148,16 +2351,14 @@ def _auto_run(dest):
             _auto_abort_elev(); return
         arm_safe = True                         # 유일한 release 지점 (1/2)
 
-        # ② 문앞 정렬: 전진 56.5 + 우회전 90° (자동 안무)
+        # ② 문앞 정렬 — 2026-09-09: 3단 안무(전진 80.8 + 우회전 90°) → Nav2 주행.
+        # 팔 수납 확인은 그대로 선행한다(⑥ 직전과 같은 게이트). Nav2 든 3단이든
+        # 뻗은 팔로 문틀 옆을 지나면 부딪힌다.
         if not arm_safe:
             _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(② 문앞정렬)")
             _auto_abort_elev(); return
-        ok_, _why, _res = _auto_scene_step(
-            "② 문앞정렬", 1,
-            "문 앞으로 정렬 중(전진·회전)... 로봇이 멈추면 '다음'이 열립니다",
-            "② 문앞 정렬 — 확인 후 '다음'", "front")
-        if not ok_: _auto_abort_elev(); return
+        if not _auto_front_nav2(): _auto_abort_elev(); return
 
         # ③ 문 열림 대기 (자동 감지)
         # ③은 SCENE_MOVES 에 없어 안무가 없다 → noanmu 로 즉시 '다음'이 열린다.
@@ -2279,6 +2480,14 @@ def _auto_run(dest):
 
         # 9) 목적지 주행 (자동)
         _auto_set("주행", f"{dest}로 이동 중...", phase="drive")
+        if not _nav_params_restore_normal(f"하차 후 {dest}"):
+            # 하차는 끝났으니 사람은 엘리베이터 밖이다. 목적지까지는 못 간다 —
+            # 조용히 서 있지 않고 사실대로 알린다(뿌리 B: 실패가 사용자에 전달 안 됨).
+            _auto_notify("엘리베이터에서 나왔지만 목적지로 출발할 수 없습니다. "
+                         "도움을 요청하세요")
+            _auto_set("오류", "🚨 Nav2 파라미터 복원 실패 — 목적지 주행 거부 "
+                              "(하차는 완료)", phase="drive")
+            return
         _write("iface", f"/goto {dest}")
         _auto_set("완료", f"🎉 {dest} 도착! 여정 완료" if _auto_wait_arrival(dest)
                   else "목적지 도착 실패", phase="done")
@@ -2427,6 +2636,9 @@ def goto():
         return jsonify(ok=False, error="이름 없음"), 400
     if _manual_mode:
         return jsonify(ok=False, error="수동 모드에서는 불가 — 자동 모드로 전환하세요")
+    if not _nav_params_restore_normal(f"수동 /goto {name}"):
+        return jsonify(ok=False, error="Nav2 파라미터를 평소값으로 되돌리지 못했습니다 "
+                                       "— 주행을 거부했습니다(로그 확인)"), 409
     _write("iface", f"/goto {name}")
     _log("MAIN", f"🖱 장소 클릭 → '{name}' 즉시 출발")
     return jsonify(ok=True)
