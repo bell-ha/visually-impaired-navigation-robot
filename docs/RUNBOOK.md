@@ -133,7 +133,7 @@ cd $APP/people_tracker
 ```
 
 발행 토픽
-- `/people_tracker/markers` — RViz 시각화 (빨강 접근자 / 초록 동행자 / 파랑 정지)
+- `/people_tracker/markers` — RViz 시각화 (빨강 접근자 / 초록 동행자 / 파랑 미분류)
 - `/people_tracker/people` — JSON (위치 · 속도 · 분류 · 거리 · depth_estimated)
 
 ---
