@@ -346,6 +346,204 @@ def _lift_row_prior(node, place, tok):
         node._dlog("[PRIOR] ⛔ lift 명령이 안 나갔다 — 행 높이 미적용")
 
 
+
+# ── press 전후 프레임 저장 (누름 검증용) ─────────────────────────────────────
+# 왜: press 경로는 디스크에 이미지를 한 장도 안 남긴다. 저장 경로는 POST /snapshot
+# 하나뿐이고 사람이 눌러야 하며, /fail.jpg 는 메모리 전용이다. 그래서 "버튼 불이
+# 켜졌나"로 press 를 검증할 수 있는지조차 판정이 안 된다. 프레임은 이미 메모리에
+# 있으므로(_raw_full) 저장만 하면 된다 — 새 구독·카메라 설정 변경 없음.
+#
+# 시점 4장: A=누르기 직전 / B=팔 최대 전진(가림 기록용) / C=복귀 완료 직후(주 판정)
+#           D=C+2초(점등이 늦는 패널 대비)
+#
+# ※ CPU 제약이 설계를 지배한다. 2026-09-07 정지상태 실측으로 엘베앱을 켜면 부하가
+#   4.5 → 17.3(16코어 포화), /scan 최악지연 0.136 → 0.259s, 지터 3배다. 그래서:
+#     · '촬영'은 프레임 **참조 하나를 집는 것**뿐이다(복사도 인코딩도 안 한다).
+#       _on_image 가 매 프레임 새 배열을 만들어 _raw_full 에 대입하므로, 참조를
+#       붙들어 두면 그 프레임은 덮어쓰이지 않는다.
+#     · '저장'은 press 가 **완전히 끝난 뒤** 한꺼번에 한다(아래 워커가 pressing 을 본다).
+#     · 워커는 프로세스 전체에 **하나**다. press 마다 스레드를 만들지 않는다.
+#     · 큐가 밀리면 오래된 것을 **버린다**. 절대 블로킹하지 않는다.
+PRESS_FRAME_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                "..", "snapshots", "press"))
+# 사람이 찍은 스냅샷(snapshots/<ts>_<label>)과 섞이지 않게 하위 폴더를 쓴다.
+PRESS_FRAME_KEEP = 40     # press 회차 폴더 보관 개수 (1회 4장)
+PRESS_Q_MAX      = 16     # 대기 큐 상한 — 넘으면 오래된 것부터 버린다
+# JPEG 품질 — 점등 판정은 ROI 평균 밝기·색이라 고품질이 필요 없다.
+# C(주 판정)만 높다. 나중에 색·대비까지 봐야 하는 장면이 그것뿐이다.
+# B 는 가림 정도만 보는 기록이라 가장 낮다.
+PRESS_JPEG_Q = {"A_before": 75, "B_push": 55, "C_after": 92, "D_after2s": 75}
+PRESS_SAVE_B = True       # B 가 필요 없으면 False — A·C 만으로 판정은 성립한다
+
+_press_q        = collections.deque()
+_press_q_lock   = threading.Lock()
+_press_q_ev     = threading.Event()
+_press_worker   = None
+_press_dropped  = 0
+
+
+def _press_run_dir(scene, tgt):
+    """이번 press 회차의 저장 폴더 경로. 만들지는 않는다(워커가 만든다)."""
+    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(tgt or "none"))
+    return os.path.join(PRESS_FRAME_DIR,
+                        f"{time.strftime('%Y%m%dT%H%M%S')}_scene{scene}_{safe}")
+
+
+def _press_frames_prune():
+    """오래된 press 회차 폴더 정리 — 디스크를 채우지 않는다."""
+    try:
+        ds = sorted(d for d in os.listdir(PRESS_FRAME_DIR)
+                    if os.path.isdir(os.path.join(PRESS_FRAME_DIR, d)))
+        for d in ds[:-PRESS_FRAME_KEEP]:
+            shutil.rmtree(os.path.join(PRESS_FRAME_DIR, d), ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _press_capture(node, run_dir, tag, extra=None, delay=0.0):
+    """프레임 '촬영' — 참조 하나를 집어 큐에 넣는 것뿐이다. 모션 경로에서 불려도 안전.
+
+    자세 메타(lift/arm_ext)도 **이 순간** 값을 함께 넣는다. 저장이 나중이라 쓰는
+    시점에 읽으면 이미 팔이 움직인 뒤의 값이 들어가 A/C 비교가 무의미해진다.
+    delay>0 이면 그만큼 뒤에 집는다(D 시점) — 자는 스레드 하나이고 CPU 는 안 먹는다.
+    """
+    def _grab():
+        try:
+            fr = getattr(node, "_raw_full", None)
+            if fr is None:
+                fr = getattr(node, "_last_grip_raw", None)
+            with state_lock:
+                snap = {"lift": state["lift"], "arm_ext": state["arm_ext"],
+                        "scene": state.get("scene"), "target": state.get("target_text"),
+                        "press_status": state.get("press_status"),
+                        "rot_grip": state["rot_grip"]}
+            item = (run_dir, tag, fr, dict(extra or {}), snap,
+                    getattr(node, "_letterbox", None), time.time())
+            global _press_dropped
+            with _press_q_lock:
+                while len(_press_q) >= PRESS_Q_MAX:
+                    _press_q.popleft()
+                    _press_dropped += 1
+                _press_q.append(item)
+                dropped = _press_dropped
+            _press_q_ev.set()
+            _press_worker_start(node)
+            if dropped:
+                node._dlog(f"[PFRAME] ⚠ 큐가 밀려 오래된 프레임 {dropped}장 버림 "
+                           f"(상한 {PRESS_Q_MAX})")
+                with _press_q_lock:
+                    _press_dropped = 0
+        except Exception as e:
+            try:
+                node._dlog(f"[PFRAME] ⛔ {tag} 촬영 실패 — {e} (press 는 계속한다)")
+            except Exception:
+                pass
+    try:
+        if delay > 0.0:
+            def _later():
+                time.sleep(delay)
+                _grab()
+            threading.Thread(target=_later, daemon=True).start()
+        else:
+            _grab()
+    except Exception:
+        pass
+
+
+def _press_worker_start(node):
+    """저장 워커를 한 번만 띄운다. 프로세스 전체에 하나다."""
+    global _press_worker
+    if _press_worker is not None and _press_worker.is_alive():
+        return
+    _press_worker = threading.Thread(target=_press_worker_loop, args=(node,), daemon=True)
+    _press_worker.start()
+
+
+def _press_worker_loop(node):
+    """큐를 비우는 유일한 스레드. press 가 끝난 뒤에만 쓴다."""
+    try:
+        os.nice(10)          # 우선순위 낮춤 — 실패해도 무시한다
+    except Exception:
+        pass
+    while True:
+        _press_q_ev.wait()
+        # press 진행 중에는 인코딩을 시작하지 않는다 — 모션과 CPU 를 다투지 않게.
+        while True:
+            with state_lock:
+                busy = bool(state.get("pressing"))
+            if not busy:
+                break
+            time.sleep(0.2)
+        while True:
+            with _press_q_lock:
+                if not _press_q:
+                    _press_q_ev.clear()
+                    break
+                item = _press_q.popleft()
+            _press_frame_write(node, *item)
+
+
+def _press_frame_write(node, run_dir, tag, frame, extra, snap, lb, ts):
+    """실제 인코딩·디스크 쓰기. 워커 스레드에서만 불린다.
+
+    프레임이 없어도 메타는 남긴다 — "그때 프레임이 없었다"도 자료다.
+    어떤 실패도 삼킨다: 이 함수가 press 를 깨뜨리면 안 된다.
+    """
+    try:
+        os.makedirs(run_dir, exist_ok=True)
+        meta = {
+            "tag": tag, "ts": ts,
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)),
+            "scene": snap.get("scene"), "target": snap.get("target"),
+            "press_status": snap.get("press_status"),
+            # A 와 C 가 같은 자세였는지 확인할 근거 — 둘의 lift/arm_ext 가 같아야
+            # 밝기 차이를 '점등'으로 읽을 수 있다. 촬영 순간의 값이다.
+            "lift": snap.get("lift"), "arm_ext": snap.get("arm_ext"),
+            # 프레임은 회전 적용 후(_raw_full)다. ROI 좌표계와 같은 축이라 역변환이
+            # 그대로 맞는다. 회전 단계도 남겨 센서 원본과의 관계를 복원할 수 있게 한다.
+            "frame_source": "raw_full(rotated)", "rot_grip": snap.get("rot_grip"),
+            "letterbox": ({"scale": lb[0], "off_x": lb[1], "off_y": lb[2]}
+                          if lb else None),
+            "roi_ocr": extra.pop("roi_ocr", None),
+            "jpeg_quality": PRESS_JPEG_Q.get(tag, 75),
+            "missing": [],
+        }
+        # ROI 역변환: 원본(raw_full) 좌표 = (표시좌표 - off) / scale
+        r = meta["roi_ocr"]
+        if r and lb:
+            sc, ox, oy = lb
+            meta["roi_raw"] = {"x1": (r["x1"] - ox) / sc, "y1": (r["y1"] - oy) / sc,
+                               "x2": (r["x2"] - ox) / sc, "y2": (r["y2"] - oy) / sc}
+        else:
+            meta["roi_raw"] = None
+            if r and not lb:
+                meta["missing"].append("letterbox")
+        meta.update(extra)
+        if frame is None:
+            meta["image"] = None
+            meta["missing"].append("frame")
+        else:
+            fn = f"{tag}.jpg"
+            cv2.imwrite(os.path.join(run_dir, fn), frame,
+                        [cv2.IMWRITE_JPEG_QUALITY, meta["jpeg_quality"]])
+            meta["image"] = fn
+            meta["frame_hw"] = [int(frame.shape[0]), int(frame.shape[1])]
+            # 자동노출(AE)이 살아 있다(런치가 D405 노출 파라미터를 주지 않는다).
+            # 팔이 들어왔다 빠지면 AE 가 전체 밝기를 바꿔 점등과 구분이 안 되므로,
+            # 나중에 정규화할 수 있도록 전체 프레임 평균 밝기를 남긴다.
+            # (AE 고정 파라미터는 넣지 않는다 — 그건 카메라 구성 변경이라 별건이다)
+            meta["frame_mean"] = round(float(frame.mean()), 3)
+        with open(os.path.join(run_dir, f"{tag}.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=1)
+        if tag == "A_before":
+            _press_frames_prune()
+    except Exception as e:
+        try:
+            node._dlog(f"[PFRAME] ⛔ {tag} 저장 실패 — {e} (press 는 계속한다)")
+        except Exception:
+            pass
+
+
 PRESS_DEPTH        = 0.015  # m — 버튼 표면을 지나 밀어넣는 깊이 (버튼 스트로크)
 PRESS_DIST_MAX     = 0.60   # m — 이보다 멀면 누르기 거부
 ARM_EXT_MIN, ARM_EXT_MAX = 0.00, 0.50  # wrist_extension 안전 범위
@@ -5359,6 +5557,9 @@ class ElevatorTracker(Node):
                     f"{PRESS_READY_DIST*100:.0f}cm 안쪽까지 간 뒤 누르기가 활성화됩니다")
         if ext is None:
             return "팔 위치 미수신 (joint_states 확인)"
+        # press 시작 시점의 ROI(OCR 입력 좌표계 박스)를 프레임 메타에 실으려고 집어 둔다.
+        # 여기가 det 을 손에 들고 있는 유일한 지점이다. 없으면 None 이고 그대로 기록된다.
+        self._press_roi = dict((det or {}).get("box") or {}) or None
         threading.Thread(target=self._press_sequence, args=(d, ext, tgt),
                          daemon=True).start()
         return None
@@ -5372,6 +5573,14 @@ class ElevatorTracker(Node):
 
         with state_lock:
             state["pressing"] = True
+            _scene0 = state.get("scene")
+        # 누름 검증용 프레임 — 이 회차의 폴더를 정하고 A(누르기 직전)를 남긴다.
+        # 요청만 하고 바로 지나간다(인코딩·쓰기는 별도 스레드) — 모션을 늦추지 않는다.
+        _pdir = _press_run_dir(_scene0, tgt)
+        _proi = getattr(self, "_press_roi", None)
+        _press_capture(self, _pdir, "A_before",
+                       {"roi_ocr": _proi, "target_dist_m": d, "start_ext": start_ext,
+                        "note": "누르기 직전 — 조준 끝, 팔 아직 안 나감"})
         try:
             # READY 동결 상태(≤PRESS_READY_DIST, 정조준 완료)에서 클릭된 경우:
             # 조준은 이미 끝났고 남은 건 몇 cm 전진뿐 → 접근 중 보정·근접 재정렬을
@@ -5537,8 +5746,15 @@ class ElevatorTracker(Node):
                 self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
                 return
             time.sleep(0.4)
+            # B: 팔 최대 전진 순간. 판정에는 쓰지 않는다 — 가림 정도 기록용이다.
+            # 판정에 꼭 필요한 건 A 와 C 뿐이라 B 는 끌 수 있게 해 뒀다.
+            if PRESS_SAVE_B:
+                _press_capture(self, _pdir, "B_push",
+                               {"roi_ocr": _proi, "push_cmd_m": push,
+                                "note": "팔 최대 전진 — 가림 정도 기록용, 판정 안 씀"})
 
             # 접촉 감지 (위치 오차): 명령보다 5mm 이상 못 갔으면 막힌 것 = 닿은 것
+            contact = None        # 판정 못 한 경우를 None 으로 남긴다(프레임 메타에 실린다)
             with state_lock:
                 actual = state["arm_ext"]
             if actual is not None:
@@ -5550,6 +5766,15 @@ class ElevatorTracker(Node):
 
             st(f"5/6 복귀 중… →{start_ext:.3f}m")
             self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
+            # C: 주 판정 프레임. 팔이 빠져 패널이 다시 보이는 첫 순간이다.
+            #    A 와 같은 자세여야 비교가 성립하므로 두 메타의 lift/arm_ext 를 대조할 것.
+            # D: C+2초 — 점등이 늦는 패널 대비. 둘 다 스레드에서 쓰므로 여기서 안 기다린다.
+            _press_capture(self, _pdir, "C_after",
+                           {"roi_ocr": _proi, "contact": contact,
+                            "note": "복귀 완료 직후 — 주 판정"})
+            _press_capture(self, _pdir, "D_after2s",
+                           {"roi_ocr": _proi, "note": "C+2초 — 점등 지연 대비"},
+                           delay=2.0)
 
             st("6/6 그리퍼 여는 중… (인식 모드 복귀)")
             self._move_joint_wait(GRIPPER_JOINT, GRIPPER_OPEN_M, 2, 8.0)
