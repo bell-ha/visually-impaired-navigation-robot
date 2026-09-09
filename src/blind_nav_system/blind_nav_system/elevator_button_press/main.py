@@ -367,7 +367,7 @@ def _lift_row_clamp(node, want, where):
             pl = state["place"]
         if pl != "cab":
             return want
-        l_row, ri = _lift_prior_for("cab")
+        l_row, ri, _ = _lift_prior_for("cab")
         if ri is None:            # 목표 미정 = 묶을 기준이 없다
             return want
         lo, hi = l_row - LIFT_ROW_SERVO_MAX_M, l_row + LIFT_ROW_SERVO_MAX_M
@@ -384,7 +384,12 @@ def _lift_row_clamp(node, want, where):
 
 
 def _lift_prior_for(place):
-    """그 시점에 써야 할 lift 규정 높이 → (높이, 행인덱스 또는 None).
+    """그 시점에 써야 할 lift 규정 높이 → (높이, 행인덱스 또는 None, 사유 또는 None).
+
+    세 번째 값은 로그용 한 조각이다. **왜 그 높이로 갔는지**를 남기기 위한 것 —
+    2026-09-09 에 "중간층에서 찍은 스냅샷 4장의 meta.floor 가 전부 5" 인 사례가
+    나왔다. 층 추적값이 낡을 수 있으므로, 어떤 층 값으로 어떤 높이를 골랐는지가
+    로그에 남아야 나중에 "왜 그 높이였지"를 추적할 수 있다.
 
     목표 버튼이 이미 정해져 있으면 **그 버튼의 행 높이**를 쓴다. 목표가 없으면
     (아직 어느 버튼인지 모를 때) 기존 탐색 높이다.
@@ -405,12 +410,17 @@ def _lift_prior_for(place):
         with state_lock:
             _fl, _tk = state.get("floor"), state.get("target_text")
         _h = _lift_hall_for(_fl, _tk)
-        return (_h, None) if _h is not None else (LIFT_PRIOR_CALL, None)
+        if _h is not None:
+            return _h, None, f"승강장 {_fl}층 '{_tk}'"
+        return (LIFT_PRIOR_CALL, None,
+                f"승강장 기본값 (층={_fl or '미설정'} 목표={_tk or '미정'} — 표에 없음)")
     with state_lock:
         tok = state.get("target_text")
     ri = _row_of_label(tok) if tok else None
     h = _lift_for_row(ri, len(_layout_rows))
-    return (h, ri) if h is not None else (LIFT_PRIOR_PANEL, None)
+    if h is not None:
+        return h, ri, f"차내 '{tok}' = {ri}행"
+    return LIFT_PRIOR_PANEL, None, "차내 탐색 높이 (목표 미정)"
 
 
 def _lift_row_prior(node, place, tok):
@@ -1816,7 +1826,7 @@ def select():
                 pass
         threading.Thread(target=_stop_armleft, daemon=True).start()
         if USE_HEIGHT_PRIOR:
-            prior, _ = _lift_prior_for(_pl0)
+            prior, _, _ = _lift_prior_for(_pl0)
             with state_lock:
                 cur_lift = state["lift"]
             if cur_lift is not None and abs(cur_lift - prior) > 0.12:
@@ -1896,13 +1906,13 @@ def _set_place(pl, send_lift=True):
         node._dlog(f"[MODE] 장소: {'🛗 차내 (층 숫자)' if pl == 'cab' else '🏢 홀 (호출 ▲▼)'}")
         # 모드 전환 = 새 패널 앞에 섰다는 뜻 → lift를 실측 규정 높이로 선이동
         # (탐색 스캔이 0.5m 아래에서 헤매는 시간 절약; 타겟은 방금 해제돼 서보와 충돌 없음)
-        prior, _pri_row = _lift_prior_for(pl)
+        prior, _pri_row, _pri_why = _lift_prior_for(pl)
         with state_lock:
             cur_lift = state["lift"]
         if send_lift and (cur_lift is None or abs(cur_lift - prior) > 0.03):
             node._dlog(f"[MODE] 규정 높이 선이동: lift "
                        f"{('%.2f' % cur_lift) if cur_lift is not None else '?'}→{prior:.3f}"
-                       + (f" ({_pri_row}행 높이)" if _pri_row is not None else ""))
+                       + (f" — {_pri_why}" if _pri_why else ""))
             sent = node._send_goal(["joint_lift"], [prior])
             if not sent:
                 node._dlog("[MODE] ⛔ 규정 높이 선이동 실패 — lift 명령이 안 나갔다")
@@ -2304,10 +2314,11 @@ def scene_set():
             # 이 goal 에 lift 가 함께 실려 나간다. 목표 버튼이 이미 정해져 있으면
             # 그 행 높이를 실어야 한다 — 일반 탐색 높이를 실으면 방금 나간 행별 PRIOR 를
             # 덮어써 버린다(2026-09-09 1층 1차 실패. _lift_prior_for 주석에 타임라인).
-            prior, _pri_row = _lift_prior_for("hall" if n == 0 else "cab")
-            if _pri_row is not None:
-                node._dlog(f"[SCENE] 인식 자세 lift = {_pri_row}행 높이 {prior:.3f} "
-                           "(목표가 이미 정해져 있어 탐색 높이를 쓰지 않는다)")
+            prior, _pri_row, _pri_why = _lift_prior_for("hall" if n == 0 else "cab")
+            # 어떤 근거로 그 높이를 골랐는지 항상 남긴다 — 층 추적값이 낡을 수 있어서
+            # "왜 그 높이로 갔지"를 나중에 추적할 수 있어야 한다.
+            node._dlog(f"[SCENE] 인식 자세 lift = {prior:.3f}"
+                       + (f" — {_pri_why}" if _pri_why else ""))
             node._dlog("[SCENE] 인식 자세 — 그리퍼 닫고→손목 전방→그리퍼 열기 (충돌·과부하 방지)")
             # #1 과부하 방지: 손목 회전은 반드시 그리퍼 닫힌 채로. 몸통 근처에서 그리퍼가
             # 열린 채 회전하면 손가락이 몸통에 닿아 과부하 → 닫기→회전→열기로 순서 분리.
