@@ -494,7 +494,8 @@ def _floor_ask_dashboard(why=""):
     주 경로는 push 다 — 대시보드가 POST /switch_map 에 성공하면 POST /floor 로
     밀어 넣는다. 그게 사용자 모델("내가 4층이라 설정하면 엘리베이터도 바뀐다")과
     맞고, 폴링과 달리 **사람이 실제로 고른 순간에만** 값이 흐른다.
-    이 함수는 그 push 를 놓친 구간, 즉 **엘베앱이 나중에 켜졌을 때 1회**만 쓴다.
+    이 함수는 그 push 를 놓친 구간(엘베앱이 나중에 켜졌을 때)에 쓴다. 호출은
+    _floor_poll_boot 가 **여러 번** 한다 — 1회는 부족했다(아래).
 
     🔴 그래서 confirmed 를 대시보드가 주는 대로 받는다. 대시보드의 _current_floor 는
        부팅 초기값이 "5" 하드코딩이므로(main.py:298), 확정 여부를 같이 받지 않으면
@@ -503,7 +504,10 @@ def _floor_ask_dashboard(why=""):
 
     실패를 조용히 넘기지 않는다. '못 받았다'와 '물어보지도 않았다'가 로그에서
     구분돼야 한다 — 2026-09-10 에 "층=미수신" 한 줄만 있어서 진단이 늦었다.
-    블로킹하지 않는다: timeout 1.0s, 예외는 먹고 None.
+    블로킹하지 않는다: timeout 2.0s, 예외는 먹고 None. 호출부가 배경 스레드
+    (_floor_poll_boot)뿐이라 씬·주행 흐름을 막지 않는다 — 그래서 1.0s 에서 올렸다.
+    2026-09-10 실기에 1.0s 가 `TimeoutError` 로 끝났다(대시보드·nav2·카메라가 동시에
+    뜨는 구간이었다).
     """
     node = _node_ref[0]
 
@@ -513,7 +517,7 @@ def _floor_ask_dashboard(why=""):
 
     try:
         import urllib.request
-        r = urllib.request.urlopen(f"{DASH_URL}/switch_map", timeout=1.0)
+        r = urllib.request.urlopen(f"{DASH_URL}/switch_map", timeout=2.0)
         d = json.loads(r.read().decode() or "{}") or {}
         fl, cf = d.get("floor"), bool(d.get("confirmed", False))
     except Exception as e:
@@ -529,6 +533,36 @@ def _floor_ask_dashboard(why=""):
          + ("(확정)" if cf else "(잠정 — 대시보드도 아직 사람이 고른 값이 아니다. "
                                "높이표·버튼 제한은 쓰지 않는다)"))
     return str(fl)
+
+
+def _floor_poll_boot():
+    """기동 직후 층 보조 폴링 — **확정을 받을 때까지 여러 번** 물어본다.
+
+    2026-09-10 실기: 기동 2초 뒤 딱 1회 물었고 그게 `TimeoutError` 로 끝나 그 뒤
+    층을 영원히 몰랐다(`[PRIOR] 승강장 's' 높이를 모름 (층=미수신)`).
+    1회는 부족하다 — 대시보드가 우리보다 늦게 뜰 수도 있고, 응답이 부팅 혼잡에
+    밀릴 수도 있고, 사람이 아직 '이 층 확인'을 안 눌렀을 수도 있다.
+
+    멈추는 조건은 **확정을 받았을 때**다. push(POST /floor)가 먼저 도착해도 멈춘다
+    (같은 플래그를 본다). 잠정만 받으면 계속 물어본다 — 잠정은 쓰지 않는 값이라
+    받아도 할 일이 남아 있다.
+    마지막에 못 받았으면 그 사실을 남긴다. 조용히 포기하지 않는다.
+    """
+    _waits = (2.0, 3.0, 5.0, 10.0, 20.0, 40.0)   # 누적 2·5·10·20·40·80초
+    for i, w in enumerate(_waits, 1):
+        time.sleep(w)
+        with state_lock:
+            if state.get("floor_confirmed"):
+                return
+        _floor_ask_dashboard(f"엘베앱 기동 {i}/{len(_waits)}")
+        with state_lock:
+            if state.get("floor_confirmed"):
+                return
+    node = _node_ref[0]
+    if node:
+        node._dlog(f"[PRIOR] 층 확정을 못 받았다 (보조 폴링 {len(_waits)}회, 80초) — "
+                   "대시보드에서 '이 층 확인'을 누르면 그때 push 로 들어온다. "
+                   "그때까지 승강장 높이표·버튼 제한은 쓰지 않는다")
 
 
 def _lift_row_prior(node, place, tok):
@@ -2539,6 +2573,24 @@ def scene_set():
                 node._dlog("[SCENE] ⚠ 그리퍼 닫기 실패 — 이후 손목 회전 과부하 위험")
             if not node._move_joint_wait("joint_wrist_yaw", WRIST_YAW_DEFAULT, 2, 8.0):  # 2) 손목 전방(닫힌 채)
                 node._dlog("[SCENE] ⚠ 손목 전방 회전 실패 — 인식 자세 미완성")
+            # 🔴 높이를 **보내는 순간에 다시 계산한다.** 위 두 단계가 블로킹이라 최대
+            #    12초(4+8)가 흐르고, 그 사이에 사용자가 타겟을 고를 수 있다.
+            #    2026-09-10 실기 1층 실패:
+            #        14:54:10.892 [SCENE] 인식 자세 — 그리퍼 닫고→손목 전방→...  (시작)
+            #        14:54:13.508 [TARGET] '1' 선택
+            #        14:54:13.515 [PRIOR] '1' = 2행 → lift 0.930→0.873
+            #        14:54:13.524 -> joint_lift=0.873                    ← 행 높이
+            #        14:54:13.804 -> ..., joint_lift=0.940               ← 이 goal 이 덮었다
+            #    같은 로그의 두 번째 시도('4')는 자세 시퀀스가 없어 0.873 이 살았다(대조군).
+            #    기존 규칙("lift 를 쏘는 모든 곳이 같은 함수로 높이를 구한다")은 맞았지만
+            #    **답을 미리 캐싱하면** 그 규칙이 깨진다. 원인은 순서가 아니라 캐싱이었다.
+            #    타겟이 아직 없으면 같은 값(탐색 높이)이 다시 나오므로 거동이 안 바뀐다.
+            _p2, _pr2, _pw2 = _lift_prior_for("hall" if n == 0 else "cab")
+            if abs(_p2 - prior) > 1e-9:
+                node._dlog(f"[SCENE] 🔁 인식 자세 lift 재계산 {prior:.3f}→{_p2:.3f} "
+                           f"— 자세 전환 중에 목표가 정해졌다 ({_pw2}). 시작 시점 값을 "
+                           "그대로 실으면 방금 나간 행 높이를 덮어쓴다")
+                prior = _p2
             if not node._send_goal(                                                # 3) 그리퍼 열기 + lift
                     ["joint_wrist_pitch", "joint_wrist_roll", GRIPPER_JOINT, "joint_lift"],
                     [WRIST_PITCH_DEFAULT, 0.0, GRIPPER_OPEN_M, prior]):
@@ -6042,6 +6094,8 @@ class ElevatorTracker(Node):
                 self._dlog(f"[MOVE] ⛔ 거부됨 — 관절이 움직이지 않음: {joint}")
                 done.set()
 
+        if joint == "joint_lift":
+            self._lift_cmd_note(pos, 1)
         self.action_client.send_goal_async(goal).add_done_callback(on_resp)
         done.wait(timeout)
         return ok["v"]
@@ -6379,6 +6433,31 @@ class ElevatorTracker(Node):
     def set_wrist_yaw(self, yaw: float) -> bool:
         return self._send_single_joint("joint_wrist_yaw", yaw)
 
+    def _lift_cmd_note(self, val, n_joints):
+        """lift 명령을 기록하고, 직전 명령을 **덮어쓰는** 모양이면 한 줄 남긴다.
+
+        액션서버가 단일-goal 이라 나중에 도착한 goal 이 앞선 goal 을 선점·취소한다.
+        그 덮어쓰기가 조용히 일어나면 원인을 못 찾는다 — 2026-09-09(행 높이 0.873 을
+        인식 자세의 0.940 이 덮음)·2026-09-10(같은 사고 재발, 이번엔 자세 시퀀스가
+        값을 캐싱해서) 두 번 겪었고, 두 번 다 로그에 남은 것은 `-> joint_lift=` 두 줄이
+        나란히 찍힌 것뿐이었다. **덮어썼다는 사실 자체**가 찍혀야 한다.
+
+        어디서 쐈는지는 호출자 함수명으로 남긴다 — "행 높이"와 "인식 자세"를 가르는
+        것이 진단의 핵심이고, 호출부마다 인자를 추가하는 것보다 이쪽이 싸다.
+        """
+        try:
+            where = _sys._getframe(2).f_code.co_name
+        except Exception:
+            where = "?"
+        where += f"({n_joints}관절)" if n_joints > 1 else ""
+        prev, pts, pwhere = getattr(self, "_lift_cmd", (None, 0.0, ""))
+        dt = time.time() - pts
+        if prev is not None and abs(float(val) - prev) > 0.003 and dt < 2.0:
+            self._dlog(f"[LIFT] ⚠ 덮어쓰기 — {dt * 1000:.0f}ms 전 {prev:.3f}"
+                       f"({pwhere}) → 지금 {float(val):.3f}({where}). "
+                       "단일-goal 서버라 **나중 것이 이긴다**")
+        self._lift_cmd = (float(val), time.time(), where)
+
     def _send_goal(self, joint_names, positions) -> bool:
         """관절 목표 전송. 전송 성공 True / 액션서버 없어 유실되면 False.
         ★_last_motion_ts는 '실제로 보낸' 경우에만 갱신 — 실패해도 갱신하면
@@ -6399,6 +6478,9 @@ class ElevatorTracker(Node):
         self.action_client.send_goal_async(goal).add_done_callback(self._on_goal_response)
         self._dlog("-> " + ", ".join(
             f"{n}={p:.3f}" for n, p in zip(joint_names, positions)))
+        for _jn, _jp in zip(joint_names, positions):
+            if _jn == "joint_lift":
+                self._lift_cmd_note(_jp, len(joint_names))
         return True
 
     def _on_goal_response(self, fut):
@@ -6472,7 +6554,7 @@ def main():
 
     # 층 보조 폴링 1회 — push(POST /floor)를 놓친 구간(엘베앱이 나중에 켜진 경우)만
     # 메운다. 스레드로 돌려 기동을 막지 않는다(대시보드가 아직 안 떴을 수도 있다).
-    threading.Timer(2.0, lambda: _floor_ask_dashboard("엘베앱 기동")).start()
+    threading.Thread(target=_floor_poll_boot, daemon=True).start()
 
     # 진단 계측 부착 (기존 노드에 진단용 구독/타이머만 덧붙임 — 로직 변경 없음)
     if _diag is not None and _diaglog is not None:
