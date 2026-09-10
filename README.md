@@ -46,9 +46,13 @@
 | **성과** | **1층 → 5층 end-to-end 완주**(1회) · ITRC 인재양성대전(코엑스) 시연 |
 | **원칙** | 사용자는 실패를 볼 수 없다 → **LLM은 의도 해석만, 최종 확정은 물리 버튼** |
 
+| | |
+|---|---|
+| <img src="docs/images/coex-demo.gif" width="380"/> | <img src="docs/images/coex-explain.jpg" width="380"/> |
+| 부스에서 관람객에게 시연하는 모습 | 로봇 화면을 짚어 가며 설명한다 |
+
 <div align="center">
-<img src="docs/images/coex-demo.gif" width="480"/>
-<br><sub>ITRC 인재양성대전(코엑스) 부스에서 관람객에게 시연하는 모습. 로봇 화면에 지도와 주행 로그가 함께 뜬다</sub>
+<sub>ITRC 인재양성대전(코엑스). 로봇 화면에 지도와 주행 로그가 함께 뜬다</sub>
 </div>
 
 ---
