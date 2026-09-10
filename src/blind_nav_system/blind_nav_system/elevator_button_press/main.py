@@ -880,6 +880,8 @@ def _rotate_steps(img, steps: int):
 # ── 공유 상태 ─────────────────────────────────────────────────────────
 state = {
     "phase":        "SELECT",
+    "ocr_gated":    False,  # 추론을 지금 건너뛰고 있나 + 그 사유. 화면(배지)과 로그가
+    "ocr_gate_why": "",     # 같은 사실을 보게 하려고 state 에 둔다 — 조용한 비활성 금지.
     "target_text":  None,
     "detections":   [],
     "centered":     False,
@@ -1222,6 +1224,9 @@ HTML = """
     <!-- 층 배지: 무엇을 근거로 버튼을 막는지 사람이 볼 수 있어야 한다(조용한 비활성 금지) -->
     <span id="floor-badge"
           style="background:#4a3a1a;color:#fd8;border-radius:6px;padding:6px 10px;font-weight:700;white-space:nowrap;font-size:0.85rem;">층 미확인</span>
+    <!-- OCR 게이트 배지: 추론이 멈춰 있으면 **왜** 멈췄는지 화면에도 쓴다.
+         로그만 남기면 화면 앞 사람은 "고장났나"로 읽는다(조용한 비활성 금지) -->
+    <span id="ocr-badge" style="display:none;background:#3a2a1a;color:#fc9;border-radius:6px;padding:6px 10px;font-weight:700;white-space:nowrap;font-size:0.8rem;"></span>
     <!-- 선택이 거부됐을 때 그 사유. 서버(/select)가 돌려준 말을 그대로 띄운다 -->
     <span id="sel-note"
           style="color:#fb7;font-size:0.8rem;white-space:nowrap;"></span>
@@ -1691,6 +1696,18 @@ HTML = """
           plb.style.background = isHall ? '#246' : '#453';
           plb.style.color = isHall ? '#ade' : '#fd8';
         }
+        // OCR 게이트 배지 — 멈춘 이유를 그대로 보여준다. 버튼을 고르면 즉시 재개된다.
+        const ob = document.getElementById('ocr-badge');
+        if (ob) {
+          if (s.ocr_gated) {
+            ob.style.display = '';
+            ob.textContent = '⏸ 인식 멈춤';
+            ob.title = (s.ocr_gate_why || '') +
+              ' — 영상은 그대로 나갑니다. 버튼을 고르면 바로 재개됩니다(모델은 상주해 로딩 없음)';
+          } else {
+            ob.style.display = 'none';
+          }
+        }
         // 층 배지 — 확정/잠정/미확인을 구분해서 보여준다. 잠정이면 제한도 안 걸린다.
         BLOCKED = s.blocked || {};
         const fb = document.getElementById('floor-badge');
@@ -1906,6 +1923,8 @@ def status():
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
                    # 층과 그 층에서 못 누르는 버튼. **판정은 서버에만 있다** —
                    # UI 는 이 dict 를 보고 흐리게 + 클릭/키 무시만 한다(규칙 복제 금지).
+                   ocr_gated=bool(s.get("ocr_gated")),
+                   ocr_gate_why=s.get("ocr_gate_why") or "",
                    floor=s.get("floor"),
                    floor_confirmed=bool(s.get("floor_confirmed")),
                    blocked=_floor_block_map(s.get("floor"),
@@ -4772,6 +4791,33 @@ class ElevatorTracker(Node):
         with state_lock:
             state["jpeg_frame"] = jpeg.tobytes()
 
+        # ── OCR 게이팅: 추론이 필요한 구간에서만 프레임을 보낸다 ────────────────
+        _need, _gwhy = self._ocr_needed()
+        if not _need:
+            if getattr(self, "_ocr_gate_on", True):
+                self._ocr_gate_on = False
+                self._ocr_gate_ts = time.time()
+                # 직전 박스를 '인식됨'으로 칠한 채 멈춰 두면 화면이 거짓말을 한다.
+                # 영상은 계속 나가고 dets 만 비운다.
+                with state_lock:
+                    state["detections"]   = []
+                    state["ocr_gated"]    = True
+                    state["ocr_gate_why"] = _gwhy
+                self._dlog(f"[OCR] ⏸ 추론 중지 — {_gwhy}. 영상은 그대로 나간다")
+            elif time.time() - getattr(self, "_ocr_gate_ts", 0) > 30.0:
+                # 30초마다 한 번은 "아직 멈춰 있다"를 남긴다 — 로그가 통째로 비면
+                # 나중에 "죽은 건가 멈춘 건가"를 못 가른다.
+                self._ocr_gate_ts = time.time()
+                with state_lock:
+                    state["ocr_gate_why"] = _gwhy
+                self._dlog(f"[OCR] ⏸ 추론 중지 유지 — {_gwhy}")
+            return
+        if not getattr(self, "_ocr_gate_on", True):
+            self._ocr_gate_on = True
+            with state_lock:
+                state["ocr_gated"]    = False
+                state["ocr_gate_why"] = ""
+            self._dlog(f"[OCR] ▶ 추론 재개 — {_gwhy}")
         # OCR 추론은 백그라운드 스레드에서 (이전 추론 중이면 건너뜀)
         # 사진모드면 추론 서버 자체가 없다 — 부르면 _infer_proc이 None이라 터진다.
         if not _no_ocr and not self._processing:
@@ -4779,6 +4825,48 @@ class ElevatorTracker(Node):
             threading.Thread(
                 target=self._run_inference, args=(frame.copy(),), daemon=True
             ).start()
+
+    def _ocr_needed(self):
+        """추론(프레임 송신)을 해야 하는가 → (필요, 사유).
+
+        게이트는 **프레임을 안 보내는 것**뿐이다. 모델은 _infer_proc(별도 프로세스)에
+        상주하므로 껐다 켜는 재로딩이 없다 — 재개 첫 장이 조금 느릴 수 있어도 실측
+        변동폭(2026-09-10 창 평균 429~943ms) 안에 묻힌다.
+
+        켜는 조건 셋. 하나라도 참이면 돌린다:
+          (a) press 씬 — scene 0(① 호출) / 4(⑤ 층선택). **타겟을 고르기 전에도**
+              필요하다(팔레트 '인식됨' 표시와 패널 군집 추적이 그걸로 돈다).
+          (b) phase == "TRACK" — 타겟 추적·정렬 중.
+          (c) pressing — 누르기 시퀀스.
+
+        🔴 (b)(c) 가 정렬 구간을 실제로 덮는가 — 2026-09-10 전수 확인:
+          · `state["phase"]` 를 "SELECT" 로 되돌리는 곳은 **다섯 곳뿐**이다 —
+            `_set_place`(장소 전환) · 이동 씬 ②③④⑥ 진입 · `/reset` ·
+            `_revoke_authority`(제어권 회수) · press 6/6 종료.
+            ①⑤ 정렬 중에는 그 다섯 중 아무것도 안 걸린다 ⇒ `_nudging`·`_base_move`·
+            `_rotate_seq` 가 도는 동안에도 phase 는 TRACK 으로 유지된다.
+          · press 종료에서 phase 가 먼저 SELECT 로 가고 `pressing` 은 `finally` 에서
+            내려간다. 그 사이를 (c)가 덮으므로 누르기 도중에 게이트가 닫히지 않는다.
+          · press 가 쓰는 `state["detections"]` 소비 지점 세 곳(start_press 검증,
+            ROI, 재검증)은 전부 `pressing=True` 구간이다 ⇒ (c) 안이다.
+
+        ⚠ scene 이 None(앱만 켜 둔 상태)이고 타겟도 없으면 게이트가 닫힌다.
+          화면 영상은 그대로 나가지만 박스가 사라진다. 버튼을 하나 고르면(phase
+          TRACK) 즉시 재개되고, 배지·로그가 왜 멈췄는지 말한다. 이 구간을 켜 둘지는
+          운영 판단이다 — 지금은 명세대로 닫는다.
+        """
+        with state_lock:
+            sc = state.get("scene")
+            ph = state.get("phase")
+            pr = bool(state.get("pressing"))
+        if pr:
+            return True, "누르기 진행 중"
+        if ph == "TRACK":
+            return True, "타겟 추적·정렬 중"
+        if sc in (0, 4):
+            return True, f"press 씬({SCENES[sc]})"
+        _sn = "없음" if sc is None else SCENES[sc]
+        return False, f"press 씬도 추적도 아님 (단계={_sn})"
 
     def _infer_note(self, ms, boxes):
         """추론 1회 소요를 /status에 싣고, 약 10초마다 창 집계를 한 줄 남긴다.
