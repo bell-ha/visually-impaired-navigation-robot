@@ -48,7 +48,7 @@
 
 <div align="center">
 <img src="docs/images/coex-demo.gif" width="480"/>
-<br><sub>ITRC 인재양성대전(코엑스) 부스에서 관람객에게 시연하는 모습. 로봇 화면에 지도와 주행 로그가 함께 뜬다. 본인 외 인물은 모두 모자이크 처리했다</sub>
+<br><sub>ITRC 인재양성대전(코엑스) 부스에서 관람객에게 시연하는 모습. 로봇 화면에 지도와 주행 로그가 함께 뜬다</sub>
 </div>
 
 ---
