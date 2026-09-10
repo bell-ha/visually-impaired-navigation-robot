@@ -369,28 +369,70 @@ def _row_of_label(tok):
 
 
 def _lift_row_clamp(node, want, where):
-    """서보가 명령하려는 lift 를 '행 기준값 ±LIFT_ROW_SERVO_MAX_M' 안으로 묶는다.
+    """lift 명령을 **확정 기준값 ±LIFT_ROW_SERVO_MAX_M** 안으로 묶는다.
 
-    행 기준값(L_row)은 목표 버튼이 정해져 있을 때만 존재한다 — 없으면 그대로 통과시킨다
-    (탐색 중에는 묶을 기준이 없다). 홀 패널도 행 모델이 없으므로 통과다.
-    클램프가 걸리면 얼마나 벗어나려 했는지 로그로 남긴다.
+    기준값은 측정으로 확정된 것만 쓴다(`_lift_prior_exact`):
+      · 차내 — 목표 버튼의 행 높이(행 모델)
+      · 승강장 — 그 층·그 방향의 표 값(LIFT_HALL_BY_FLOOR), **층이 확정일 때만**
+    기준이 없으면(층 미확정 · 표에 없는 토큰 · 목표 미정 · 행 모델 밖) 그대로
+    통과시킨다. 🔴 기준이 없는데 묶으면 버튼을 못 찾고 서 있게 된다.
+    클램프가 걸리면 얼마나 벗어나려 했는지 로그로 남긴다(조용히 묶지 않는다).
+
+    **2026-09-10: 승강장이 `place != "cab"` 한 줄로 통째로 빠져나가고 있었다.**
+    그때는 홀 기준값이 없었고(이 독스트링도 "홀 패널도 행 모델이 없으므로 통과다"
+    였다), 이제 층별 표가 실제로 쓰이므로 기준이 생겼다
+    (15:08:01 `[PRIOR] 승강장 5층 's' → lift 0.873→0.933 (+6.0cm · 3D 실측 기준)`).
+    그날 0.933 에서 잠금까지 성공했는데 높이가 0.994 까지(+6.1cm) 끌려갔다 —
+    이 클램프가 살아 있었으면 0.918~0.948 안에 갇혔다.
+    사용자 요청: "OCR이 높이를 왔다갔다 하는 것을 그렇게 강하게 할 수 없게 해줘".
+
+    **폭은 차내와 같은 상수를 쓴다.** 표 값의 실측 정확도는 mm 급이다(9/9 press
+    0.877 vs 표 0.8759 = 1.2mm · 3D 계산 vs 모델 최대 2.7mm · 중간층 σ 0.8mm).
+    1.5cm 는 그보다 5배 넉넉한데, 그래도 더 좁히지 않는 이유:
+      · 버튼 지름이 2cm 대다 — 중심에서 1cm 벗어나도 같은 버튼 안이다. 표 정확도가
+        아니라 **버튼 크기**가 실제 여유의 하한이다.
+      · 로봇 주차 자세(피치·바닥 기울기)가 카메라 높이를 바꾸고, 그 오차는 표가 아니라
+        **현장**에서 온다. 표 정확도만으로 폭을 정하면 그 몫이 없다.
+      · 새 상수를 만드는 것보다 이미 검증된 값을 공유하는 편이 낫다. 좁히는 것은
+        "클램프가 실제로 몇 mm 에서 걸렸나"를 실기로 모은 뒤에 할 일이다.
+
+    ⚠ **한계: 기준값 근처의 틀린 값은 못 막는다.** 인식 자세 기본값 0.940 은
+    0.933±1.5cm 안이라 그대로 통과한다 — 2026-09-10 15:08 의 "씬 재개가 타겟·잠금을
+    날려 0.933 에서 0.940 으로 되돌아간" 건이 그 경우다. 그건 클램프로 막을 일이
+    아니라 **재개 경로가 타겟·잠금을 보존하는 것**으로 고쳐야 한다. 이 클램프는
+    증상의 폭을 묶을 뿐 그 원인을 대신하지 못한다.
     """
     try:
         with state_lock:
             pl = state["place"]
-        if pl != "cab":
+        if pl not in ("hall", "cab"):
             return want
-        l_row, ri, _ = _lift_prior_for("cab")
-        if ri is None:            # 목표 미정 = 묶을 기준이 없다
+        base = _lift_prior_exact(pl)   # 확정 기준값만. 없으면 None = 묶을 근거 없음
+        if base is None:
             return want
-        lo, hi = l_row - LIFT_ROW_SERVO_MAX_M, l_row + LIFT_ROW_SERVO_MAX_M
+        # 차내 판정은 1비트도 바뀌지 않는다: 예전 코드의 `ri is None → 통과` 는
+        # `_lift_for_row(...) is None → 통과` 와 같은 조건이고(ri 가 있어도 행 모델
+        # 밖이면 _lift_prior_for 가 ri=None 을 돌려줬다), 기준값도 같은 함수다.
+        # 로그에 행 번호를 싣기 위해서만 따로 구한다.
+        lo, hi = base - LIFT_ROW_SERVO_MAX_M, base + LIFT_ROW_SERVO_MAX_M
         if lo <= want <= hi:
             return want
         out = max(lo, min(hi, want))
-        node._dlog(f"[LIFT] ⛔ {where} 보정을 {ri}행 기준 {l_row:.3f}m ±"
+        if pl == "cab":
+            with state_lock:
+                _tok = state.get("target_text")
+            _ri = _row_of_label(_tok) if _tok else None
+            _basis = f"{_ri}행 기준 {base:.3f}m"
+            _tail = " 행 간격 절반(28mm)을 넘으면 이웃 행을 누른다"
+        else:
+            with state_lock:
+                _fl, _tok = state.get("floor"), state.get("target_text")
+            _basis = f"승강장 {_fl}층 '{_tok}' 표값 {base:.3f}m"
+            _tail = " 표값은 3D 실측이다 — 그보다 멀리 갈 근거가 없다"
+        node._dlog(f"[LIFT] ⛔ {where} 보정을 {_basis} ±"
                    f"{LIFT_ROW_SERVO_MAX_M*1000:.0f}mm 로 클램프 — "
-                   f"명령 {want:.3f}({(want-l_row)*1000:+.0f}mm) → {out:.3f}"
-                   f"({(out-l_row)*1000:+.0f}mm). 행 간격 절반(28mm)을 넘으면 이웃 행을 누른다")
+                   f"명령 {want:.3f}({(want-base)*1000:+.0f}mm) → {out:.3f}"
+                   f"({(out-base)*1000:+.0f}mm)." + _tail)
         return out
     except Exception:
         return want
@@ -5615,7 +5657,12 @@ class ElevatorTracker(Node):
         self._scan_move_ts = time.time()
         self._dlog(f"[SCAN] 탐색 {self._scan_seq}: {kind} {val:+.2f}")
         if kind == "lift":
-            self._send_goal(["joint_lift"], [max(0.15, min(1.10, val))])
+            # 탐색 스윕도 같은 클램프를 지난다 — "모든 lift 명령은 확정 기준값
+            # ±LIFT_ROW_SERVO_MAX_M 안"이 전역 불변식이어야 한다. 여기만 생값으로
+            # 나가면 서보가 갈 수 없는 높이로 탐색이 팔을 옮겨 놓는다(2026-09-10).
+            self._send_goal(["joint_lift"],
+                            [_lift_row_clamp(self, max(0.15, min(1.10, val)),
+                                             "탐색 스윕")])
         elif kind == "arm":
             if eh is None:
                 return
