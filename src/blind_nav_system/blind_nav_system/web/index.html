@@ -1090,7 +1090,16 @@ function sysNote(msg, ms) {
   sysNoteHold = Date.now() + (ms || 0);
 }
 
-function toggleSysProc(name) {
+function toggleSysProc(name, external) {
+  // 인라인 onclick 은 인자를 안 넘긴다 — 마지막 폴링이 본 상태를 기본값으로 쓴다.
+  // (호출부를 다섯 곳 고치는 대신 여기 한 곳에서 메운다)
+  if (external === undefined) external = !!sysExternal[name];
+  // 인수 종료는 확인을 받는다 — 내가 띄우지 않은 것을 끄는 것이고, 끄면 모터·라이다가
+  // 멈춘다. (내가 띄운 것의 종료는 지금처럼 확인 없이 — 거동을 바꾸지 않는다)
+  if (external && !confirm(
+      (SYS_LABELS[name] || name) + ' 을(를) 종료합니다.\n\n'
+      + '이 대시보드가 띄운 것이 아닙니다 — 다른 대시보드가 띄우고 닫혀서 남은 것입니다.\n'
+      + '종료하면 모터·라이다·카메라가 함께 멈춥니다. 계속할까요?')) return;
   fetch(`/sys_proc/${name}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -1102,23 +1111,28 @@ function toggleSysProc(name) {
   }).catch(() => {});
 }
 
+const sysExternal = {};   // name → 외부(인수 대상)인가. 버튼 클릭 시 확인창 분기에 쓴다
 // st = {state, running, pid}. state = mine / external / unknown / off
 function updateSysProcUI(name, st) {
   st = st || {};
   const state   = st.state || (st.running ? 'mine' : 'off');
   const running = !!st.running;
   sysState[name] = running;
+  sysExternal[name] = (state === 'external');
   const dot = document.getElementById('sysdot-' + name);
   const btn = document.getElementById('sysbtn-' + name);
   if (!dot || !btn) return;
   const oneShot = ['battery','free','home'].includes(name);
   dot.classList.toggle('on', running);
   if (state === 'external') {
-    // 오류가 아니라 소유권 정보다 — 정상 상태이고, 다만 내가 끌 수 없다.
-    btn.textContent = '외부 실행 중';
-    btn.className = 'btn btn-neutral btn-sm';
-    btn.disabled = true;
-    btn.title = 'PID ' + (st.pid || '?') + ' — 이 대시보드가 띄운 게 아닙니다. 끄려면 터미널에서.';
+    // 소유권 정보이면서 **끌 수 있는 상태**다. 예전에는 비활성으로 두고 "터미널에서
+    // 끄세요"라고 했는데, 2026-09-10 에 사용자가 대시보드를 X 로 닫아 **로봇이 도는데
+    // 끌 수단이 없는** 상태에 빠졌다. 끄는 수단이 화면에서 사라지면 안 된다.
+    btn.textContent = '외부 종료';
+    btn.className = 'btn btn-danger btn-sm';
+    btn.disabled = false;
+    btn.title = 'PID ' + (st.pid || '?') + ' — 이 대시보드가 띄운 게 아닙니다(다른 '
+              + '대시보드가 띄우고 닫힌 것). 눌러서 인수 종료할 수 있습니다.';
   } else if (state === 'unknown') {
     btn.textContent = '확인 중';
     btn.className = 'btn btn-neutral btn-sm';
@@ -1145,7 +1159,7 @@ function pollSysProcStatus() {
       const ext = SYS_NAMES.filter(n => (d[n] || {}).state === 'external');
       el.textContent = ext.length
         ? '외부 실행 중: ' + ext.map(n => SYS_LABELS[n] + '(PID ' + d[n].pid + ')').join(' · ')
-          + ' — 이 대시보드가 띄운 게 아니라 여기서 끌 수 없습니다'
+          + ' — 이 대시보드가 띄운 게 아닙니다. \'외부 종료\' 로 인수해서 끌 수 있습니다'
         : '';
     }
   }).catch(() => {});
@@ -1200,7 +1214,9 @@ document.addEventListener('keydown', e => {
     const name = SYS_KEYS[digit];
     const _b = document.getElementById('sysbtn-' + name);
     if (_b && _b.disabled) { sysNote('⚠ ' + (_b.title || '지금은 조작할 수 없습니다'), 6000); return; }
-    if (sysState[name] && !confirm(`${SYS_LABELS[name]}을(를) 종료할까요?`)) return;
+    // 외부(인수 대상)는 toggleSysProc 이 더 자세한 확인을 띄운다 — 여기서 또 묻지 않는다
+    if (sysState[name] && !sysExternal[name]
+        && !confirm(`${SYS_LABELS[name]}을(를) 종료할까요?`)) return;
     toggleSysProc(name);
     e.preventDefault();
     return;

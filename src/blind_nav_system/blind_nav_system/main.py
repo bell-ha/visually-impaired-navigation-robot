@@ -3011,6 +3011,109 @@ def _stop_lidar_motor():
         _log("SYS", f"LiDAR 시리얼 정지 실패: {e}")
 
 
+def _pgid_members(pgid: int) -> list:
+    """그 프로세스 그룹에 아직 살아 있는(좀비 아닌) PID 들. /proc 순회다.
+
+    외부에서 인수한 프로세스는 우리 자식이 아니라 `Popen.wait()` 이 없다. 그래서
+    "다 죽었나"를 이걸로 센다. pgrep 을 쓰지 않는 이유는 _scan_sys_ext 주석과 같다.
+    """
+    out = []
+    try:
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
+            pid = int(d)
+            try:
+                if os.getpgid(pid) == pgid and not _proc_zombie(pid):
+                    out.append(pid)
+            except Exception:
+                continue      # 그새 죽음 — 정상
+    except Exception:
+        return []
+    return out
+
+
+def _wait_pgid_gone(pgid: int, timeout: float):
+    """그룹이 비워질 때까지 대기. 시간이 차면 `subprocess.TimeoutExpired` 를 던진다.
+
+    예외 형태를 `Popen.wait` 과 **일부러 똑같이** 맞췄다 — 그래야 종료 순서를 한 번만
+    적고 대기 방법만 바꿔 끼울 수 있다. 두 번 적으면 한쪽만 고치는 드리프트가 난다
+    (이 파일의 `_LAUNCH_XML` 주석이 경계하는 그 실패 모양이다).
+    """
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if not _pgid_members(pgid):
+            return
+        time.sleep(0.3)
+    raise subprocess.TimeoutExpired(f"pgid {pgid}", timeout)
+
+
+def _pgid_stop_seq(pid: int, label: str, kill_timeout: int, waiter, owned: str) -> bool:
+    """**종료 순서의 단일 구현.** SIGINT → kill_timeout 대기 → SIGKILL. 정상 종료면 True.
+
+    `waiter(timeout)` 가 종료를 기다리고 시간이 차면 TimeoutExpired 를 던진다
+    (내 자식이면 `proc.wait`, 인수한 외부 프로세스면 `_wait_pgid_gone`).
+    `owned` 는 로그 문구용 — "내가 띄운 것"과 "인수한 것"을 사람이 구분해야 한다.
+
+    SIGINT 를 쓰는 이유(SIGTERM 금지)는 _kill_proc_group 독스트링에 있다.
+    """
+    pgid = os.getpgid(pid)
+    # 자기 그룹엔 절대 보내지 않는다 — 대시보드가 자살한다.
+    if pgid in (0, 1) or pgid == os.getpgid(0):
+        _log("SYS", f"{label} 종료 거부 — PGID {pgid} 가 대시보드 자신의 그룹이거나 비정상")
+        return False
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            pname = f.read().strip()
+    except Exception:
+        pname = "?"
+    _log("SYS", f"{label} SIGINT → PID={pid}({pname}) PGID={pgid} "
+                f"[{owned}] (최대 {kill_timeout}s 대기)")
+    os.killpg(pgid, signal.SIGINT)
+    try:
+        t0 = time.monotonic()
+        waiter(kill_timeout)
+        _log("SYS", f"{label} 정상 종료 ({time.monotonic() - t0:.1f}s) [{owned}]")
+        return True
+    except subprocess.TimeoutExpired:
+        _log("SYS", f"{label} {kill_timeout}s 초과 → SIGKILL 강제 종료 [{owned}]")
+        os.killpg(pgid, signal.SIGKILL)
+        try:
+            waiter(3)
+        except Exception:
+            pass
+        return False
+
+
+def _kill_ext_pgid(pid: int, label: str, kill_timeout: int = 6) -> bool:
+    """**다른 대시보드가 띄워 고아가 된** 런치/RViz 를 인수해서 끈다.
+
+    왜 필요한가 — 대시보드는 `Popen(start_new_session=True)` 로 런치를 띄우므로,
+    대시보드 창을 X 로 닫으면 **런치는 모터·라이다·카메라를 돌린 채 살아남는다.**
+    새로 띄운 대시보드는 `_sys_procs` 가 비어 있어 그것을 "내 것"으로 보지 못하고,
+    그러면 **끌 수단이 사라진다.** 2026-09-10 에 사용자가 실제로 그 상태에 빠졌고
+    (`로봇이 도는데 끌 방법이 없다`) 사람이 터미널에서 손으로 killpg 해야 했다.
+    물리 안전 문제라서, 소유권이 없어도 끄는 것은 허용한다.
+
+    🔴 **자동으로는 절대 죽이지 않는다.** 기동·폴링은 표시만 하고, 이 함수는 사람이
+       버튼을 누른 경로에서만 불린다. 대시보드를 켜는 것만으로 로봇이 멈추면 그게 더
+       위험하다.
+    🔴 남의 프로세스는 안 건드린다 — 대상은 `_scan_sys_ext` 가 **우리 런치 파일 경로·
+       우리 rviz 바이너리**를 argv 에서 확인한 것뿐이다(pgrep 금지, argv 판별).
+    종료 순서는 내 자식과 **같은 구현**을 쓴다(`_pgid_stop_seq`).
+    """
+    if not _proc_alive(pid):
+        _log("SYS", f"{label} 인수 종료 — 이미 사라졌다 (PID {pid})")
+        return True
+    try:
+        pgid = os.getpgid(pid)
+        return _pgid_stop_seq(pid, label, kill_timeout,
+                              lambda t: _wait_pgid_gone(pgid, t), "인수(외부)")
+    except (ProcessLookupError, OSError) as e:
+        _log("SYS", f"{label} 인수 종료 실패 — {e!r}")
+        return False
+
+
 def _kill_proc_group(proc: subprocess.Popen, label: str, kill_timeout: int = 6) -> bool:
     """
     프로세스 그룹 전체 종료. 정상 종료 성공 여부 반환.
@@ -3025,27 +3128,10 @@ def _kill_proc_group(proc: subprocess.Popen, label: str, kill_timeout: int = 6) 
     if proc is None or proc.poll() is not None:
         return True
     try:
-        pgid = os.getpgid(proc.pid)
-        # exec 여부 확인: proc.pid 프로세스 이름 로그
-        try:
-            with open(f"/proc/{proc.pid}/comm") as f:
-                pname = f.read().strip()
-        except Exception:
-            pname = "?"
-        _log("SYS", f"{label} SIGINT → PID={proc.pid}({pname}) PGID={pgid} (최대 {kill_timeout}s 대기)")
-        os.killpg(pgid, signal.SIGINT)
-        try:
-            import time as _time
-            t0 = _time.monotonic()
-            proc.wait(timeout=kill_timeout)
-            elapsed = _time.monotonic() - t0
-            _log("SYS", f"{label} 정상 종료 ({elapsed:.1f}s)")
-            return True
-        except subprocess.TimeoutExpired:
-            _log("SYS", f"{label} {kill_timeout}s 초과 → SIGKILL 강제 종료")
-            os.killpg(pgid, signal.SIGKILL)
-            proc.wait(timeout=3)
-            return False
+        # 순서는 _pgid_stop_seq 한 곳에만 있다. 여기서는 **대기 방법**만 준다 —
+        # proc.wait 는 자식을 reap 까지 하므로 내 자식에는 그게 맞다.
+        return _pgid_stop_seq(proc.pid, label, kill_timeout,
+                              lambda t: proc.wait(timeout=t), "내가 띄움")
     except (ProcessLookupError, OSError):
         try:
             proc.kill()
@@ -3070,24 +3156,40 @@ def sys_proc_ctrl(name):
         # 프로세스를 죽이지 않는다는 이 기능의 불변식이 정확히 여기서 깨진다.
         # UI는 external이면 버튼을 비활성으로 두지만 라우트는 열려 있다(오래된
         # 페이지·curl로 도달 가능). 진입만 막는 것이고 종료 로직은 손대지 않는다.
+        _ext_pid = None
         if p is None and name in _SYS_EXT_GATE:
             show, gate = _scan_sys_ext()
-            pid = (gate or {}).get(name)
-            if gate is None or pid:
-                _log("SYS", f"{defn['label']} 종료 거부 — 외부 프로세스"
-                            + (f" (PID {pid})" if pid else " 판정 불가"))
+            _ext_pid = (gate or {}).get(name)
+            if gate is None:
+                # 판정 불가는 여전히 거부다(fail-closed) — 무엇을 끄는지 모르는 채로
+                # killpg 를 쏘지 않는다.
+                _log("SYS", f"{defn['label']} 종료 거부 — 외부 여부 판정 불가")
                 return jsonify(ok=False, error=(
-                    f"실행 중(외부) — PID {pid}, 이 대시보드가 띄운 게 아니라 여기서 "
-                    "끌 수 없습니다. 터미널에서 끄세요." if pid else
                     "실행 여부를 확인하지 못해 종료하지 않습니다 — 터미널에서 확인하세요."
                 )), 409
+            if _ext_pid is None:
+                _log("SYS", f"{defn['label']} 종료 요청 — 실행 중인 것이 없다")
+                return jsonify(ok=True, running=False)
+            # 🔴 여기서 **인수한다.** 예전에는 거부했는데("터미널에서 끄세요"),
+            #    2026-09-10 에 사용자가 대시보드를 X 로 닫아 **로봇이 도는데 끌 수단이
+            #    없는 상태**에 빠졌다. 모터·라이다가 도는 것을 끄는 수단이 화면에서
+            #    사라지는 것이 물리 안전 문제라, 소유권이 없어도 끄게 한다.
+            #    대상은 argv 로 우리 런치 파일·우리 rviz 바이너리를 확인한 것뿐이다.
+            _log("SYS", f"{defn['label']} 인수 종료 시작 — PID {_ext_pid} "
+                        "(이 대시보드가 띄운 것이 아니다. 다른 대시보드가 띄우고 "
+                        "닫혀서 고아로 남은 것을 인수한다)")
         _sys_procs.pop(name, None)
         kill_timeout = defn.get("kill_timeout", 6)
         auto_free    = defn.get("auto_free_lock", False)
 
         def _do_kill():
             import time as _t
-            graceful = _kill_proc_group(p, defn["label"], kill_timeout=kill_timeout)
+            # 내 자식이면 Popen 경로, 인수한 것이면 pgid 경로 — **순서는 같은 구현**이다.
+            # 뒤의 rplidar 정리·모터 정지·filelock 해제는 양쪽에서 그대로 돈다(고아
+            # 런치를 끈 뒤가 오히려 그 정리가 더 필요한 상황이다).
+            graceful = (_kill_proc_group(p, defn["label"], kill_timeout=kill_timeout)
+                        if p is not None else
+                        _kill_ext_pgid(_ext_pid, defn["label"], kill_timeout=kill_timeout))
             _log("SYS", f"{defn['label']} 종료 완료 ({'graceful' if graceful else 'SIGKILL'})")
 
             # rplidar_composition 처리: ros2 launch가 0s 만에 종료해도 rplidar는 고아로 남을 수 있음
