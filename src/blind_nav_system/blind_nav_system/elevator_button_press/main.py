@@ -1042,7 +1042,7 @@ state = {
     "scene_ts":     0.0,    # 현재 단계 시작 시각 — press 완료가 이 이후여야 다음 단계 해제
     "press_ok_ts":  0.0,    # 마지막 press ✅ 완료 시각
     "door_base":    None,   # ③ 문대기 진입 시점 전방 여유 (닫힌 문 기준선)
-    "door_open":    False,  # ③에서 여유 점프(+0.5m, 2연속) 감지 → ④ 탑승 해제
+    "door_open":    False,  # ③에서 여유 점프(+0.5m, 2연속) 감지 → ④ 엘리베이터 안 해제
     "door_streak":  0,      # 문 열림 판정 연속 관측 수 (노이즈 방지)
     "arm_ext":      None,   # 현재 팔 뻗기 위치 (wrist_extension, m)
     "wall_tilt":    None,   # 벽 기울기 각도(°) — +면 오른쪽이 멂 (평행 정렬용)
@@ -1382,7 +1382,7 @@ HTML = """
     <button id="scn-0" onclick="setScene(0)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">① 호출</button>
     <button id="scn-1" onclick="setScene(1)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">② 문앞</button>
     <button id="scn-2" onclick="setScene(2)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">③ 문대기</button>
-    <button id="scn-3" onclick="setScene(3)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">④ 탑승</button>
+    <button id="scn-3" onclick="setScene(3)" title="④ 엘리베이터 안 — 캐빈 안 버튼 패널 앞. location.yaml 의 '엘리베이터 탑승지점'(복도 쪽)과 다른 장소다" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">④ 엘베 안</button>
     <button id="scn-4" onclick="setScene(4)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">⑤ 층</button>
     <button id="scn-5" onclick="setScene(5)" style="background:#2a2a3e;color:#89a;border:none;border-radius:5px;padding:4px 7px;cursor:pointer;font-size:0.75rem;white-space:nowrap;">⑥ 하차</button>
     <button id="next-btn" onclick="nextScene()"
@@ -1812,7 +1812,7 @@ HTML = """
         const sh = document.getElementById('scn-hint');
         if (sh) {
           if (cur == null) sh.textContent = '';
-          else if (cur === 2 && s.door_open) { sh.textContent = '🚪 문 열림! → ④ 탑승'; sh.style.color = '#4e8'; }
+          else if (cur === 2 && s.door_open) { sh.textContent = '🚪 문 열림! → ④ 엘베 안'; sh.style.color = '#4e8'; }
           else if (cur === 2) {
             sh.textContent = `🚪 닫힘 — 앞 ${s.clear_f == null ? '?' : s.clear_f.toFixed(2)}m` +
                              ` (기준 ${s.door_base == null ? '?' : s.door_base.toFixed(2)}m, +0.5 점프=열림)`;
@@ -2000,7 +2000,7 @@ def status():
                       f"(전방 여유 {clear_f:.2f}m ≥ 0.85m)"
                       if base == clear_f else
                       f"[SCENE] 🚪 문 열림 감지 (전방 여유 {base:.2f}→{clear_f:.2f}m)")
-                     + " — ④ 탑승 활성화")
+                     + " — ④ 엘리베이터 안 활성화")
         with state_lock:
             s["door_open"] = state["door_open"]
     # 다음 단계 해제 조건: ①⑤=press 완료 / ③=문 열림 / ②④=사용자 판단(항상 가능)
@@ -2294,8 +2294,15 @@ def place_toggle():
     return jsonify(ok=True, place=pl, lift_ok=lift_ok)
 
 # ── 여정 단계 + 조종 패드 (리허설 티칭용) ──────────────────────
+# 🔴 ④ 의 이름이 "탑승"이었는데, location.yaml 의 `엘리베이터 탑승지점` 과 같은 단어를
+#    쓰면서 **완전히 다른 장소**를 가리켰다:
+#      엘리베이터 탑승지점  = 복도 쪽 호출 지점 (yaw 168.4°)
+#      ④ (이 씬)           = 엘베 **캐빈 안** 버튼 패널 앞 (scene_targets "3", yaw 75.19°)
+#    사용자 3분류(탑승지점 / 문 앞 / 엘리베이터 안)에 맞춰 ④ 를 "엘리베이터 안" 으로
+#    고쳤다. 표시·로그용 배열이고 어디서도 문자열로 비교하지 않는다(전수 확인) —
+#    좌표·키·판정은 한 글자도 안 바꿨다.
 SCENES = ["① 호출 press", "② 문앞 정렬", "③ 문 열림 대기",
-          "④ 탑승", "⑤ 층 press", "⑥ 하차"]
+          "④ 엘리베이터 안", "⑤ 층 press", "⑥ 하차"]
 # 단계별 자동 안무 (2026-07-15 16:35 리허설 티칭값) — 단계 클릭 시 자동 재생.
 # Esc로 중단 → 패드 보정 → 같은 단계 재클릭 시 잔여만 이어서 실행 (scene_acc 기준).
 # ※ press 정렬이 매번 다른 위치에서 끝나므로(이번엔 X정렬 11.5cm) 몇 cm 보정은 정상.
@@ -2308,7 +2315,7 @@ SCENE_MOVES = {
     # 씬1이 통째로 거부됐다(로봇이 안 움직인다). 넓힌 게 아니라 중심을 맞춘 것이다.
     # ※ 나중에 호출지점을 또 옮기면 이 값도 같이 옮겨야 한다.
     1: [("fwd", 80.8), ("rot", -90.0)],   # ② 문앞: 전진 80.8cm → 우회전 90°
-    3: [("fwd", 185.0)],                  # ④ 탑승: 전진 185cm
+    3: [("fwd", 185.0)],                  # ④ 엘리베이터 안: 전진 185cm
     5: [("fwd", -186.0)],                 # ⑥ 하차: 후진 186cm
 }
 # ※ SCENE_MOVES는 지우지 않는다. 좌표 목표를 쓸 때도 (a) 목표가 없을 때의 동작이고
@@ -2651,7 +2658,7 @@ def scene_set():
             if prev in (0, 4) and not (_pok > _sts):
                 node._dlog(f"[SCENE] ⚠ {SCENES[prev]} press 미완료 상태로 진행")
             elif prev == 2 and n == 3 and not _dopen:
-                node._dlog("[SCENE] ⚠ 문 열림 미감지 상태로 탑승 시작")
+                node._dlog("[SCENE] ⚠ 문 열림 미감지 상태로 엘리베이터 안 진입 시작")
     # 단계별 자세 — 반드시 한 goal로 묶어 전송 (단일-goal 서버의 선점·유실 방지)
     _auth = _authority_ok()
     if node and not _auth:
@@ -3704,7 +3711,7 @@ class ElevatorTracker(Node):
         # 계측 전용: 좁은섹터(±10°) 여유. 위 c0(±30°)는 가드용이라 그대로 두고 나란히 잰다.
         # ±30°는 0.95m에서 좌우 55cm씩 퍼져 옆 벽을 잡으므로 이동량 계기로 못 쓴다
         # (그걸로 오판한 적이 있다). ±10°는 거의 1D 거리라 odom·map과 독립인 지상진실이
-        # 되고, 이동 전후 차이가 곧 '실제로 얼마나 갔나'다. 특히 ④탑승은 정면에 캐빈
+        # 되고, 이동 전후 차이가 곧 '실제로 얼마나 갔나'다. 특히 ④엘리베이터 안은 정면에 캐빈
         # 뒷벽이 있어 최적 조건이다.
         # 위치: 주행 루프 '밖'이다 — 루프 안에 넣으면 15Hz 감시 주기에 영향을 준다.
         n0 = self._clearance(direction, half_ang=NARROW_HALF_ANG)
