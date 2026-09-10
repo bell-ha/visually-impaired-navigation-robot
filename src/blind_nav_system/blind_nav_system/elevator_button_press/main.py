@@ -339,6 +339,16 @@ LIFT_ROW_SERVO_MAX_M = 0.015
 LIFT_PANEL_BAND     = (0.80, 1.10)
 # 이 이하 차이면 안 움직인다. 행 간격의 절반(2.8cm)보다 작아야 행 보정이 의미가 있다.
 LIFT_ROW_DEADBAND_M = 0.015
+# 승강장은 같은 상수를 쓸 수 없다. 행 모델이 아니라 **층·방향마다 3D 실측 한 값**이고,
+# 피해야 할 "이웃 행" 이 없으므로 2.8cm 기준이 근거가 되지 못한다.
+# 🔴 2026-09-10 15:08:13 실측 사고:
+#     [PRIOR] 승강장 5층 's' 목표 lift 0.933 — 이미 그 높이 (0.940, 차이 -0.7cm)
+#   0.940 은 "거의 맞는 높이"가 아니라 **인식 자세 기본값**이다. 7mm 차이를 "이미 그
+#   높이"로 읽어서 3D 실측값으로 돌아가지 않았다. 기본값을 목표로 착각한 것이다.
+# 폭은 표 모델의 자기 오차보다 작아야 의미가 있다 — 표 vs 실제 눌린 lift 1.2mm,
+# 3D 계산 vs 모델 최대 2.7mm, 중간층 σ 0.8mm. 3mm 면 그 오차대 안이라 "의미 없는
+# 미세 이동"만 걸러내고, 기본값(7mm 이상 떨어진 값)은 걸러내지 않는다.
+LIFT_HALL_DEADBAND_M = 0.003
 
 
 def _lift_for_row(ri, nrows):
@@ -659,9 +669,9 @@ def _lift_row_prior(node, place, tok):
             node._dlog(f"[PRIOR] lift 현재값 미수신 — 승강장 높이 보정 생략 "
                        f"(목표였던 값 {h:.3f})")
             return
-        if abs(cur - h) <= LIFT_ROW_DEADBAND_M:
+        if abs(cur - h) <= LIFT_HALL_DEADBAND_M:   # 차내(행)보다 훨씬 좁다 — 위 주석
             node._dlog(f"[PRIOR] 승강장 {fl}층 '{tok}' 목표 lift {h:.3f} — "
-                       f"이미 그 높이 ({cur:.3f}, 차이 {(h - cur) * 100:+.1f}cm)")
+                       f"이미 그 높이 ({cur:.3f}, 차이 {(h - cur) * 1000:+.0f}mm)")
             return
         node._dlog(f"[PRIOR] 승강장 {fl}층 '{tok}' → lift {cur:.3f}→{h:.3f} "
                    f"({(h - cur) * 100:+.1f}cm · 3D 실측 기준)")
@@ -1484,10 +1494,10 @@ HTML = """
       _motionErrTimer = setTimeout(() => { el.style.display = 'none'; }, ms || 2500);
     }
     let _selNoteTimer = null;
-    function showSelNote(msg) {
+    function showSelNote(msg, icon) {
       const n = document.getElementById('sel-note');
       if (!n) return;
-      n.textContent = msg ? '⛔ ' + msg : '';
+      n.textContent = msg ? (icon || '⛔') + ' ' + msg : '';
       if (_selNoteTimer) clearTimeout(_selNoteTimer);
       if (msg) _selNoteTimer = setTimeout(() => { n.textContent = ''; }, 5000);
     }
@@ -1501,7 +1511,12 @@ HTML = """
         .then(j => { if (j && j.ok === false) showSelNote(j.error || '선택 거부'); })
         .catch(() => {});
     }
-    function resetTarget() { fetch('/reset', {method:'POST'}); }
+    function resetTarget() {
+      // 화면에도 남긴다 — 같은 버튼을 다시 누른 것이 '해제'였다는 걸 모르면
+      // "왜 갑자기 안 찾아?"가 된다(2026-09-10 15:08: 이미 찾은 잠금을 잃었다).
+      showSelNote('타겟 해제 — 다시 고르세요', '⏹');
+      fetch('/reset', {method:'POST'});
+    }
     function rotateCam(cam) {
       fetch('/rotate', {method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({cam})});
@@ -2857,11 +2872,32 @@ def rotate():
 
 @app.route("/reset", methods=["POST"])
 def reset():
+    """타겟 해제 — UI 의 같은 버튼 재클릭(토글) · Esc · ❌ 버튼이 모두 여기로 온다.
+
+    🔴 **로그가 없었다.** 그래서 2026-09-10 15:08 에 "이미 찾아 둔 타겟과 잠금이
+    어디서 사라졌는지"를 로그로 추적할 수 없었다 — 15:08:03 에 `[LOCK] 's' 잠금
+    생성`까지 갔는데 15:08:10 의 씬 재개에서는 `목표=미정` 이었고, 그 사이를 설명하는
+    줄이 한 줄도 없었다(타겟을 지우는 다른 경로 `_set_place`(장소 전환)·
+    `_revoke_authority`·press 종료는 전부 로그를 남기거나 조건이 아니었다 ⇒ 남는 것은
+    여기뿐이다). 상태를 버리는 곳은 반드시 그 사실을 남긴다.
+    잠금(_target_lock)까지 같이 적는다 — 버린 것이 "고르기 전"인지 "이미 찾은 것"인지
+    가 사후 분석에서 전혀 다른 이야기다.
+    """
+    node = _node_ref[0]
     with state_lock:
+        _prev = state.get("target_text")
+        _cent = bool(state.get("centered"))
+        _rdy  = bool(state.get("press_ready"))
         state["target_text"] = None
         state["phase"]       = "SELECT"
         state["centered"]    = False
         state["press_ready"]  = False
+    if node and _prev is not None:
+        _lk = getattr(node, "_target_lock", None)
+        node._dlog(f"[TARGET] ⏹ '{_prev}' 해제 (UI 재클릭·Esc·❌) — "
+                   + ("잠금도 버린다" if _lk else "잠금 없었음")
+                   + (" · 정조준 상태였다" if _cent else "")
+                   + (" · 누르기 활성이었다" if _rdy else ""))
     return jsonify(ok=True)
 
 LEASE_TTL = 6.0   # 리스 만료 임계값(초) — 대시보드 하트비트 주기(2s)의 3배 여유
