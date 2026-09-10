@@ -228,6 +228,19 @@ def _dead_zone_px(dist):
     d = dist if (dist and 0.10 < dist < 1.0) else AIM_DIST_DEFAULT
     return max(8, int(round(TOL_CM * 4.2 / d)))
 
+# CENTERED 의 진입 문턱과 유지 문턱의 차(px). 진입은 `< dz`, 유지는 `<= dz + 이 값`.
+# 2026-09-10: 이 간격이 **흡수 상태(덫)** 였다. 진입도 아니고 해제도 아닌 링
+# [dz, dz+4] 안에서 _servo_step 이 그냥 return 해서 **접근·polish·재정렬이 하나도
+# 돌지 않았다** — 로봇을 움직이는 코드가 한 줄도 없는 상태로 33.4초.
+#   13:52:49~13:53:21  ex=-8 ey=+7~10 dz=8 → lift 0.98 / ext 0.06 28프레임 전부 동일
+#   끝낸 것은 수습이 아니라 사용자의 수동 제어권 회수(13:53:23.9)였다.
+# 상시 결함이었다 — 실기 7개 로그 OCR 551프레임 중 127(23%)이 이 링이고, CENTERED
+# 이후 연속 체류가 9/4 에 5회(최장 8.2s), 9/8 에 2회(8.3s), 9/9 에 2회(10.5s) 있었다.
+# 사용자가 말한 "조준만 하고 그리퍼가 다가가지도 않는 게 문제야"가 이것이다.
+# 이제 링은 **유지 쪽에 흡수된다** — 접근과 polish 는 링 안에서도 돈다.
+# 원래 의도(경계에서 모터 덜덜거림 방지)는 "큰 추적 보정만 건너뛴다"로 남긴다.
+CENTER_HOLD_PAD = 4
+
 # ── 누르기(press) 파라미터 ────────────────────────────────────────────
 ARM_JOINT          = "wrist_extension"  # 팔 뻗기 관절 (실측 확인)
 # [실측 보정 2026-07-09] press "허공" 판정 + 손끝이 표면 1cm 앞 정지 실측 → 2.5cm 하향
@@ -5549,13 +5562,41 @@ class ElevatorTracker(Node):
         ex = (b["x1"]+b["x2"])/2 - (CX + ox)
         ey = (b["y1"]+b["y2"])/2 - (CY + oy)
         dz = _dead_zone_px(tdist)          # 거리 기반 허용오차 (±0.6cm 상당)
-        if abs(ex) < dz and abs(ey) < dz:
+        # ── 정조준(strict) 과 정렬 유지(hold) 를 가른다 ──────────────────────
+        # 링 [dz, dz+CENTER_HOLD_PAD] 는 **유지**다. 접근과 polish 는 계속 돌리고,
+        # 아래쪽 큰 추적 보정(KP_LIFT*ey 통째)만 건너뛴다 — 그 건너뛰기가 원래
+        # 의도(경계 덜덜거림 방지)였고, `return` 은 그 의도를 넘어 로봇을 통째로
+        # 세우는 부작용이었다. CENTER_HOLD_PAD 주석에 실측이 있다.
+        _strict = abs(ex) < dz and abs(ey) < dz
+        _hold   = False
+        if not _strict:
             with state_lock:
-                first = not state["centered"]
-                state["centered"] = True
-                state["centered_ts"] = time.time()   # press 클릭 관용 창 판정용
-            if first:
-                self._dlog("CENTERED!")
+                _latch = state["centered"]
+                _rdy   = state.get("press_ready", False)
+            # 🔴 READY(초록불 동결) 중이면 _hold 로 들어오지 않는다. 아래 기존 경로로
+            #    내려가 **동결을 그대로 유지**한다. "초록불이면 무조건 멈춰서 누를 수
+            #    있게"가 사용자 결정이고, 경계에서 동결을 풀면 팔이 다시 나간다
+            #    (2026-07-21 ⑤ 실측: READY↔재정렬 5회 반복, lift 꿈틀).
+            #    링 덫이 실제로 문제가 되는 구간은 READY **이전의 접근 단계**다.
+            _hold = (_latch and not _rdy
+                     and abs(ex) <= dz + CENTER_HOLD_PAD
+                     and abs(ey) <= dz + CENTER_HOLD_PAD)
+        if _strict or _hold:
+            if _strict:
+                with state_lock:
+                    first = not state["centered"]
+                    state["centered"] = True
+                    state["centered_ts"] = time.time()   # press 클릭 관용 창 판정용
+                if first:
+                    self._dlog("CENTERED!")
+            elif time.time() - getattr(self, "_ring_log_ts", 0) > 5.0:
+                # 조용한 교착 금지 — 링에 있다는 사실과 그래서 무엇을 계속하는지
+                # 남긴다. centered_ts(press 클릭 관용 창)는 **갱신하지 않는다** —
+                # 링은 정조준이 아니므로 관용 창을 연장해 주면 안 된다.
+                self._ring_log_ts = time.time()
+                self._dlog(f"[HOLD] 정렬 유지 링 (x{ex:+.0f} y{ey:+.0f}px, "
+                           f"±{dz}~±{dz + CENTER_HOLD_PAD}px) — 접근·polish 계속, "
+                           "누르기는 비활성")
             # ── 누르기 활성(정조준 + 60cm 이내) 순간부터 로봇 완전 정지 ──
             # 자동 접근·polish 서보·베이스 정렬 전부 동결 (사용자 요청: "초록불이면
             # 무조건 멈춰서 누를 수 있게"). 클릭하면 press 시퀀스가 접근~누르기 담당.
@@ -5564,7 +5605,10 @@ class ElevatorTracker(Node):
                 _was_ready = state.get("press_ready", False)
             # 히스테리시스: 진입 0.25 / 유지 0.28 — depth 지터로 동결이 풀렸다
             # 잠기며 READY 후에도 접근이 한 번 더 나가던 것(11:24:10 실측) 방지
-            if tdist is not None and \
+            # 🔴 `_strict and` 가 이 변경의 안전 근거다. 링(유지)에서는 누르기를
+            #    절대 활성화하지 않는다 — 링은 0.55m 에서 1.05~1.57cm 오차이고
+            #    버튼 지름대가 2cm 다. **접근 게이트는 풀고 누르기 게이트는 그대로**.
+            if _strict and tdist is not None and \
                     tdist <= PRESS_READY_DIST + (0.03 if _was_ready else 0.0):
                 with state_lock:
                     state["press_ready"] = True
