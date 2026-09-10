@@ -565,6 +565,29 @@ def _floor_poll_boot():
                    "그때까지 승강장 높이표·버튼 제한은 쓰지 않는다")
 
 
+def _lift_prior_exact(place=None):
+    """**측정으로 확정된** 높이만 돌려준다(승강장 층별 표 / 차내 행 모델). 모르면 None.
+
+    `_lift_prior_for` 는 모를 때도 기본값(0.94)을 주므로 "확정인가"를 구분할 수 없다.
+    확정일 때만 써야 하는 곳이 있어서 따로 둔다 — 지금은 탐색 스윕의 기준점이다.
+    사유 문자열을 파싱해 구분하지 않는다(문구가 바뀌면 조용히 깨진다). 표/모델
+    조회 함수를 직접 불러서, 그 함수들이 None 을 주는 것이 곧 "모른다"가 되게 한다.
+
+    🔴 층은 **확정된 것만** 쓴다 — 미확정 층으로 고른 높이는 확정 높이가 아니다
+    (`_lift_hall_for` 독스트링: 틀린 층으로 틀린 높이에 가는 것이 더 나쁘다).
+    """
+    with state_lock:
+        pl  = place or state.get("place")
+        tok = state.get("target_text")
+        fl  = state.get("floor")
+        cf  = bool(state.get("floor_confirmed"))
+    if pl == "hall":
+        return _lift_hall_for(fl if cf else None, tok)
+    if pl == "cab":
+        return _lift_for_row(_row_of_label(tok) if tok else None, len(_layout_rows))
+    return None
+
+
 def _lift_row_prior(node, place, tok):
     """차내 층버튼: 목표 버튼의 행 높이로 lift 를 맞춘다. 홀(▲▼)은 건드리지 않는다.
 
@@ -5539,7 +5562,34 @@ class ElevatorTracker(Node):
         if not self._may_explore():
             return
         if getattr(self, "_scan_home_lift", None) is None:
-            self._scan_home_lift = float(lift)   # 스캔 기준점 고정
+            # 🔴 기준점은 "그때의 현재 lift" 가 아니라 **확정 높이**여야 한다.
+            #    현재 lift 로 재고정하면 래칫이 된다 — 서보가 내린다 → 타겟을 잠깐
+            #    놓친다 → 내려간 그 높이에서 다시 +amp 로 튄다 → 반복.
+            #    2026-09-10 15:08 실측: 3D 실측으로 정한 0.933 에서 출발했는데 스윕이
+            #    6cm 위(0.994)로 끌고 가 거기서 헤맸다. 사용자가 본 "왜 높이가
+            #    왔다갔다해"가 이것이다.
+            #    우리가 3D 로 잰 값이 "방금 어쩌다 와 있는 높이"보다 낫다.
+            _sx = _lift_prior_exact()
+            if _sx is not None:
+                self._scan_home_lift = float(_sx)
+                # 진폭도 줄인다. 표·행 모델의 실측 오차는 mm 단위다(3D 계산 vs 행
+                # 모델 최대 2.7mm, 3D vs 실제 눌린 lift 1.2mm — LIFT_ROW_SERVO_MAX_M
+                # 주석의 검증). ±5cm 스윕은 불확실성의 16배를 쓸고 다니는 것이고,
+                # 무엇보다 **서보에게 허용된 범위(±15mm) 밖으로 팔을 옮긴다** —
+                # 탐색이 서보가 갈 수 없는 곳에 데려다 놓으면 서보가 되돌릴 수도 없다.
+                # 그래서 확정 높이에서는 스윕을 그 클램프 안으로 묶는다.
+                if amp_l > LIFT_ROW_SERVO_MAX_M:
+                    # 기준점은 타겟을 놓칠 때마다 다시 놓이므로 로그는 스로틀한다
+                    # (같은 줄이 분당 여러 번 찍히면 로그가 읽히지 않는다).
+                    if time.time() - getattr(self, "_scan_home_log_ts", 0) > 10.0:
+                        self._scan_home_log_ts = time.time()
+                        self._dlog(f"[SCAN] 기준점 = 확정 높이 {_sx:.3f}(표·행 실측) · "
+                                   f"lift 스윕 ±{amp_l*100:.0f}cm → "
+                                   f"±{LIFT_ROW_SERVO_MAX_M*100:.1f}cm 로 축소 "
+                                   "(서보 허용 범위를 넘지 않게)")
+                    amp_l = LIFT_ROW_SERVO_MAX_M
+            else:
+                self._scan_home_lift = float(lift)   # 확정 높이가 없을 때만 현재값
         if getattr(self, "_scan_home_ext", None) is None:
             with state_lock:
                 _e = state["arm_ext"]
@@ -5887,10 +5937,17 @@ class ElevatorTracker(Node):
             # 아무 단서도 없음 → 더 넓게 두리번 (lift ±5cm, 베이스 ±3cm)
             self._scan_step(lift, amp_l=0.05, amp_b=0.03)
             return
-        # 타겟 확보 → 탐색 스캔 상태 리셋
+        # 타겟 확보 → 탐색 기준점은 놓는다(다음 탐색에서 다시 정한다).
+        # 🔴 다만 **패턴 진행도(_scan_seq)는 유지한다.** 재잠금마다 0 으로 되돌리면
+        #    패턴이 1번(lift +amp)에서 한 발도 못 나아간다 — 2026-09-10 실측에서
+        #    "튐" 두 번이 **둘 다 `[SCAN] 탐색 1`** 이었다. lift−, home 복귀, 팔 앞뒤,
+        #    베이스 앞뒤를 한 번도 못 써 보고 위로만 튀는 것이 래칫의 절반이었다.
+        #    타겟이 바뀌면 그때 처음부터 돈다(새 버튼이면 스윕도 새로 시작해야 한다).
         self._scan_home_lift = None
         self._scan_home_ext  = None
-        self._scan_seq = 0
+        if getattr(self, "_scan_tgt", None) != target:
+            self._scan_tgt = target
+            self._scan_seq = 0
         b  = det["box"]
         # 조준점(카메라 중앙 + 거리별 손끝 오프셋) 기준 2축 오차
         ox, oy = _aim_offsets(tdist)
