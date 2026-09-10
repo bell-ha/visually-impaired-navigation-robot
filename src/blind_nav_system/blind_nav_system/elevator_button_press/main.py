@@ -379,7 +379,29 @@ def _row_of_label(tok):
 
 
 def _lift_row_clamp(node, want, where):
-    """lift 명령을 **확정 기준값 ±LIFT_ROW_SERVO_MAX_M** 안으로 묶는다.
+    """**눈 감고 움직이는** lift 명령만 확정 기준값 ±LIFT_ROW_SERVO_MAX_M 안으로 묶는다.
+
+    🔴 **묶어야 할 것은 눈 감고 헤매는 것이지, 눈 뜨고 좁혀가는 것이 아니다.**
+       · 탐색 스윕(`_scan_step`) — 관측 없이 패턴대로 움직인다. 기준점이 없으면
+         래칫으로 끌려간다 ⇒ **묶는다.**
+       · 추적 서보(`_servo_step` 의 polish·추적) — 실제 버튼을 보고 오차를 좁히는
+         **폐루프**다. 절대 기준으로 묶으면 **수렴 자체가 불가능해진다** ⇒ 안 묶는다.
+       표값은 "어디서 시작할지"의 사전값이고 "어디서 끝나야 하는지"가 아니다.
+       주차 자세(피치·바닥 기울기)가 바뀌면 필요한 lift 가 1cm 이상 달라진다 —
+       그 몫은 표가 아니라 현장에서 오고, 그걸 메우는 것이 폐루프의 일이다.
+    실측 둘이 이 구분을 증명한다:
+       · 2026-09-10 15:29 승강장: 서보가 0.952~0.953 을 계속 요구했는데 0.948 로 잘려
+         ey 가 -9~-10 에 고정 → CENTERED·APPROACH·READY **0회**. 사용자: "팔이 앞으로
+         안 가".
+       · 2026-09-09 15:44 차내: 같은 일이 **이미 있었다**. 2행 기준 클램프가 8회 발동
+         (명령 +18~20mm → +15mm), ey 가 -10~-19 에 머물고, 그 뒤 로그 310줄 동안
+         CENTERED·APPROACH·READY **0회**. 오늘 만든 결함이 아니라 드러난 결함이다.
+       반대로 클램프가 무언가를 **막아 준** 기록은 없다 — 2026-09-09 의 "두 행 사이를
+       눌렀다"는 사고는 인식 자세 goal 의 덮어쓰기였고(8807edd 가 뿌리를 쳤다) 서보
+       드리프트가 아니었다.
+    ※ press 시퀀스 내부 보정(`접근 중 높이`·`근접 재정렬 높이`)은 **묶은 채 둔다** —
+      물리 접촉 직전이라 이웃 행을 누르는 대가가 실재하고, 그쪽은 5스텝으로 끝나는
+      유한 루프라 교착이 되지 않는다.
 
     기준값은 측정으로 확정된 것만 쓴다(`_lift_prior_exact`):
       · 차내 — 목표 버튼의 행 높이(행 모델)
@@ -6146,11 +6168,11 @@ class ElevatorTracker(Node):
                     # 않는다 — 2026-09-09 실패판이 그것이었다(글자를 하나도 못 읽은
                     # 추론 위치로 +28mm 까지 흘러 두 행 사이 평면을 눌렀다).
                     if abs(ey) >= act and not det.get("shape"):
+                        # 🔴 여기에 절대 클램프를 걸지 않는다 — _lift_row_clamp
+                        #    독스트링의 "눈 감고 헤매는 것만 묶는다" 참고.
                         self._send_goal(["joint_lift"],
-                            [_lift_row_clamp(self,
-                                max(0.15, min(1.10,
-                                              float(lift) - KP_LIFT * ey * 0.7)),
-                                "polish 높이")])
+                            [max(0.15, min(1.10,
+                                           float(lift) - KP_LIFT * ey * 0.7))])
                     if abs(ex) >= act:
                         self._maybe_base_nudge(ex, tdist)
             return
@@ -6179,6 +6201,34 @@ class ElevatorTracker(Node):
         e_mem = self._det_mem.get(target)
         if e_mem:
             self._servo_acted_ts = e_mem["ts"]
+        # ── 조용한 교착 경보 ────────────────────────────────────────────────
+        # 오차가 허용 밖에 오래 머무는데 줄일 수단이 막혀 있으면 그 사실을 말한다.
+        # 2026-09-10 에 두 번 겪었다 — 클램프가 서보를 자른 건(15:29)과 모양 추론이라
+        # 높이 보정이 꺼진 건(14:54). 둘 다 **사용자가 눈으로 먼저 봤다.**
+        if abs(ex) > dz or abs(ey) > dz:
+            if getattr(self, "_offdz_since", None) is None:
+                self._offdz_since = time.time()
+            _held = time.time() - self._offdz_since
+            if _held > 8.0 and time.time() - getattr(self, "_offdz_log_ts", 0) > 8.0:
+                self._offdz_log_ts = time.time()
+                _blk = []
+                if abs(ey) > dz and det.get("shape"):
+                    _blk.append("ey: 모양 추론(앵커 0)이라 높이 보정 생략 — 글자가 읽혀야 재개")
+                if abs(ex) > dz:
+                    with state_lock:
+                        _ba, _bt = state["base_align"], state["base_travel"]
+                    if not _ba:
+                        _blk.append("ex: 몸체이동 OFF — 좌우를 줄일 수단이 없다")
+                    elif _bt >= BASE_TRAVEL_MAX:
+                        _blk.append(f"ex: 베이스 예산 소진({_bt*100:.0f}cm/"
+                                    f"{BASE_TRAVEL_MAX*100:.0f}cm)")
+                self._dlog(f"[ALIGN] ⚠ {_held:.0f}초째 정조준 밖 "
+                           f"(x{ex:+.0f} y{ey:+.0f}px · 허용 ±{dz}px) — "
+                           + ("막힌 것 → " + " / ".join(_blk) if _blk else
+                              "보정은 나가는데 오차가 안 줄어든다 "
+                              "(주차 자세·조준 트림·라벨 오인 의심)"))
+        else:
+            self._offdz_since = None
         # 상하(ey) → lift 서보. yaw는 고정(카메라만 돌 뿐 손끝 경로를 못 옮김).
         # 앵커 조건: 모양 전용 정합(글자 미판독)으로 추론된 위치에는 높이를 안 맞춘다.
         if abs(ey) >= dz and det.get("shape"):
@@ -6187,10 +6237,12 @@ class ElevatorTracker(Node):
                 self._dlog(f"[LIFT] 모양 추론(앵커 0) 위치라 높이 보정 생략 "
                            f"(y{ey:+.0f}px) — 글자가 읽히면 재개한다")
         elif abs(ey) >= dz:
+            # 🔴 폐루프 보정이다. 표·행 기준값으로 묶으면 **수렴이 불가능해진다** —
+            #    2026-09-10 15:29 실측: 서보가 0.952~0.953 을 계속 요구했는데 클램프가
+            #    0.948 로 잘라 ey 가 -9~-10 에 고정, CENTERED·APPROACH 0회.
+            #    물리 한계(0.15~1.10)만 남긴다.
             self._send_goal(["joint_lift"],
-                            [_lift_row_clamp(self,
-                                max(0.15, min(1.10, float(lift) - KP_LIFT * ey)),
-                                "추적 높이")])
+                            [max(0.15, min(1.10, float(lift) - KP_LIFT * ey))])
         # 좌우(ex) → 라이다-가드 베이스 전/후진 (토글 ON일 때만, 안전 확인 후)
         if abs(ex) >= dz:
             self._maybe_base_nudge(ex, tdist)
