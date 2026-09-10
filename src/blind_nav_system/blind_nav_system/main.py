@@ -929,7 +929,15 @@ def _map_loaded_floor():
     if r_floor is None:
         return (p_floor, "map_server 파라미터") if p_floor else (None, "확인 불가")
     if p_floor is None:
-        return r_floor, "우리 기록(파라미터 읽기 실패)"
+        # 🔴 R 단독을 믿지 않는다 — 이 함수의 독스트링이 "둘 다 혼자서는 못 믿는다"인데
+        #    예전 구현은 여기서 R 을 믿었다. **P 가 없어지는 것은 예외가 아니라 상시다**:
+        #    `ros2 param get` 은 ros2 데몬이 있어야 답하고, 2026-09-10 하루에 데몬
+        #    staleness 를 두 번 겪었다(`ros2 daemon stop/start` 로 고쳤다).
+        #    사고 경로: 3층으로 바꿈(R=3) → nav2 재시작(실제 지도=런치 기본 5층)
+        #              → 데몬 다운(P=None) → R 을 믿어 load_map 생략 + 확정
+        #              → AMCL 이 **5층 지도에서 3층이라고 믿는다**.
+        #    대가는 중복 load_map 한 번이고, 그건 이 함수가 이미 감수하기로 한 비용이다.
+        return None, f"기록({r_floor}층)은 있으나 파라미터를 못 읽어 확인 불가"
     if p_floor == r_floor:
         return r_floor, "우리 기록·파라미터 일치"
     return None, f"기록({r_floor}층)과 파라미터({p_floor}층) 불일치"
