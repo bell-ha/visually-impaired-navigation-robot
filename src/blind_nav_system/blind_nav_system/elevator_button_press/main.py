@@ -349,6 +349,10 @@ LIFT_ROW_DEADBAND_M = 0.015
 # 3D 계산 vs 모델 최대 2.7mm, 중간층 σ 0.8mm. 3mm 면 그 오차대 안이라 "의미 없는
 # 미세 이동"만 걸러내고, 기본값(7mm 이상 떨어진 값)은 걸러내지 않는다.
 LIFT_HALL_DEADBAND_M = 0.003
+# 누르기 직전 허용 잔차 = dz × 이 배수. dz 는 ±0.6cm 정의이고, d≈0.20m 에서 13px=0.62cm.
+# 2.0 (=1.24cm) 이면 **버튼 면을 벗어난다**(버튼 지름 2cm 대) — 두 버튼 사이를 누르는
+# 2026-09-09 +27.9mm 사고가 그 모양이었다. 1.5 (=0.93cm) 는 버튼 반경 안이다.
+PRESS_RESID_MAX_MULT = 1.5
 
 
 def _lift_for_row(ri, nrows):
@@ -6448,11 +6452,16 @@ class ElevatorTracker(Node):
                         with state_lock:
                             lift_now = state["lift"]
                         if lift_now is not None:
+                            # 🔴 클램프 제거(2026-09-10). 이것도 **폐루프**다 — det_m 은
+                            #    방금 들어온 관측이다. `2cc05d9` 가 서보에서 없앤 것과
+                            #    같은 동역학이 여기 남아 있었다: 표값 ±15mm 밖으로
+                            #    수렴해야 맞는 자리(15:29 실측 필요치 +19.7mm)인데
+                            #    클램프가 접촉 직전에 끌어내린다. 물리 한계만 남긴다.
+                            #    "이웃 행을 누르지 않는다"는 목적은 묶기가 아니라
+                            #    **결과 게이트**(아래 D 단계 잔차 판정)가 맡는다.
                             self._move_joint_wait("joint_lift",
-                                _lift_row_clamp(self,
-                                    max(0.15, min(1.10,
-                                                  float(lift_now) - KP_LIFT * bym)),
-                                    "접근 중 높이"),
+                                max(0.15, min(1.10,
+                                              float(lift_now) - KP_LIFT * bym)),
                                 1, 6.0)
                     if abs(bxm) > dzm:
                         mvm = max(-0.02, min(0.02,
@@ -6509,14 +6518,27 @@ class ElevatorTracker(Node):
                         with state_lock:
                             lift_now = state["lift"]
                         if lift_now is not None:
-                            st(f"근접 재정렬 {_i+1}/5: 높이 보정 (y{by2:+.0f}px)")
-                            self._move_joint_wait("joint_lift",
-                                _lift_row_clamp(self,
-                                    max(0.15, min(1.10,
-                                                  float(lift_now) - KP_LIFT * by2)),
-                                    "근접 재정렬 높이"),
-                                1, 6.0)
-                            moved = True
+                            # 🔴 클램프 제거 — det2 는 `fresh` 관측이다(폐루프).
+                            #    위 '접근 중 높이' 주석과 같은 이유.
+                            _want = max(0.15, min(1.10,
+                                                  float(lift_now) - KP_LIFT * by2))
+                            # 🔴 moved 는 "쐈다"가 아니라 **"실제로 움직였나"** 여야 한다.
+                            #    전에는 명령을 보낸 사실만으로 True 였다 — 명령이 no-op
+                            #    이거나(클램프·물리 한계로 현재값과 같음) 액션이 거부돼도
+                            #    True 였다. 그러면 `if not moved: break` 가 영원히 안
+                            #    걸려 **5회를 변화 없이 전부 소진**한다(최대 ~50초).
+                            #    오늘 세 번 만난 '조용한 교착'의 또 다른 얼굴이다.
+                            if abs(_want - float(lift_now)) < 0.0005:
+                                st(f"근접 재정렬 {_i+1}/5: 높이 보정이 0 — "
+                                   f"더 줄일 수단 없음 (y{by2:+.0f}px, lift "
+                                   f"{float(lift_now):.3f} 한계)")
+                            else:
+                                st(f"근접 재정렬 {_i+1}/5: 높이 보정 (y{by2:+.0f}px)")
+                                if self._move_joint_wait("joint_lift", _want, 1, 6.0):
+                                    moved = True
+                                else:
+                                    st(f"근접 재정렬 {_i+1}/5: ⛔ 높이 명령이 안 나갔다 "
+                                       "— 보정 실패로 센다")
                     if abs(bx2) > max(6, int(dz2 * 0.75)):   # 좌우 → 베이스 (가드 존중)
                         mv = BASE_X_SIGN * bx2 * d2 / 420.0 * 0.7
                         mv = max(-0.025, min(0.025, mv))
@@ -6534,9 +6556,33 @@ class ElevatorTracker(Node):
                     while (getattr(self, "_last_infer", 0) < end_t + 1.0
                            and time.time() - end_t < 4.0):
                         time.sleep(0.1)
+                # 🔴 **결과 게이트** — 묶는 대신 말한다. 클램프를 뺀 자리를 여기가 맡는다.
+                #    기준을 `dz2*2` → `dz2*PRESS_RESID_MAX_MULT` 로 좁혔다. 근거:
+                #      · dz 는 "어느 거리에서든 ±TOL_CM(0.6cm)" 이라는 정의다
+                #        (_dead_zone_px). d2≈0.20m 에서 dz2=13px=0.62cm.
+                #      · 예전 기준 2·dz2 = 26px = **1.24cm** 다. 버튼 지름이 2cm 대이므로
+                #        중심에서 1.24cm 는 **버튼 면을 벗어난다** — 두 버튼 사이 평면을
+                #        누르게 된다(2026-09-09 +27.9mm 사고가 그 모양이었다).
+                #      · 1.5·dz2 = 0.93cm 는 버튼 반경(~1cm) 안이다. 그래서 1.5 다.
+                #    표값에서 몇 mm 떨어졌는지로 게이트를 걸지 **않는다** — 그 값은
+                #    "표가 틀렸는가"와 "조준이 틀렸는가"를 섞는다. 주차 자세가 바꾸는
+                #    몫(15:29 +19.7mm)은 폐루프가 메워야 하는 것이고, 버튼에 맞았는지는
+                #    카메라가 재는 잔차(by2)가 직접 말한다. 표값 이탈은 **진단으로만** 남긴다.
+                _ex = _lift_prior_exact()
+                if _ex is not None and last_err:
+                    with state_lock:
+                        _lf_now = state["lift"]
+                    if _lf_now is not None:
+                        self._dlog(f"[PRESS] 누르기 직전 lift {float(_lf_now):.3f} — "
+                                   f"확정 기준값 {_ex:.3f} 에서 "
+                                   f"{(float(_lf_now) - _ex) * 1000:+.0f}mm "
+                                   f"(행 간격 절반 28mm · 승강장 ▲▼ 간격 절반 31mm). "
+                                   f"잔차 y{last_err[1]:+.0f}px")
                 if not aligned and last_err and (
-                        abs(last_err[0]) > dz2 * 2 or abs(last_err[1]) > dz2 * 2):
-                    st(f"❌ 근접 재정렬 실패 (x{last_err[0]:+.0f} y{last_err[1]:+.0f}px) — 복귀")
+                        abs(last_err[0]) > dz2 * PRESS_RESID_MAX_MULT
+                        or abs(last_err[1]) > dz2 * PRESS_RESID_MAX_MULT):
+                    st(f"❌ 근접 재정렬 실패 (x{last_err[0]:+.0f} y{last_err[1]:+.0f}px, "
+                       f"허용 ±{dz2 * PRESS_RESID_MAX_MULT:.0f}px ≈ 버튼 반경) — 복귀")
                     self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
                     return
 
