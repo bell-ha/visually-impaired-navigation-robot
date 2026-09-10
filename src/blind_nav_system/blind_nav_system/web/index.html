@@ -373,7 +373,7 @@
         <div class="toggle-row">
           <span class="toggle-label">🗺 지도(층)</span>
           <span style="display:flex;gap:6px;align-items:center;">
-            <select id="floor-sel" style="background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;">
+            <select id="floor-sel" onchange="paintFloorBtn()" style="background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;">
               <option value="5" selected>5층</option>
               <option value="4">4층</option>
               <option value="3">3층</option>
@@ -381,10 +381,10 @@
               <option value="1">1층</option>
             </select>
             <label style="font-size:0.68rem;color:var(--text-dim);display:flex;align-items:center;gap:3px;cursor:pointer;"
-                   title="전환 직후 AMCL 위치를 엘리베이터 하차지점으로 자동 설정 — 엘리베이터로 층 이동한 직후에만 켜두세요">
-              <input type="checkbox" id="init-exit-chk" checked>하차지점 초기화
+                   title="전환 직후 AMCL 위치를 엘리베이터 하차지점으로 자동 설정. 기본 OFF — 엘리베이터로 층을 이동한 직후에만 켜세요. 복도에서 켠 채로 누르면 측위가 하차지점으로 끌려갑니다(위험이 비대칭: 안 켜서 잃는 건 편의, 켜서 잃는 건 측위 전체)">
+              <input type="checkbox" id="init-exit-chk">하차지점 초기화
             </label>
-            <button onclick="switchMap()" style="background:var(--neutral-bg);color:var(--text);border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;">전환</button>
+            <button id="map-switch-btn" onclick="switchMap()" style="background:var(--neutral-bg);color:var(--text);border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;">지도 전환</button>
           </span>
         </div>
         <div class="toggle-row">
@@ -614,14 +614,51 @@ function toggleSocialNav() {
 }
 // toggleObstaclePush 제거 (2026-07-24) — UI 토글 삭제됨
 
+// 🗺 층 확정 / 지도 전환 — 같은 버튼이 상황에 따라 다른 일을 한다.
+// 누르기 전에 무슨 일이 일어날지 라벨·툴팁에 미리 쓴다(사람이 6초 멈춤과 즉시 확정을
+// 구분할 수 있어야 한다). 판정은 서버가 한다 — loaded_floor 는 "실제로 올라간 지도"다.
+let _loadedFloor = null;      // 서버가 말하는 실제 로드된 층 (모르면 null)
+let _floorConfirmed = false;  // 현재 층이 "사람이 고른 값"인가
+function paintFloorBtn() {
+  const b = document.getElementById('map-switch-btn');
+  const sel = document.getElementById('floor-sel');
+  if (!b || !sel) return;
+  const same = (_loadedFloor !== null && _loadedFloor === sel.value);
+  b.textContent = same ? '이 층 확인' : '지도 전환';
+  b.title = same
+    ? `${sel.value}층 지도가 이미 올라와 있습니다 — 지도는 그대로 두고 현재 층만 확정합니다(즉시)`
+    : (_loadedFloor === null
+        ? '지금 올라간 지도를 확인할 수 없습니다 — 안전하게 지도를 다시 읽습니다(약 6초)'
+        : `지금은 ${_loadedFloor}층 지도입니다 — ${sel.value}층으로 전환합니다(약 6초)`);
+  // 미확정이면 버튼을 눈에 띄게 — 엘베 여정이 막혀 있는 이유가 여기라서.
+  b.style.background = _floorConfirmed ? 'var(--neutral-bg)' : '#4a3a1a';
+  b.style.color      = _floorConfirmed ? 'var(--text)' : '#fd8';
+}
+function pollFloorBtn() {
+  fetch('/switch_map').then(r => r.json()).then(d => {
+    _loadedFloor = (d.loaded_floor === undefined ? null : d.loaded_floor);
+    _floorConfirmed = !!d.confirmed;
+    paintFloorBtn();
+  }).catch(() => {});
+}
+setInterval(pollFloorBtn, 3000);
+pollFloorBtn();
+
 function switchMap() {
   const f   = document.getElementById('floor-sel').value;
   const ini = document.getElementById('init-exit-chk').checked;
-  if (!confirm(`${f}층 지도로 전환할까요?` + (ini ? ' (AMCL 위치가 엘리베이터 하차지점으로 초기화됩니다)' : ''))) return;
+  const same = (_loadedFloor !== null && _loadedFloor === f);
+  const q = same
+    ? `${f}층으로 확정할까요? (지도는 이미 ${f}층 — 다시 읽지 않습니다)`
+    : `${f}층 지도로 전환할까요? (약 6초)`;
+  if (!confirm(q + (ini ? '\n⚠ AMCL 위치가 엘리베이터 하차지점으로 초기화됩니다' : ''))) return;
   fetch('/switch_map', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({floor: f, init_exit: ini})})
     .then(r => r.json())
-    .then(d => { if (!d.ok) alert('지도 전환 실패: ' + d.error); })
+    .then(d => {
+      if (!d.ok) alert('지도 전환 실패: ' + d.error);
+      else pollFloorBtn();     // 라벨·색을 바로 갱신 (3초 기다리지 않게)
+    })
     .catch(() => alert('지도 전환 요청 실패'));
 }
 

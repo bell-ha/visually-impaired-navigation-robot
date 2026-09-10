@@ -302,6 +302,12 @@ _current_floor = "5"   # 런치 기본 지도 = all.yaml(5층)
 # 미확정이면: 엘베 여정을 거부하고(▲▼ 를 거꾸로 누르게 된다), 엘베앱에는
 # confirmed=False 로 알려 층별 높이표·버튼 제한을 **쓰지 않게** 한다.
 _floor_confirmed = False
+# 우리가 **성공시킨** 마지막 load_map 의 지도 경로. None = 이 프로세스에서 아직
+# 한 번도 안 바꿨다(= 런치가 올린 것이 그대로 떠 있다).
+# _current_floor 와 다른 물건이다 — 그쪽은 "사람이 고른 층"이고 이쪽은 "실제로
+# 로드된 지도"다. 같은 층 확정에서 load_map 을 건너뛸지 판단할 때 이 구분이 필요하다
+# (_current_floor 로 판단하면 미확정 초기값을 근거로 쓰는 순환이 된다).
+_loaded_map_path = None
 _map_client = None     # /map_server/load_map 서비스 클라이언트
 _init_pub   = None     # /initialpose 퍼블리셔 (AMCL 재정위치용)
 
@@ -867,21 +873,123 @@ def web_vision():
     _log("WEB", "버튼2 시각 분석 (웹)")
     return jsonify(ok=True)
 
+def _map_server_yaml():
+    """map_server 가 **런치 때 읽은** 지도 경로(문자열) 또는 None.
+
+    _nav_param_get 과 따로 둔 이유: 그쪽은 값을 float 로 캐스팅한다(padding 전용).
+    ※ 이 파라미터는 load_map 서비스로 지도를 바꿔도 갱신되지 **않을 수 있다**.
+      그래서 이 값만으로 "지금 로드된 지도"를 단정하지 않는다 — _map_loaded_floor 참고.
+    """
+    try:
+        r = subprocess.run(["ros2", "param", "get", "/map_server", "yaml_filename"],
+                           capture_output=True, timeout=5, text=True)
+        if r.returncode != 0:
+            return None
+        v = (r.stdout or "").rsplit(":", 1)[-1].strip()
+        return v or None
+    except Exception:
+        return None
+
+
+def _floor_of_map(path):
+    """지도 경로 → 층 문자열 또는 None. 경로 표기 차이를 realpath 로 눌러서 비교한다."""
+    if not path:
+        return None
+    try:
+        tgt = os.path.realpath(path)
+    except Exception:
+        return None
+    for fl, p in _FLOOR_MAPS.items():
+        try:
+            if os.path.realpath(p) == tgt:
+                return fl
+        except Exception:
+            continue
+    return None
+
+
+def _map_loaded_floor():
+    """지금 map_server 에 올라가 있는 지도의 층 → (층|None, 근거 문자열).
+
+    근거가 둘 있고 **둘 다 혼자서는 못 믿는다**:
+      R = 우리가 성공시킨 마지막 load_map 경로 (_loaded_map_path)
+      P = map_server 의 yaml_filename 파라미터 (런치가 읽은 값)
+    우리가 한 번도 안 바꿨으면 R 이 없고 P 가 진실이다.
+    우리가 바꿨는데 P 가 그대로면, P 가 낡은 것인지(load_map 이 파라미터를 안 고친다)
+    아니면 R 이 낡은 것인지(nav2 가 재시작돼 런치값으로 돌아갔다) **구분할 수 없다**.
+    그래서 **둘이 어긋나면 모른다고 답한다** → 호출부가 안전하게 load_map 을 한다.
+    이 논리는 load_map 이 파라미터를 갱신하든 안 하든 둘 다 맞다:
+      갱신한다면 R == P 로 일치해 생략이 되고, 갱신 안 하면 한 번 바꾼 뒤부터는
+      (조금 낭비지만) 항상 실제 load_map 을 한다.
+    """
+    p_floor = _floor_of_map(_map_server_yaml())
+    r_floor = _floor_of_map(_loaded_map_path)
+    if r_floor is None:
+        return (p_floor, "map_server 파라미터") if p_floor else (None, "확인 불가")
+    if p_floor is None:
+        return r_floor, "우리 기록(파라미터 읽기 실패)"
+    if p_floor == r_floor:
+        return r_floor, "우리 기록·파라미터 일치"
+    return None, f"기록({r_floor}층)과 파라미터({p_floor}층) 불일치"
+
+
+def _amcl_init_exit():
+    """AMCL 초기 위치를 '엘리베이터 하차지점'으로. switch_map 의 두 경로가 같이 쓴다."""
+    p = _load_exit_point()
+    if p and _init_pub is not None:
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = "map"
+        msg.header.stamp = _cmd_node.get_clock().now().to_msg()
+        msg.pose.pose.position.x    = float(p["x"])
+        msg.pose.pose.position.y    = float(p["y"])
+        msg.pose.pose.orientation.z = float(p.get("z", 0.0))
+        msg.pose.pose.orientation.w = float(p.get("w", 1.0))
+        msg.pose.covariance[0]  = 0.25   # RViz 2D Pose Estimate와 동일 분산
+        msg.pose.covariance[7]  = 0.25
+        msg.pose.covariance[35] = 0.068
+        _init_pub.publish(msg)
+        _log("MAP", "AMCL 초기 위치 → 엘리베이터 하차지점 (RViz 클릭 불필요)")
+    else:
+        _log("MAP", "⚠ 하차지점 좌표를 못 읽음 — RViz 2D Pose Estimate로 지정 필요")
+
+
 @app.route("/switch_map", methods=["GET", "POST"])
 def switch_map():
     """지도(층) 전환 — 재시작 없이 map_server에 load_map 서비스 호출.
     init_exit=true면 전환 직후 AMCL 초기 위치를 '엘리베이터 하차지점'으로 설정
     (두 층 지도가 동일 사본·동일 origin이라 좌표계가 같음 → 좌표 재사용 가능)."""
-    global _current_floor, _floor_confirmed
+    global _current_floor, _floor_confirmed, _loaded_map_path
     if request.method == "GET":
         # confirmed 를 같이 준다 — 받는 쪽이 "사람이 고른 값"인지 알아야
         # 추측할지 말지를 스스로 정할 수 있다(엘베앱 보조 폴링이 이걸 본다).
-        return jsonify(floor=_current_floor, confirmed=_floor_confirmed)
+        # loaded_floor 는 **실제로 올라가 있는 지도**다(웹 버튼이 "이 층 확인" /
+        # "지도 전환" 중 무엇을 할지 라벨에 미리 써 주는 데 쓴다).
+        _lf, _why = _map_loaded_floor()
+        return jsonify(floor=_current_floor, confirmed=_floor_confirmed,
+                       loaded_floor=_lf, loaded_why=_why)
     data  = request.json or {}
     floor = str(data.get("floor", ""))
     path  = _FLOOR_MAPS.get(floor)
     if path is None:
         return jsonify(ok=False, error="알 수 없는 층"), 400
+    # ── 이미 그 층 지도가 올라와 있으면 load_map 을 건너뛴다 ──────────────────
+    # 런치 기본이 all.yaml(5층)이라 "5층에서 켜고 **현재 층만 확정**하고 싶다"가 가장
+    # 흔하다. 그 경우 같은 지도를 6초 걸려 다시 읽는 것은 낭비이고, 그 과정에서
+    # 하차지점 초기화 체크박스를 켠 채 누르는 사고 위험만 생긴다.
+    # 모르면(둘이 어긋나면) 건너뛰지 않는다 — 틀린 층을 '확정'으로 만드는 것이
+    # 층을 모르는 것보다 나쁘다.
+    _lf, _why = _map_loaded_floor()
+    if _lf is not None and _lf == floor:
+        _current_floor   = floor
+        _floor_confirmed = True
+        _log("MAP", f"🗺 {floor}층 지도가 이미 로드돼 있다({_why}) — load_map 생략, "
+                    "현재 층만 확정")
+        _elev_post("/floor", {"floor": floor, "confirmed": True}, timeout=2)
+        # 체크박스를 일부러 켰다면 그 요청은 지도와 **별개로** 존중한다 — 조용히
+        # 버리면 "켰는데 아무 일도 안 일어났다"가 된다.
+        if data.get("init_exit"):
+            _amcl_init_exit()
+        return jsonify(ok=True, floor=floor, switched=False)
     if _map_client is None:
         return jsonify(ok=False, error="ROS/LoadMap 미초기화"), 503
     if not _map_client.service_is_ready():
@@ -900,6 +1008,7 @@ def switch_map():
         return jsonify(ok=False, error=f"load_map 실패 ({code})")
     _current_floor   = floor
     _floor_confirmed = True      # 사람(또는 여정)이 실제로 고른 값이 됐다
+    _loaded_map_path = path      # 실제로 올라간 지도 — 다음 "같은 층 확정"의 근거
     _log("MAP", f"🗺 지도 전환 완료 → {floor}층 ({os.path.basename(path)})")
     # 엘베앱에 층을 **밀어 넣는다**(폴링 아님). 사용자 모델이 "내가 4층이라 설정하면
     # 지도도 바뀌고 엘리베이터도 바뀐다" 이므로, 고르는 순간에 흘러야 한다. 다음 씬
@@ -909,23 +1018,8 @@ def switch_map():
     # 보조 폴링(GET /switch_map)으로 메우므로 여기서 재시도하지 않는다.
     _elev_post("/floor", {"floor": floor, "confirmed": True}, timeout=2)
     if data.get("init_exit"):
-        p = _load_exit_point()
-        if p and _init_pub is not None:
-            msg = PoseWithCovarianceStamped()
-            msg.header.frame_id = "map"
-            msg.header.stamp = _cmd_node.get_clock().now().to_msg()
-            msg.pose.pose.position.x    = float(p["x"])
-            msg.pose.pose.position.y    = float(p["y"])
-            msg.pose.pose.orientation.z = float(p.get("z", 0.0))
-            msg.pose.pose.orientation.w = float(p.get("w", 1.0))
-            msg.pose.covariance[0]  = 0.25   # RViz 2D Pose Estimate와 동일 분산
-            msg.pose.covariance[7]  = 0.25
-            msg.pose.covariance[35] = 0.068
-            _init_pub.publish(msg)
-            _log("MAP", "AMCL 초기 위치 → 엘리베이터 하차지점 (RViz 클릭 불필요)")
-        else:
-            _log("MAP", "⚠ 하차지점 좌표를 못 읽음 — RViz 2D Pose Estimate로 지정 필요")
-    return jsonify(ok=True, floor=floor)
+        _amcl_init_exit()
+    return jsonify(ok=True, floor=floor, switched=True)
 
 @app.route("/robot_pose")
 def robot_pose():
