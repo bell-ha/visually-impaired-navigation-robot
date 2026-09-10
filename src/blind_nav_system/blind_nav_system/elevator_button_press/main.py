@@ -422,11 +422,17 @@ def _lift_prior_for(place):
     if place == "hall":
         with state_lock:
             _fl, _tk = state.get("floor"), state.get("target_text")
-        _h = _lift_hall_for(_fl, _tk)
+            _cf = bool(state.get("floor_confirmed"))
+        # 🔴 **확정된 층에서만** 표를 쓴다. 미확정 층(대시보드 부팅 초기값 "5")으로
+        #    높이를 고르면 틀린 높이로 가고, 그건 한 값으로 버티는 것보다 나쁘다
+        #    (_lift_hall_for 독스트링). 버튼 제한과 같은 기준이어야 한다.
+        _h = _lift_hall_for(_fl if _cf else None, _tk)
         if _h is not None:
             return _h, None, f"승강장 {_fl}층 '{_tk}'"
         return (LIFT_PRIOR_CALL, None,
-                f"승강장 기본값 (층={_fl or '미설정'} 목표={_tk or '미정'} — 표에 없음)")
+                "승강장 기본값 (층="
+                + (f"{_fl}(미확정)" if (_fl and not _cf) else (_fl or "미설정"))
+                + f" 목표={_tk or '미정'} — 표에 없음)")
     with state_lock:
         tok = state.get("target_text")
     ri = _row_of_label(tok) if tok else None
@@ -434,6 +440,95 @@ def _lift_prior_for(place):
     if h is not None:
         return h, ri, f"차내 '{tok}' = {ri}행"
     return LIFT_PRIOR_PANEL, None, "차내 탐색 높이 (목표 미정)"
+
+
+def _hall_tokens_for(floor):
+    """그 층 승강장에 **실제로 있는** 호출 버튼 토큰 집합. 모르면 None(= 제한 없음).
+
+    LIFT_HALL_BY_FLOOR 의 키가 곧 가용성이다 — 1층은 ▲ 하나(종점), 5층은 ▼ 하나.
+    button_layout.json 은 건드리지 않는다. 그건 패널의 **물리 배치**이고 가용성이
+    아니다. 가용성은 층에서 파생시킨다 — 그래야 층이 바뀌면 같이 바뀐다.
+    """
+    if not floor:
+        return None
+    row = LIFT_HALL_BY_FLOOR.get(str(floor))
+    return set(row.keys()) if row else None
+
+
+def _floor_block_map(floor, confirmed):
+    """{토큰: 막는 이유} — **층에서 파생된** 제한만. 장소 모드 제한은 포함하지 않는다.
+
+    🔴 층을 모르거나 미확정이면 **빈 dict**다. 모른다고 잠그면 조용히 아무것도 못
+       하는 상태가 된다 — 2026-09-10 의 링 덫과 같은 실수를 반복하지 않는다.
+       막는 것은 '층이 확정됐고, 그 층에 그 버튼이 없다'가 둘 다 참일 때만이다.
+    서버와 UI 가 같은 답을 쓰도록 **여기 하나만** 진실이다(/status 가 이걸 싣고,
+    /select 가 이걸로 거부한다). JS 에 규칙을 복제하지 않는다.
+    """
+    out = {}
+    if not floor or not confirmed:
+        return out
+    ok = _hall_tokens_for(floor)
+    if ok is not None:
+        for t, lab in (("^", "▲"), ("s", "▼")):
+            if t not in ok:
+                out[t] = f"{floor}층 승강장에는 '{lab}'가 없습니다 (종점)"
+    out[str(floor)] = f"이미 {floor}층입니다 — 그 층 버튼은 누를 이유가 없습니다"
+    return out
+
+
+def _target_block_reason(place, floor, confirmed, tok):
+    """그 타겟을 지금 고를 수 없는 이유(사람이 읽는 한 줄) 또는 None(= 고를 수 있다).
+    장소 모드 제한 + 층 파생 제한을 합친 것. /select 가 쓰는 최종 판정이다."""
+    t = (tok or "").strip()
+    if (place == "hall") != (t in ("^", "s")):
+        return "현재 장소 모드에서 선택할 수 없는 타겟"
+    return _floor_block_map(floor, confirmed).get(t)
+
+
+DASH_URL = "http://localhost:8080"   # 대시보드 — 이미 /armleft 를 이 주소로 호출한다
+
+
+def _floor_ask_dashboard(why=""):
+    """대시보드에 층을 한 번 물어본다(**보조** 경로) → 층 문자열 또는 None.
+
+    주 경로는 push 다 — 대시보드가 POST /switch_map 에 성공하면 POST /floor 로
+    밀어 넣는다. 그게 사용자 모델("내가 4층이라 설정하면 엘리베이터도 바뀐다")과
+    맞고, 폴링과 달리 **사람이 실제로 고른 순간에만** 값이 흐른다.
+    이 함수는 그 push 를 놓친 구간, 즉 **엘베앱이 나중에 켜졌을 때 1회**만 쓴다.
+
+    🔴 그래서 confirmed 를 대시보드가 주는 대로 받는다. 대시보드의 _current_floor 는
+       부팅 초기값이 "5" 하드코딩이므로(main.py:298), 확정 여부를 같이 받지 않으면
+       **틀린 층을 확정된 층처럼 쓰게 된다** — 그건 층을 모르는 것보다 나쁘다
+       (_lift_hall_for 독스트링).
+
+    실패를 조용히 넘기지 않는다. '못 받았다'와 '물어보지도 않았다'가 로그에서
+    구분돼야 한다 — 2026-09-10 에 "층=미수신" 한 줄만 있어서 진단이 늦었다.
+    블로킹하지 않는다: timeout 1.0s, 예외는 먹고 None.
+    """
+    node = _node_ref[0]
+
+    def _say(msg):
+        if node:
+            node._dlog("[PRIOR] " + msg + (f" [{why}]" if why else ""))
+
+    try:
+        import urllib.request
+        r = urllib.request.urlopen(f"{DASH_URL}/switch_map", timeout=1.0)
+        d = json.loads(r.read().decode() or "{}") or {}
+        fl, cf = d.get("floor"), bool(d.get("confirmed", False))
+    except Exception as e:
+        _say(f"층 조회 실패({e!r}) — 규정 높이({LIFT_PRIOR_CALL:.2f}) 그대로")
+        return None
+    if fl in (None, ""):
+        _say(f"층 조회 응답에 floor 가 없다 — 규정 높이({LIFT_PRIOR_CALL:.2f}) 그대로")
+        return None
+    with state_lock:
+        state["floor"] = str(fl)
+        state["floor_confirmed"] = cf
+    _say(f"층 조회 → {fl}층 "
+         + ("(확정)" if cf else "(잠정 — 대시보드도 아직 사람이 고른 값이 아니다. "
+                               "높이표·버튼 제한은 쓰지 않는다)"))
+    return str(fl)
 
 
 def _lift_row_prior(node, place, tok):
@@ -451,10 +546,15 @@ def _lift_row_prior(node, place, tok):
         # 아무것도 하지 않는다(기존 0.94 그대로) — 추측해서 움직이지 않는다.
         with state_lock:
             fl, cur = state.get("floor"), state["lift"]
-        h = _lift_hall_for(fl, tok)
+            cf = bool(state.get("floor_confirmed"))
+        # 위 _lift_prior_for 와 같은 기준 — 확정된 층에서만 표를 쓴다.
+        h = _lift_hall_for(fl if cf else None, tok)
         if h is None:
+            # '못 받았다'와 '받았지만 사람이 고른 값이 아니다'를 갈라서 남긴다.
+            # 2026-09-10 에 "층=미수신" 한 줄만 있어서 원인 추적이 늦었다.
+            _st = "미수신" if not fl else ("미확정" if not cf else f"{fl}층(표에 없음)")
             node._dlog(f"[PRIOR] 승강장 '{tok}' 높이를 모름 "
-                       f"(층={fl or '미수신'}) — 규정 높이({LIFT_PRIOR_CALL:.2f}) 그대로")
+                       f"(층={_st}) — 규정 높이({LIFT_PRIOR_CALL:.2f}) 그대로")
             return
         if cur is None:
             node._dlog(f"[PRIOR] lift 현재값 미수신 — 승강장 높이 보정 생략 "
@@ -796,8 +896,13 @@ state = {
     "place":        "hall", # 장소 모드: hall(홀, ▲▼만) / cab(차내, 숫자만) — 팔레트·prior 분기
     "scene":        None,   # 여정 단계 (0~5, SCENES 인덱스) — 조종 패드 티칭 구간 표시
     "scene_acc":    {"fwd_cm": 0.0, "rot_deg": 0.0},  # 현재 단계 누적 이동량 (티칭 기록)
-    "floor":        None,   # 대시보드가 알려주는 현재 층("1"~"5"). 승강장 버튼 높이를
-                            # 층별로 고르는 데만 쓴다. 못 받았으면 None → 기존 0.94.
+    "floor":        None,   # 대시보드가 알려주는 현재 층("1"~"5"). 승강장 버튼 높이와
+                            # 버튼 가용성(그 층에 있는 버튼)에 쓴다. 없으면 None → 0.94.
+    "floor_confirmed": False,  # 위 층이 **사람이 고른 값**인가. 대시보드의
+                            # _current_floor 는 부팅 초기값이 "5" 하드코딩이므로,
+                            # 층 숫자만 받으면 "우연히 맞은 5"와 "확정된 5"를 못 가른다.
+                            # False 면 층별 높이표도 버튼 제한도 쓰지 않는다
+                            # — _lift_hall_for 의 원칙(모르면 추측하지 않는다)대로.
     "scene_result": None,   # 마지막 자동 안무의 실행 상태·결과 (_scene_run_begin/_end 참고)
                             # — /scene 응답의 ok는 "명령 접수"라서 정렬 성공을 못 알린다.
                             #   대시보드가 /status로 이걸 읽어 성공/실패를 판단한다.
@@ -989,6 +1094,9 @@ HTML = """
     // 팔레트 = 홀(▲▼) + 차내(실물 배치 격자, /layout 서버 저장 — UI에서 편집)
     // 배치가 곧 "버튼 맵" 사전지식: 앵커 한 글자만 읽혀도 나머지 버튼 위치 확정에 쓰임
     let TARGETS = [];             // [표시라벨, 토큰] — poll()이 상태 갱신에 사용
+    // {토큰: 막는 이유} — **서버(/status)가 준 판정 그대로**. UI 는 규칙을 복제하지
+    // 않는다(복제하면 서버와 화면이 갈린다). 층이 미확정이면 서버가 빈 dict 를 준다.
+    let BLOCKED = {};
     let currentTarget = null;     // poll()에서 서버 상태로 갱신
     const KEY_HINT = {'1':'1','2':'2','3':'3','4':'4','5':'5','^':'6','s':'7'};
     function buildPalette(rows) {
@@ -1111,6 +1219,12 @@ HTML = """
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
     <button id="place-btn" onclick="togglePlace()"
             style="background:#246;color:#ade;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;font-weight:700;white-space:nowrap;font-size:0.85rem;">🏢 홀 (호출 ▲▼)</button>
+    <!-- 층 배지: 무엇을 근거로 버튼을 막는지 사람이 볼 수 있어야 한다(조용한 비활성 금지) -->
+    <span id="floor-badge"
+          style="background:#4a3a1a;color:#fd8;border-radius:6px;padding:6px 10px;font-weight:700;white-space:nowrap;font-size:0.85rem;">층 미확인</span>
+    <!-- 선택이 거부됐을 때 그 사유. 서버(/select)가 돌려준 말을 그대로 띄운다 -->
+    <span id="sel-note"
+          style="color:#fb7;font-size:0.8rem;white-space:nowrap;"></span>
     <div class="tgl amber" id="align-tgl" onclick="toggleBaseAlign()"
          title="바퀴 이동 허용 (전후진 정렬·회전) — OFF면 바퀴 절대 안 움직임">
       <span class="tgl-name">🚗 몸체이동 <span style="font-size:0.7rem;opacity:0.7;">⇧1</span></span>
@@ -1265,10 +1379,23 @@ HTML = """
       if (_motionErrTimer) clearTimeout(_motionErrTimer);
       _motionErrTimer = setTimeout(() => { el.style.display = 'none'; }, ms || 2500);
     }
+    let _selNoteTimer = null;
+    function showSelNote(msg) {
+      const n = document.getElementById('sel-note');
+      if (!n) return;
+      n.textContent = msg ? '⛔ ' + msg : '';
+      if (_selNoteTimer) clearTimeout(_selNoteTimer);
+      if (msg) _selNoteTimer = setTimeout(() => { n.textContent = ''; }, 5000);
+    }
     function selectButton(text) {
+      // 거부 사유를 화면에 띄운다 — 눌렀는데 아무 일도 안 일어나는 것이 제일 나쁘다.
+      // 판정은 서버가 한다(UI 만 막으면 옛 탭·직접 POST 가 통과한다).
       fetch('/select', {method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({text})});
+        body: JSON.stringify({text})})
+        .then(r => r.json())
+        .then(j => { if (j && j.ok === false) showSelNote(j.error || '선택 거부'); })
+        .catch(() => {});
     }
     function resetTarget() { fetch('/reset', {method:'POST'}); }
     function rotateCam(cam) {
@@ -1398,6 +1525,11 @@ HTML = """
       if (e.code === 'KeyA') { stepRot(1);   return; }
       if (e.code === 'KeyD') { stepRot(-1);  return; }
       const tok = KEY_TOK[e.code];
+      // 🔴 화면만 막고 키가 살아 있으면 최악이다 — 같은 판정(BLOCKED)으로 같이 막고,
+      //    왜 막혔는지 띄운다. (서버도 /select 에서 다시 막으므로 이건 1차 차단이다)
+      if (tok && BLOCKED[tok] && currentTarget !== tok) {
+        showSelNote(BLOCKED[tok]); e.preventDefault(); return;
+      }
       if (tok) { currentTarget === tok ? resetTarget() : selectButton(tok); }
     });
     function applyPitch() {
@@ -1559,17 +1691,34 @@ HTML = """
           plb.style.background = isHall ? '#246' : '#453';
           plb.style.color = isHall ? '#ade' : '#fd8';
         }
+        // 층 배지 — 확정/잠정/미확인을 구분해서 보여준다. 잠정이면 제한도 안 걸린다.
+        BLOCKED = s.blocked || {};
+        const fb = document.getElementById('floor-badge');
+        if (fb) {
+          const warm = !s.floor || !s.floor_confirmed;
+          fb.textContent = !s.floor ? '층 미확인'
+                         : (!s.floor_confirmed ? `층 ${s.floor}? (잠정)` : `${s.floor}층`);
+          fb.style.background = warm ? '#4a3a1a' : '#243';
+          fb.style.color      = warm ? '#fd8'    : '#9e9';
+          fb.title = warm
+            ? '대시보드에서 현재 층을 선택하면 확정된다. 미확정이면 버튼을 제한하지 않는다'
+            : `${s.floor}층 확정 — 그 층에 없는 버튼은 비활성된다`;
+        }
         // 고정 팔레트 상태 갱신: 인식됨=밝은색, 미인식=어둡게, 선택=빨강 테두리
         const detSet = new Set(s.detections.map(d => d.text));
         TARGETS.forEach(([label, tok], i) => {
           const b = document.getElementById('tgt-' + i);
           if (!b) return;
           const isArrow = (tok === '^' || tok === 's');
-          const allowed = isHall ? isArrow : !isArrow;
+          const blk = BLOCKED[tok];        // 층에서 파생된 제한 (서버 판정)
+          const allowed = (isHall ? isArrow : !isArrow) && !blk;
+          // 비활성은 '숨김'이 아니라 '흐리게 + 클릭 무시'다 — 버튼이 사라지면 배치가
+          // 흔들려 사람이 위치로 기억하던 것이 깨진다.
           b.disabled = !allowed;
           if (!allowed) {
             b.style.background = '#1a1a20'; b.style.color = '#444';
-            b.style.outline = 'none'; b.title = '현재 장소 모드에서 비활성';
+            b.style.outline = 'none';
+            b.title = blk || '현재 장소 모드에서 비활성';
             return;
           }
           const det = detSet.has(tok);
@@ -1755,7 +1904,40 @@ def status():
                    clearance_stat=s.get("clearance_stat"),
                    clear_f=clear_f, clear_b=clear_b,
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
+                   # 층과 그 층에서 못 누르는 버튼. **판정은 서버에만 있다** —
+                   # UI 는 이 dict 를 보고 흐리게 + 클릭/키 무시만 한다(규칙 복제 금지).
+                   floor=s.get("floor"),
+                   floor_confirmed=bool(s.get("floor_confirmed")),
+                   blocked=_floor_block_map(s.get("floor"),
+                                            s.get("floor_confirmed")),
                    door_base=s.get("door_base"))
+
+@app.route("/floor", methods=["POST"])
+def set_floor():
+    """대시보드가 층을 **밀어 넣는** 주 경로. POST /switch_map 성공 직후에 온다.
+
+    폴링이 아니라 push 인 이유는 _floor_ask_dashboard 독스트링에 적었다.
+    confirmed=False 로 오면 '잠정'이다 — 높이표도 버튼 제한도 쓰지 않는다.
+    """
+    b  = request.json or {}
+    fl = b.get("floor")
+    cf = bool(b.get("confirmed", False))
+    if fl in (None, ""):
+        return jsonify(ok=False, error="floor 없음"), 400
+    with state_lock:
+        prev, prev_cf = state.get("floor"), state.get("floor_confirmed")
+        state["floor"] = str(fl)
+        state["floor_confirmed"] = cf
+    node = _node_ref[0]
+    if node and (prev != str(fl) or prev_cf != cf):
+        # 전이 때만 찍는다 — 여정이 같은 층을 여러 번 밀어 넣을 수 있다.
+        _blk = _floor_block_map(str(fl), cf)
+        node._dlog(f"[PRIOR] 층 수신 → {fl}층 {'(확정)' if cf else '(잠정)'} "
+                   f"— 승강장 높이 {_lift_hall_for(str(fl), 's') or '표에 없음'}/"
+                   f"{_lift_hall_for(str(fl), '^') or '표에 없음'} (▼/▲) · "
+                   + (f"비활성 버튼 {sorted(_blk)}" if _blk else "버튼 제한 없음"))
+    return jsonify(ok=True, floor=str(fl), confirmed=cf)
+
 
 @app.route("/layout", methods=["GET", "POST"])
 def layout_route():
@@ -1803,8 +1985,18 @@ def select():
     text = request.json.get("text", "")
     with state_lock:
         _pl0 = state["place"]
-    if (_pl0 == "hall") != (text in ("^", "s")):
-        return jsonify(ok=False, error="현재 장소 모드에서 선택할 수 없는 타겟")
+        _fl0 = state.get("floor")
+        _cf0 = state.get("floor_confirmed")
+    # UI 만 막으면 POST /target 직접 호출이나 **열어 둔 옛 탭**이 통과한다.
+    # 그래서 판정은 여기가 최종이다. 거부 사유는 반드시 로그로 — 조용한 거부 금지.
+    _why = _target_block_reason(_pl0, _fl0, _cf0, text)
+    if _why:
+        _nd = _node_ref[0]
+        if _nd:
+            _nd._dlog(f"[TARGET] ⛔ '{text}' 선택 거부 — {_why} "
+                      f"(장소={_pl0} 층={_fl0 or '미수신'}"
+                      f"{'' if _cf0 else '·미확정'})")
+        return jsonify(ok=False, error=_why)
     with state_lock:
         state["target_text"] = text
         state["phase"]       = "TRACK"
@@ -2264,6 +2456,9 @@ def scene_set():
     if _fl is not None:
         with state_lock:
             state["floor"] = str(_fl)
+            # 층 숫자만 믿지 않는다 — 확정 여부가 같이 와야 높이표를 쓸 수 있다.
+            # 구버전 대시보드(키 없음)는 '잠정'으로 떨어진다: 모르면 추측 안 한다.
+            state["floor_confirmed"] = bool(_body.get("floor_confirmed", False))
     # move=False → 단계만 전환하고 자동 안무는 띄우지 않는다. 다른 주체(Nav2)가
     # 이미 그 자리로 데려다 놨을 때 쓴다. 자세 전환(이동 자세·팔 수납)·누적 리셋·
     # 매듭 로그는 그대로 한다 — 단계 기록이 비면 나중에 로그를 읽을 수 없다.
@@ -6186,6 +6381,10 @@ def main():
     rclpy.init()
     node = ElevatorTracker()
     _node_ref[0] = node
+
+    # 층 보조 폴링 1회 — push(POST /floor)를 놓친 구간(엘베앱이 나중에 켜진 경우)만
+    # 메운다. 스레드로 돌려 기동을 막지 않는다(대시보드가 아직 안 떴을 수도 있다).
+    threading.Timer(2.0, lambda: _floor_ask_dashboard("엘베앱 기동")).start()
 
     # 진단 계측 부착 (기존 노드에 진단용 구독/타이머만 덧붙임 — 로직 변경 없음)
     if _diag is not None and _diaglog is not None:

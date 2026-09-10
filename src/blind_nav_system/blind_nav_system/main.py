@@ -296,6 +296,12 @@ _FLOOR_MAPS = {
     "1": str((THIS_DIR / "../maps/floor1.yaml").resolve()),
 }
 _current_floor = "5"   # 런치 기본 지도 = all.yaml(5층)
+# 🔴 위 값이 "사람이 고른 층"인지 "부팅 하드코딩"인지 구분하는 플래그.
+# 둘을 같은 변수로 두면 5층이 **우연히 맞은 것**과 진짜로 확정된 것을 못 가른다.
+# POST /switch_map 이 성공할 때만 True 가 된다(사람이 층을 고르는 유일한 경로).
+# 미확정이면: 엘베 여정을 거부하고(▲▼ 를 거꾸로 누르게 된다), 엘베앱에는
+# confirmed=False 로 알려 층별 높이표·버튼 제한을 **쓰지 않게** 한다.
+_floor_confirmed = False
 _map_client = None     # /map_server/load_map 서비스 클라이언트
 _init_pub   = None     # /initialpose 퍼블리셔 (AMCL 재정위치용)
 
@@ -866,9 +872,11 @@ def switch_map():
     """지도(층) 전환 — 재시작 없이 map_server에 load_map 서비스 호출.
     init_exit=true면 전환 직후 AMCL 초기 위치를 '엘리베이터 하차지점'으로 설정
     (두 층 지도가 동일 사본·동일 origin이라 좌표계가 같음 → 좌표 재사용 가능)."""
-    global _current_floor
+    global _current_floor, _floor_confirmed
     if request.method == "GET":
-        return jsonify(floor=_current_floor)
+        # confirmed 를 같이 준다 — 받는 쪽이 "사람이 고른 값"인지 알아야
+        # 추측할지 말지를 스스로 정할 수 있다(엘베앱 보조 폴링이 이걸 본다).
+        return jsonify(floor=_current_floor, confirmed=_floor_confirmed)
     data  = request.json or {}
     floor = str(data.get("floor", ""))
     path  = _FLOOR_MAPS.get(floor)
@@ -890,8 +898,16 @@ def switch_map():
         code = getattr(res, "result", "timeout")
         _log("MAP", f"지도 전환 실패 (result={code})")
         return jsonify(ok=False, error=f"load_map 실패 ({code})")
-    _current_floor = floor
+    _current_floor   = floor
+    _floor_confirmed = True      # 사람(또는 여정)이 실제로 고른 값이 됐다
     _log("MAP", f"🗺 지도 전환 완료 → {floor}층 ({os.path.basename(path)})")
+    # 엘베앱에 층을 **밀어 넣는다**(폴링 아님). 사용자 모델이 "내가 4층이라 설정하면
+    # 지도도 바뀌고 엘리베이터도 바뀐다" 이므로, 고르는 순간에 흘러야 한다. 다음 씬
+    # 전환을 기다릴 이유가 없다. 여정의 하차 후 층 갱신(/switch_map init_exit)도
+    # 같은 경로라 공짜로 따라온다.
+    # 엘베앱이 꺼져 있으면 _elev_post 가 조용히 실패한다 — 그쪽은 기동 시 1회
+    # 보조 폴링(GET /switch_map)으로 메우므로 여기서 재시도하지 않는다.
+    _elev_post("/floor", {"floor": floor, "confirmed": True}, timeout=2)
     if data.get("init_exit"):
         p = _load_exit_point()
         if p and _init_pub is not None:
@@ -1632,7 +1648,10 @@ def _elev_scene(n, move=True):
     # 것과 같다(상/하행 버튼 선택 `up = int(dest_floor) > int(_current_floor)`, 지도 전환).
     # move=False → 단계 표시·누적 리셋·자세 전환만. 자동 안무는 띄우지 않는다
     # (다른 주체가 이미 그 자리로 데려다 놨을 때. 예: ② 를 Nav2 로 가는 경로).
-    r = _elev_post("/scene", {"n": int(n), "floor": _current_floor, "move": bool(move)},
+    # floor_confirmed 를 같이 보낸다 — 층 값만 보내면 받는 쪽이 "부팅 초기값 5"와
+    # "사람이 고른 5"를 구분할 수 없다.
+    r = _elev_post("/scene", {"n": int(n), "floor": _current_floor,
+                              "floor_confirmed": _floor_confirmed, "move": bool(move)},
                    timeout=20)
     if r is None:
         return False, None
@@ -2278,6 +2297,13 @@ def _auto_run(dest):
         with _auto_lock:
             _AUTO["dest_floor"] = dest_floor
 
+        # 🔴 층이 미확정이면 이 아래 판정이 전부 어긋난다 — 같은 층 여부도, ▲▼도.
+        #    같은 층 주행은 거부하지 않는다(여기서 막으면 평소 복도 주행이 통째로
+        #    멈춘다). 엘베 여정만 거부한다 — 거기서만 틀린 층이 "반대 버튼을 누른다"가
+        #    되기 때문이다. 같은 층 쪽은 사실을 로그로 남기고 진행한다.
+        if not _floor_confirmed:
+            _log("AUTO", f"⚠ 현재 층 미확정(부팅 초기값 {_current_floor}층 그대로) — "
+                         f"'{dest}'={dest_floor}층 판정을 그 값으로 한다")
         # 같은 층이면 엘베 없이 바로
         if dest_floor == _current_floor:
             with _auto_lock:
@@ -2294,6 +2320,17 @@ def _auto_run(dest):
 
         with _auto_lock:
             _AUTO["mode"] = "elevator"
+        # 🔴 미확정 상태로 엘베를 타면 안 된다. 1층에서 켜고 4층으로 가면
+        #    up = 4 > 5 = False 가 되어 **▼를 누른다**. 정상 여정을 한 번 돌면
+        #    하차 시 /switch_map 이 추적하므로 구멍은 '부팅 직후 첫 여정'이다.
+        #    5층에서만 켠다는 것은 운영 관행이고 코드 보증이 아니다.
+        if not _floor_confirmed:
+            _auto_notify("지금 몇 층인지 확인되지 않아 엘리베이터를 쓸 수 없습니다. "
+                         "대시보드에서 현재 층을 먼저 선택해 주세요")
+            _auto_set("오류", f"🚨 현재 층 미확정 — 엘베 여정 거부 (부팅 초기값 "
+                              f"{_current_floor}층 그대로다). 대시보드에서 층을 "
+                              "선택하면 풀린다", phase="board")
+            return
         up = int(dest_floor) > int(_current_floor)
         dir_txt = "▲ 상행" if up else "▼ 하행"
         _auto_set("시작", f"{dest}={dest_floor}층 / 현재 {_current_floor}층 → 엘베 {dir_txt}",
