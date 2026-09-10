@@ -60,6 +60,8 @@ _PULL_TRIG  = 4095
 _QUICK_SEC  = 0.80
 _GRIP_RESET = 3158
 _DEBOUNCE   = 0.25
+_SERIAL_BACKOFF_MAX = 60.0    # 재시도 간격 상한(초) — 로그 홍수 방지용 백오프
+_SERIAL_SUM_SEC     = 600.0   # 같은 실패가 계속될 때 요약 1줄을 남기는 주기(초)
 
 # ── ROS2 cmd_vel ──────────────────────────────────────────────────────────────
 # FastDDS 공유메모리 비활성화(UDP 강제) — 어느 터미널에서 시작해도 적용되도록
@@ -1042,13 +1044,39 @@ def battery_status():
 _READY_THRESH = {"amcl": 30.0, "battery": 15.0, "handle": 5.0, "nav2": 12.0, "elev_app": 12.0,
                  "gripper_camera": 12.0}
 
+# 🔴 "한 번도 안 왔다"를 영원히 `unknown` 으로 두면 **정상 초기 상태와 영구 고장이 같은
+#    표시**가 된다. 2026-09-10 에 그 값을 치렀다 — 손잡이 시리얼이 7일 동안 한 번도
+#    안 붙어 `"시리얼 연결 실패"` 가 10,307줄 쌓였는데, 화면의 손잡이 pill 은 첫날부터
+#    "모름"이었고 아무도 고장으로 읽지 않았다. 당김·버튼 이벤트는 그 7일간 0건이다.
+#    (실제 꽂힌 FTDI 는 AG0KRCTV/AG0KSATI = Stretch 자기 dynamixel 이고, 코드가 찾는
+#     A5069RR4 는 이 로봇에 없다. 포트 고정은 별 건 — wip 의 udev 초안 참고.)
+# ⇒ 기동 직후 짧은 유예 동안만 `unknown`, 그 뒤로는 `bad` 다.
+_BOOT_MONO = time.monotonic()
+_READY_GRACE_MULT = 2.0    # 유예 = 임계값 × 이 배수
+_READY_GRACE_MIN  = 10.0   # 다만 최소 이만큼은 기다린다(기동 직후 혼잡)
+
+
+def _ready_grace(key) -> float:
+    return max(_READY_GRACE_MIN, _READY_THRESH[key] * _READY_GRACE_MULT)
+
+
 def _readiness_signal(key, label):
+    """콜백형 신호 판정. 🔴 **"연결된 적 없음"과 "연결됐다 끊김"을 갈라서 말한다** —
+    사람에게 요구하는 행동이 다르다(꽂아라 vs 확인해라)."""
     updated_at = _ready[key]
     if updated_at <= 0.0:
-        return {"status": "unknown", "age_sec": None, "detail": f"{label} 미수신"}
+        since = time.monotonic() - _BOOT_MONO
+        grace = _ready_grace(key)
+        if since <= grace:
+            return {"status": "unknown", "age_sec": None,
+                    "detail": f"{label} 미수신 (기동 {since:.0f}s — {grace:.0f}s 까지 대기)"}
+        return {"status": "bad", "age_sec": None,
+                "detail": f"{label} **한 번도 수신 안 됨** ({since / 60:.0f}분째) — "
+                          "연결·포트를 확인하세요"}
     age = time.monotonic() - updated_at
     if age > _READY_THRESH[key]:
-        return {"status": "bad", "age_sec": round(age, 1), "detail": f"{label} 신호 끊김(stale)"}
+        return {"status": "bad", "age_sec": round(age, 1),
+                "detail": f"{label} 신호 끊김 — 받다가 {age:.0f}s 무소식"}
     return {"status": "ok", "age_sec": round(age, 1), "detail": f"{label} 정상"}
 
 def _readiness_amcl():
@@ -2380,6 +2408,16 @@ def _auto_run(dest):
     # 다른 데서 True로 만들면 근거 없는 안전 주장이 된다.
     arm_safe = True     # 여정 시작 시점의 "가정" — 잰 값이 아니다. 직전에
                         # 운영자가 팔을 뻗어둔 채 여정을 시작하면 이 가정은 틀린다.
+    # 🔴 손잡이가 죽은 채로 여정을 시작하면 **사람이 로봇을 멈출 수단이 없는 상태로**
+    #    도는 것이다(당김 = 정지 요청). 지금은 막지 않는다 — 실기가 이 상태로 돌고
+    #    있고 막으면 리허설이 통째로 불가능해진다. 대신 **조용히 넘어가지 않는다.**
+    #    무인 운전 3단계에서는 이것을 하드 게이트로 승격해야 한다.
+    _h = _readiness_signal("handle", "손잡이")
+    if _h["status"] != "ok":
+        _log("AUTO", f"⚠ 손잡이 신호 없음({_h['detail']}) — 여정 중 당김(정지 요청)을 "
+                     "받을 수 없다. 여정은 진행한다(1단계 경고)")
+        _auto_notify("손잡이 신호가 없습니다. 여정 중 손잡이를 당겨도 "
+                     "정지 요청이 전달되지 않습니다")
     try:
         with _auto_lock:
             _AUTO.update(active=True, dest=dest, cancel=False, force=False,
@@ -3387,13 +3425,44 @@ def serial_loop():
     last_pull_t = 0.0
     ser = None
 
+    # 🔴 재시도 로그를 접는다. 2026-09-10 실측: 3초마다 같은 줄을 찍어 7일 누적
+    #    10,307줄(세션 최대 2,474줄)이 됐는데 **아무 정보도 못 줬다** — 정보가 없어서가
+    #    아니라 같은 정보가 너무 많아서다. 첫 실패 1줄 + 사유가 바뀔 때 + 주기 요약만.
+    _wait, _n, _last_msg, _last_sum = 3.0, 0, None, time.monotonic()
+    _t0 = time.monotonic()
+    # 장치 경로가 **없다가 생기면** 백오프를 즉시 되감는다 — 사람이 손잡이를 꽂은
+    # 순간이 그것이고, 그때 최대 60초를 기다리게 하면 "꽂았는데 안 되네"가 된다.
+    _path_seen = os.path.exists(SERIAL_PORT)
     while ser is None:
         try:
             ser = serial.Serial(SERIAL_PORT, BAUD, timeout=1)
-            _log("ARD", f"시리얼 연결됨: {SERIAL_PORT}")
+            _log("ARD", f"시리얼 연결됨: {SERIAL_PORT}"
+                        + (f" — 실패 {_n}회 / {(time.monotonic() - _t0) / 60:.0f}분 뒤 복구"
+                           if _n else ""))
         except Exception as e:
-            _log("ARD", f"시리얼 연결 실패({e}), 3초 후 재시도...")
-            time.sleep(3)
+            _n += 1
+            _msg = str(e)
+            if _n == 1:
+                _log("ARD", f"🚨 손잡이 시리얼 연결 실패 — {SERIAL_PORT} ({_msg}). "
+                            f"재시도는 계속하되 로그는 접는다 "
+                            f"(3s→{_SERIAL_BACKOFF_MAX:.0f}s 백오프 · "
+                            f"{_SERIAL_SUM_SEC / 60:.0f}분마다 1줄). "
+                            "준비바의 '손잡이' 칸이 고장 여부를 말한다")
+            elif _msg != _last_msg:
+                _log("ARD", f"손잡이 시리얼 실패 **사유 변경**({_n}회째): {_msg}")
+            elif time.monotonic() - _last_sum >= _SERIAL_SUM_SEC:
+                _last_sum = time.monotonic()
+                _log("ARD", f"손잡이 시리얼 여전히 안 붙는다 — {_n}회 누적, "
+                            f"{(time.monotonic() - _t0) / 60:.0f}분째 (대기 {_wait:.0f}s)")
+            _last_msg = _msg
+            time.sleep(_wait)
+            _now_seen = os.path.exists(SERIAL_PORT)
+            if _now_seen and not _path_seen:
+                _log("ARD", f"장치 경로가 나타났다({SERIAL_PORT}) — 백오프 되감고 즉시 재시도")
+                _wait = 3.0
+            else:
+                _wait = min(_wait * 2.0, _SERIAL_BACKOFF_MAX)
+            _path_seen = _now_seen
 
     try:
         while True:
