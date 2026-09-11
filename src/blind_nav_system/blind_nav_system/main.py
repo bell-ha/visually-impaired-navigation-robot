@@ -2704,7 +2704,7 @@ def _press_or_pass() -> bool:
 
 def _auto_run(dest):
     """반자동 여정 상태머신 (백그라운드 스레드)."""
-    global _elev_started_mono, _rescue_hold, _floor_confirmed
+    global _elev_started_mono, _rescue_hold, _floor_confirmed, _current_floor
     # 지난 여정의 구조 유지 플래그를 물려받지 않는다 — 앱을 끄지 않고 새 여정을
     # 시작하면 True인 채 상속돼 이번 여정의 finally도 반납을 건너뛴다(가드가 계속
     # 꺼진 채 남는 #91 재발). 이건 해제(release)가 아니라 진입 시 상태 위생이고,
@@ -2957,6 +2957,20 @@ def _auto_run(dest):
             _exit_failed(ex_reason, ex_cm, ex_res)
             return
 
+        # 🔴 층 확정 — 근거는 **사용자의 하차 확인**이다(2026-09-11 사용자 결정).
+        #    사용자: "내가 1층으 가기로 했으면 내가 어느 버튼을 눌러 내릴떄는 거기는 무조건 1층인거야.
+        #            사람이 귀로 듣고 내리니까"
+        #    '이동중' 대기에서 사람이 도착층 안내를 듣고 '다음'을 눌렀고, ⑥ 이 엘리베이터에서 나왔다
+        #    (done·fallback — 나오지 못한 경우는 위에서 _exit_failed 로 끝났다). 그러니 여기는 목적층이다.
+        #    지도 전환 결과를 근거로 삼지 않는다 — 전 층 yaml 이 같은 지도(all.pgm)라 전환 성공이 층을
+        #    말해 주지 않고, 전환이 실패해도 사람은 목적층에 내렸다.
+        #    지도 전환·리스 반납 **앞**에 둔다 — 반납이 실패해 여정이 끊겨도 로봇은 이미 목적층 밖이다.
+        #    이렇게 해야 다음 여정의 ▲▼ 판정이 옛 층으로 뒤집히지 않는다(verifier S3 재현 경로).
+        _current_floor   = dest_floor
+        _floor_confirmed = True
+        _log("AUTO", f"🗺 층 → {dest_floor}층 확정(사용자 하차 확인)")
+        _elev_post("/floor", {"floor": dest_floor, "confirmed": True}, timeout=2)   # /switch_map 과 같은 통보
+
         # 리스 반납 — 지도전환·AMCL초기화·목적지주행은 가드(라이다 충돌가드)가
         # 켜진 상태로 시작해야 함. 앱 종료(8단계)까지 리스를 끌고 가지 않는다.
         if not _grant_elev_lease(False, "하차 완료"):
@@ -2980,19 +2994,18 @@ def _auto_run(dest):
         #    _current_floor·확정이 옛 층에 남아 **다음 여정의 ▲▼ 판정이 확정 플래그를 통과한다.**
         #    확인 근거는 **우리가 보낸 이 POST 의 성공 응답**뿐이다. GET /switch_map 의
         #    loaded_floor 는 근거가 못 된다 — 층 지도가 전부 같은 이미지라 틀린 층도 일치로 보인다.
-        #    시간초과·예외·본문 없음은 '모름'이고, 모르면 확정을 내린다. (핸들러가 시간초과 뒤에
-        #    끝나 확정을 다시 올리는 경우는 load_map 이 실제로 성공했을 때뿐이라 거짓 확정이 아니다.
-        #    여정은 어느 쪽이든 아래에서 목적지 주행 전에 멈춘다.)
+        #    시간초과·예외·본문 없음은 '모름'이다. 모르면 목적지 주행 전에 멈춘다(아래).
+        #    층 확정은 내리지 않는다 — 층은 위에서 사용자 하차 확인으로 이미 정해졌고, 지도 전환
+        #    실패는 층이 아니라 지도·map_server 쪽 문제다(C2b).
         _sw_body, _sw_err = _http_self_json("/switch_map", {"floor": dest_floor},
                                             _SWITCH_MAP_TIMEOUT)
         _sw_ok = bool(_sw_body) and _sw_body.get("ok") is True \
             and str(_sw_body.get("floor")) == str(dest_floor)
         _sw_why = ""
         if not _sw_ok:
-            _floor_confirmed = False
             _sw_why = (_sw_body or {}).get("error") or _sw_err or f"응답 이상 {_sw_body}"
-            _log("AUTO", f"🚨 {dest_floor}층 지도 전환을 확인하지 못했다 — {_sw_why}. 현재 층 확정 "
-                         f"해제(_current_floor={_current_floor} 는 그대로, 확정=False)")
+            _log("AUTO", f"🚨 {dest_floor}층 지도 전환을 확인하지 못했다 — {_sw_why}. 층은 사용자 "
+                         f"하차 확인으로 {_current_floor}층 확정 그대로다")
         time.sleep(2)
 
         # 8) 엘베앱 OFF (제어권 회수 + 종료)
@@ -3001,14 +3014,14 @@ def _auto_run(dest):
         time.sleep(1)
 
         if not _sw_ok:
-            # 층을 모르는 채 목적지로 가지 않는다. 앱 종료(8)까지는 정상 경로와 같게 두었다 —
+            # 지도 전환을 확인 못 한 채 목적지로 가지 않는다. 앱 종료(8)까지는 정상 경로와 같게 두었다 —
             # 리스는 이미 반납했고 로봇은 엘리베이터 밖이라, 앱을 남겨 둘 이유가 없다.
             # 음성은 새로 만들지 않는다 — 같은 단계(하차 뒤 목적지 출발 불가)의 기존 문구를 쓴다.
             _auto_notify("엘리베이터에서 나왔지만 목적지로 출발할 수 없습니다. "
                          "도움을 요청하세요")
-            _auto_set("오류", f"🚨 {dest_floor}층 지도 전환 확인 실패({_sw_why}) — 층 확정 해제, "
-                              "목적지 주행 거부(하차는 완료). 대시보드에서 현재 층을 다시 "
-                              "선택하세요", phase="drive")
+            _auto_set("오류", f"🚨 {dest_floor}층 지도 전환 확인 실패({_sw_why}) — 목적지 주행 거부 "
+                              f"(하차는 완료, 층은 {dest_floor}층 확정). 대시보드에서 지도 전환을 "
+                              "다시 하세요", phase="drive")
             return
 
         # 9) 목적지 주행 (자동)

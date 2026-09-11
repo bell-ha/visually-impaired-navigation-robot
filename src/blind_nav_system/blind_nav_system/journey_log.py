@@ -429,9 +429,14 @@ class JourneyRecorder:
             stt = dict(state or {})
             # 끝난 층 vs 목적층. S3 는 outcome=done 인데 floor 5 / dest 1 이었다 — 결말만 보면 성공이다.
             fl, dfl = stt.get("floor"), stt.get("dest_floor")
+            conf = stt.get("floor_confirmed")
+            # 층이 미확정(False)이면 '일치'라고 적지 않는다(null) — 부팅 초기값 5층과 목적층 5가 같아
+            # 보이는 것이 가장 위험한 경우다(verifier: 미확정 같은 층 여정이 match=true 로 찍혔다).
             floor_check = {"floor": fl, "dest_floor": dfl, "mode": stt.get("mode"),
-                           "match": (str(fl) == str(dfl)) if (fl not in (None, "") and
-                                                             dfl not in (None, "")) else None}
+                           "floor_confirmed": conf,
+                           "match": (str(fl) == str(dfl))
+                           if (conf is not False and fl not in (None, "") and dfl not in (None, ""))
+                           else None}
             self._put(run, "run_end",
                       {"exit_cause": cause, "outcome": outcome, "last_step": run.last_step,
                        "dur_s": round(time.monotonic() - run.mono0, 1),
