@@ -106,6 +106,11 @@ def dur(sec):
     return f"{sec:.1f}s" if sec < 60 else f"{int(sec // 60)}m{sec % 60:04.1f}s"
 
 
+def unit(v, u=""):
+    """값에 단위를 붙인다. 값이 없으면 "—"(예전엔 "Nones"·"Nonem" 으로 찍혔다)."""
+    return "—" if v is None else f"{v}{u}"
+
+
 def short(v, n=80):
     s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
     return s if len(s) <= n else s[:n - 1] + "…"
@@ -455,9 +460,10 @@ def report_one(path, args):
             sr = sh.get("scene_result") or {}
             P(f"   {hms(h.get('ts'))} {wpad(h.get('confirm_id') or '-', 22)} {h.get('kind'):14} "
               f"대기 {dur(h.get('waited_s'))}  ready={sh.get('ready')} lock_shape={sh.get('lock_shape')} "
-              f"door_open={sh.get('door_open')}(본지 {sh.get('door_open_seen_s')}s, 점프 {sh.get('clear_jump_m')}m) "
-              f"씬결과={sr.get('ok')}/{sr.get('reason')} d={sh.get('d_m')} dyaw={sh.get('dyaw_deg')} "
-              f"elev_age={sh.get('elev_age_s')}s")
+              f"door_open={sh.get('door_open')}(본지 {unit(sh.get('door_open_seen_s'), 's')}, "
+              f"점프 {unit(sh.get('clear_jump_m'), 'm')}) "
+              f"씬결과={sr.get('ok')}/{sr.get('reason')} d={unit(sh.get('d_m'), 'm')} "
+              f"dyaw={unit(sh.get('dyaw_deg'), '°')} elev_age={unit(sh.get('elev_age_s'), 's')}")
     if by["blocked"]:
         P("■ 여정 중 조작 거부")
         for b in by["blocked"]:
@@ -480,7 +486,7 @@ def report_one(path, args):
             acc = (am.get("elev") or {}).get("scene_acc")
             P(f"   {hms(am.get('ts'))} {wpad(am.get('where') or '?', 16)} x={ap.get('x')} y={ap.get('y')} "
               f"yaw={ap.get('yaw_deg')} σx={_sd(cv.get('xx'))} σy={_sd(cv.get('yy'))} "
-              f"σyaw={_sd(cv.get('yawyaw'), True)} pose_age={ap.get('pose_age_s')}s"
+              f"σyaw={_sd(cv.get('yawyaw'), True)} pose_age={unit(ap.get('pose_age_s'), 's')}"
               + (f" scene_acc={acc}" if acc else ""))
     # 7. 코드 정체
     P("■ 코드 정체")
