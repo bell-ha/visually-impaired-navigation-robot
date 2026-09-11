@@ -49,7 +49,7 @@
 | | |
 |---|---|
 | <img src="docs/images/coex-demo.gif" width="380"/> | <img src="docs/images/coex-explain.jpg" width="380"/> |
-| 부스에서 관람객에게 시연하는 모습 | 로봇 화면을 짚어 가며 설명한다 |
+| 부스에서 관람객에게 시연하는 모습_1 | 부스에서 관람객에게 시연하는 모습_2 |
 
 <div align="center">
 <sub>ITRC 인재양성대전(코엑스). 로봇 화면에 지도와 주행 로그가 함께 뜬다</sub>
