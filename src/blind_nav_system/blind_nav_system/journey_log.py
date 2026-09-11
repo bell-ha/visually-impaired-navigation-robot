@@ -684,14 +684,20 @@ class JourneyRecorder:
             pass
 
     def reject(self, dest, error, **fields):
-        """시작 자체가 거부된 요청 — _rejected.jsonl 에 한 줄. 실행 파일은 만들지 않는다."""
+        """거부된 요청 — _rejected.jsonl 에 한 줄(시작 거부·여정 중 조작 거부 모두).
+        여정이 도는 중이면 그 실행 파일에도 'blocked' 한 줄 — 한 건 보기에서 '누가 무엇을 눌렀다가
+        막혔나'가 보이게."""
         try:
+            run = self._run
             rec = {"v": SCHEMA_V, "t": None, "ts": time.time(),
                    "mono": round(time.monotonic(), 3), "ev": "reject", "dest": dest,
-                   "error": error, "git_head": (self.git or {}).get("head")}
+                   "error": error, "git_head": (self.git or {}).get("head"),
+                   "run": run.id if run is not None else None}
             rec.update(fields)
             self._ensure_writer()
             self._q.put_nowait((None, rec, None))
+            if run is not None:
+                self._put(run, "blocked", dict(fields, dest=dest, error=error))
         except Exception:
             pass
 

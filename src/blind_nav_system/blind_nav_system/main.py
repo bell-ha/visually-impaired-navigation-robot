@@ -902,6 +902,10 @@ def _set_elev_authority(granted: bool, reason: str = "", quiet: bool = False):
 @app.route("/elev_authority", methods=["GET", "POST"])
 def elev_authority_route():
     if request.method == "POST":
+        # 조회(GET)는 열어 둔다 — UI 가 상태를 계속 읽는다. 바꾸는 것만 막는다.
+        _g = _journey_gate("엘베 제어권 토글")
+        if _g:
+            return _g
         granted = bool((request.json or {}).get("granted", False))
         # _set_elev_authority 직접호출 금지 — 하트비트 renewer가 안 켜져서 수동 grant가
         # deadman(TTL 6s)에 회수당함. _grant_elev_lease 경유해야 renewer 시작/중단됨.
@@ -913,6 +917,9 @@ def elev_authority_route():
 @app.route("/mode", methods=["POST"])
 def set_mode():
     global _manual_mode, _manual_active
+    _g = _journey_gate('수동/자동 모드 전환')
+    if _g:
+        return _g
     data = request.json or {}
     _manual_mode = data.get("manual", False)
     if _manual_mode:
@@ -1205,6 +1212,11 @@ def readiness():
 
 @app.route("/robot_speed", methods=["POST"])
 def set_robot_speed():
+    # 여정 중에는 잠근다 — 실행 도중 컨트롤러 속도가 바뀌면 그 실행의 기록이 해석 불가가 된다.
+    # (실제 값을 기록하는 쪽은 ros2 param get 을 새로 불러야 해서 택하지 않았다)
+    _g = _journey_gate('로봇 속도 변경')
+    if _g:
+        return _g
     speed = float(request.json.get("speed", 0.26))
     speed = max(0.10, min(0.50, speed))
     subprocess.run(
@@ -1266,6 +1278,9 @@ def armleft_status():
 
 @app.route("/stow_arm", methods=["POST"])
 def stow_arm():
+    _g = _journey_gate('팔 수납')
+    if _g:
+        return _g
     _stow_arm()
     _log("WEB", "팔 수납 (웹 트리거)")
     return jsonify(ok=True)
@@ -1428,6 +1443,9 @@ def elevator_app_status():
 @app.route("/elevator_app", methods=["POST"])
 def elevator_app():
     global _elev_lease_held, _lease_renewer_thread, _elev_started_mono, _rescue_hold, _elev_no_ocr
+    _g = _journey_gate('엘베앱 켜기/끄기')
+    if _g:
+        return _g
     data    = request.json or {}
     desired = data.get("running")     # True=시작, False=종료, None=토글
     running = _elev_app_running()
@@ -2449,6 +2467,35 @@ def _auto_abort_elev():
     _auto_set("취소", "여정 취소됨 — 엘베앱 종료·제어권 회수")
     _http_self("/elevator_app", {"running": False})
 
+# ── 여정 활성 중 서버측 잠금 (2026-09-11 advisor §6) ────────────────────────────────
+# UI 비활성만으로는 막히지 않는다 — 키보드 단축키(숫자키 5 = 엘베앱 토글), 열어 둔 옛 탭,
+# 직접 POST 가 그대로 통과한다. 캐빈 안에서 엘베앱이 꺼지면 조종 패드가 사라지고, ② Nav2 구간에
+# 제어권을 켜면 바퀴 주인이 둘이 되고, 장소 클릭은 여정의 Nav2 목표를 가로챈다.
+# 여정 스레드 **자신의** 호출(_http_self·_http_self_json → /elevator_app 등)은 막으면 안 된다
+# (8단계 엘베앱 종료·취소 정리가 스스로 막힌다). 그래서 내부 호출에만 붙는 헤더 토큰으로
+# 가른다. 토큰은 프로세스마다 새로 만든다 — 밖에서 맞출 수 없다.
+_JOURNEY_INTERNAL_HDR   = "X-Journey-Internal"
+_JOURNEY_INTERNAL_TOKEN = os.urandom(16).hex()
+
+
+def _journey_gate(what):
+    """자동 여정이 도는 동안 여정을 흔드는 조작이면 (응답, 409), 아니면 None.
+
+    여정이 끝나면(_AUTO.active=False) 전부 열린다 — ⑥ 하차 미완료의 구조 경로
+    (_rescue_hold: 엘베앱 패드·제어권 토글)는 여정 스레드가 끝난 뒤에 쓰는 것이라 막히지 않는다.
+    멈추는 경로(/auto_cancel)는 여기에 걸지 않는다."""
+    if not _AUTO.get("active"):
+        return None
+    if request.headers.get(_JOURNEY_INTERNAL_HDR) == _JOURNEY_INTERNAL_TOKEN:
+        return None
+    step = _AUTO.get("step", "")
+    err = "자동 여정 진행 중 — 취소 후 다시"
+    _log("AUTO", f"⛔ 여정 중 조작 거부 — {what} [{step}] ({request.remote_addr})")
+    _jr("reject", _AUTO.get("dest"), err, what=what, path=request.path, step=step,
+        remote_addr=request.remote_addr)
+    return jsonify(ok=False, error=err), 409
+
+
 @_jr_traced("http_self")
 def _http_self(path, payload):
     """대시보드 자기 자신(8080)의 라우트를 호출 (지도전환 등 재사용)."""
@@ -2457,7 +2504,9 @@ def _http_self(path, payload):
         urllib.request.urlopen(urllib.request.Request(
             f"http://localhost:8080{path}",
             data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"}, method="POST"), timeout=10)
+            headers={"Content-Type": "application/json",
+                     _JOURNEY_INTERNAL_HDR: _JOURNEY_INTERNAL_TOKEN},   # 여정 자신의 호출
+            method="POST"), timeout=10)
         return True
     except Exception as e:
         _log("AUTO", f"{path} 호출 실패: {e}")
@@ -2485,7 +2534,9 @@ def _http_self_json(path, payload, timeout):
             r = urllib.request.urlopen(urllib.request.Request(
                 f"http://localhost:8080{path}",
                 data=json.dumps(payload).encode(),
-                headers={"Content-Type": "application/json"}, method="POST"), timeout=timeout)
+                headers={"Content-Type": "application/json",
+                         _JOURNEY_INTERNAL_HDR: _JOURNEY_INTERNAL_TOKEN},   # 여정 자신의 호출
+                method="POST"), timeout=timeout)
             raw = r.read()
         except urllib.error.HTTPError as he:
             raw = he.read()
@@ -3237,6 +3288,9 @@ def goto():
     """장소 목록 클릭 → 즉시 출발 (2026-07-24 사용자 결정: 확인 절차 생략).
     interface의 /goto 직행 통로 사용 — GPT·별칭 해석·마이크 전부 건너뜀.
     (음성 흐름의 확인 절차는 별개로 유지 — 이건 클릭 전용 경로)"""
+    _g = _journey_gate('장소 클릭 주행')
+    if _g:
+        return _g
     name = ((request.json or {}).get("name") or "").strip()
     if not name:
         return jsonify(ok=False, error="이름 없음"), 400
@@ -3724,6 +3778,12 @@ def sys_proc_ctrl(name):
     # 프로세스가 열 수 없어, 옛/새 프로세스가 서로 다른 섬으로 갈라진다
     # (2026-07-21 실측: 수동 전진 버튼 무반응 + 새 CLI에서 드라이버 노드 실종 사건)
 
+    # 여정 중에는 **시작 계열만** 막는다(free·home·battery 스크립트, launch·rviz 기동).
+    # 종료는 열어 둔다 — launch 종료는 화면에서 모터·라이다를 끌 마지막 수단이고
+    # (2026-09-10 대시보드를 닫아 끌 수단이 사라진 사건), rviz 종료는 부하만 줄인다.
+    _g = _journey_gate(f"{defn['label']} 시작")
+    if _g:
+        return _g
     blocked = _sys_start_gate(name)
     if blocked:
         _log("SYS", f"{defn['label']} 시작 거부 — {blocked[0]}")
