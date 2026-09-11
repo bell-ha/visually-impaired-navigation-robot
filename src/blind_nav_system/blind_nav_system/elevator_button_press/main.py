@@ -28,6 +28,14 @@ except Exception as _e:          # 로거 없어도 본체는 정상 동작해�
     _diag = None
     print(f"[경고] robot_diag 로드 실패: {_e}")
 _diaglog = None
+# 여정 블랙박스의 코드 정체 — import 시점에 잰다(= 이 프로세스가 실제로 로드한 파일).
+try:
+    import journey_log as _jlog
+    _SRC_ID = _jlog.src_fingerprint(os.path.abspath(__file__))
+except Exception as _e:
+    _jlog = None
+    _SRC_ID = None
+    print(f"[경고] journey_log 로드 실패: {_e}")
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, JointState, LaserScan, CameraInfo
 from geometry_msgs.msg import Twist
@@ -6765,6 +6773,17 @@ def main():
         except Exception as _le:
             _diaglog = None      # 로거 없어도 본체는 정상 동작해야 함
             print(f"[경고] robot_diag 로거 생성 실패 — 파일 로그 비활성: {_le}", flush=True)
+
+    # 코드 정체 한 줄 — 이 프로세스가 **로드한** 파일(md5·mtime 은 import 시점)과 HEAD·src_dirty.
+    # 대시보드 블랙박스 run_start 의 procs.elev(md5_now·stale)와 대조한다. 둘이 다르면 이 앱은
+    # 디스크의 지금 파일이 아닌 코드로 돈다. git 은 느릴 수 있어 스레드로(기동을 막지 않는다).
+    if _jlog is not None:
+        try:
+            _jlog.log_code_identity_async(
+                "엘베앱", _SRC_ID,
+                lambda s: (_diaglog.log("BOOT", s) if _diaglog else print(s, flush=True)))
+        except Exception:
+            pass
 
     # 제어권 초기값: fail-closed — 기본은 False(부여 대기), 대시보드가 /authority로
     # 명시적으로 줄 때만 True가 된다. "대시보드 응답 없음 → 나 혼자 권한 보유" 같은

@@ -36,6 +36,12 @@ except Exception as _e:          # 로거 없어도 본체는 정상 동작해�
     _diag = None
     print(f"[경고] robot_diag 로드 실패: {_e}")
 _diaglog = None
+# ── 여정 블랙박스 — 같은 폴더의 journey_log.py (없어도 본체는 정상 동작) ──
+try:
+    import journey_log as _jlog
+except Exception as _e:
+    _jlog = None
+    print(f"[경고] journey_log 로드 실패: {_e}")
 ENV_FILE = next(
     (p for p in [
         THIS_DIR / "../../.env",
@@ -107,6 +113,71 @@ def _log(src: str, msg: str):
             _diaglog.log(src, entry["msg"], echo=False)   # 터미널 에코는 차단(파이어호스)
         except Exception:
             pass
+
+
+# ── 여정 블랙박스(journey_log.py) 관문 — 2026-09-11 ───────────────────────────────
+# 자동 여정 한 번을 ~/.ros/journey/<run>.jsonl 로 남긴다. 목적·제약은 journey_log.py 머리말.
+# 훅 규칙 세 가지:
+#   · 훅은 `_jr(...)` 로만 부른다 — 레코더가 없거나 무엇이 터져도 여기서 삼킨다
+#     (훅 예외 = 여정 사망).
+#   · 훅의 **인자 식**은 `_jr` 의 try 밖에서 평가된다. 인자에는 그 지점에서 반드시 정의된
+#     이름과 예외를 못 내는 식만 둔다. dict 에서 꺼내야 하면 `_jr_pick` 을 쓴다.
+#   · 느린 것(파일·/proc·pgrep·yaml)은 레코더 deferred 로 writer 스레드에 넘긴다.
+_DASH_SRC = None
+_JR = None
+if _jlog is not None:
+    try:
+        _DASH_SRC = _jlog.src_fingerprint(__file__)   # import 시점 = 이 프로세스가 로드한 코드
+        _JR = _jlog.JourneyRecorder(log_fn=lambda m: _log("JOURNEY", m),
+                                    src_id=_DASH_SRC, repo_path=str(THIS_DIR))
+    except Exception as _e:
+        _JR = None
+        print(f"[경고] 여정 블랙박스 생성 실패: {_e}")
+
+
+def _jr(method, *args, **kwargs):
+    """블랙박스 훅 단일 관문. 레코더 메서드의 반환(없거나 실패하면 None)."""
+    try:
+        if _JR is not None:
+            return getattr(_JR, method)(*args, **kwargs)
+    except Exception:
+        pass
+    return None
+
+
+def _jr_traced(name, post=None, ev="call"):
+    """호출 기록 데코레이터 — 인자·반환·지연만 적고 그대로 통과시킨다. 레코더가 없으면 원 함수."""
+    if _JR is None:
+        return lambda fn: fn
+    try:
+        return _JR.traced(name, post=post, ev=ev)
+    except Exception:
+        return lambda fn: fn
+
+
+def _jr_caller(depth=2):
+    """부른 함수 이름(분석용 태그). 실패하면 None."""
+    try:
+        return sys._getframe(depth).f_code.co_name
+    except Exception:
+        return None
+
+
+def _jr_pick(d, keys):
+    try:
+        return {k: d.get(k) for k in keys} if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def _jr_cancel_post(_ret):
+    """대기 함수의 False 가 '취소'인지 '시간초과'인지 — 반환 직후의 cancel 플래그."""
+    return {"cancel_flag": bool(_AUTO.get("cancel"))}
+
+
+def _jr_map_post(_ret):
+    """_map_loaded_floor 의 입력 R(우리 기록). P 원문은 바로 앞 map_server_yaml 게이트에 있다."""
+    return {"R_path": _loaded_map_path}
 
 # ── Pull 감지기 ───────────────────────────────────────────────────────────────
 def _make_pull_detector():
@@ -882,14 +953,20 @@ def _map_server_yaml():
     ※ 이 파라미터는 load_map 서비스로 지도를 바꿔도 갱신되지 **않을 수 있다**.
       그래서 이 값만으로 "지금 로드된 지도"를 단정하지 않는다 — _map_loaded_floor 참고.
     """
+    _jt0 = time.monotonic()
     try:
         r = subprocess.run(["ros2", "param", "get", "/map_server", "yaml_filename"],
                            capture_output=True, timeout=5, text=True)
+        _jr("gate", "map_server_yaml", rc=r.returncode,
+            stdout_head=(r.stdout or "")[:200], stderr_head=(r.stderr or "")[:200],
+            latency_ms=round((time.monotonic() - _jt0) * 1000))
         if r.returncode != 0:
             return None
         v = (r.stdout or "").rsplit(":", 1)[-1].strip()
         return v or None
-    except Exception:
+    except Exception as _je:
+        _jr("gate", "map_server_yaml", exc=repr(_je),
+            latency_ms=round((time.monotonic() - _jt0) * 1000))
         return None
 
 
@@ -910,6 +987,7 @@ def _floor_of_map(path):
     return None
 
 
+@_jr_traced("map_loaded_floor", post=_jr_map_post, ev="gate")
 def _map_loaded_floor():
     """지금 map_server 에 올라가 있는 지도의 층 → (층|None, 근거 문자열).
 
@@ -1285,6 +1363,7 @@ def _elev_app_running() -> bool:
     # 대시보드가 추적 못 하는 것(재시작 desync)도 감지 — 그 폴백은 그대로 살린다.
     return bool(_elev_app_pids())
 
+@_jr_traced("wait_elev_app_up")
 def _wait_elev_app_up(timeout: float = 20.0) -> bool:
     """엘베앱 5000 서버가 응답할 때까지 대기. 막 spawn한 직후엔 5000이 안 떠서
     POST가 유실되므로, 뜬 뒤에 호출해야 확실히 닿는다. 제어권은 절대 안 줌
@@ -1299,6 +1378,7 @@ def _wait_elev_app_up(timeout: float = 20.0) -> bool:
             time.sleep(0.4)
     return False
 
+@_jr_traced("grant_elev_lease", ev="gate")
 def _grant_elev_lease(granted: bool, reason: str = "") -> bool:
     """제어권 리스 부여/회수 — 한 여정에 딱 1회, 층 이동 전 반납.
     리스 보유 중엔 guard(라이다 충돌가드)가 꺼지므로, 반납 후 guard_off가
@@ -1324,6 +1404,8 @@ def _grant_elev_lease(granted: bool, reason: str = "") -> bool:
         _log("ELEVLEASE", f"리스={granted} 시도{i+1}/{attempts} → 실측 "
                           f"authority={st and st.get('authority')} "
                           f"guard_off={st and st.get('guard_off')} ({reason})")
+        _jr("gate", "lease_attempt", granted=granted, reason=reason, attempt=i + 1,
+            attempts=attempts, ok=ok, st=_jr_pick(st, ("authority", "guard_off", "lease_expired")))
         if ok:
             _elev_lease_held = granted
             if granted:
@@ -1466,6 +1548,7 @@ def _auto_set(step, msg, wait=False, phase=None):
         _AUTO["step"] = step; _AUTO["msg"] = msg; _AUTO["waiting"] = wait
         if phase is not None:
             _AUTO["phase"] = phase
+    _jr("step", step, msg, wait, phase)
     _log("AUTO", f"[{step}] {msg}" + ("  — 확인 대기" if wait else ""))
 
 def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
@@ -1476,13 +1559,16 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
     cancel/timeout이면 False."""
     p = _loc(name)
     if not p:
+        _jr_gate_arrival(name, None, None, None, None, tol, timeout, "no_loc", False)
         return False
     tx, ty = p.get("x"), p.get("y")
+    _jr("set_goal", name, p)
     t0 = time.monotonic()
     stable_since = None
     last = None
     while time.monotonic() - t0 < timeout:
         if _AUTO["cancel"]:
+            _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "cancel", False)
             return False
         rx, ry = _robot_pose["x"], _robot_pose["y"]
         d = _dist_to(tx, ty)
@@ -1493,14 +1579,17 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
             if stable_since is None:
                 stable_since = time.monotonic()
             elif time.monotonic() - stable_since >= settle:
+                _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "arrived", True)
                 return True      # 목표 이내 + settle초 정지 = 정밀 도착 확정
         else:
             stable_since = None
         if rx is not None:
             last = (rx, ry)
         time.sleep(0.3)
+    _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "timeout", False)
     return False
 
+@_jr_traced("auto_wait_confirm", post=_jr_cancel_post)
 def _auto_wait_confirm(timeout=900):
     """블로커 단계 — 사용자 '다음 확인' 대기. /auto_confirm이 waiting=False로 풀어줌."""
     t0 = time.monotonic()
@@ -1653,16 +1742,23 @@ def _nav_param_get(node, name):
       /global_costmap/global_costmap 을 "Node not found" 로 놓쳤다(같은 노드를
       ros2 node list 는 보여준다). 그래서 여기서는 데몬 경로를 그대로 쓴다.
     """
+    _jt0 = time.monotonic()
     try:
         r = subprocess.run(["ros2", "param", "get", node, name],
                            capture_output=True, timeout=5, text=True)
+        _jr("gate", "param_get", inputs={"node": node, "name": name}, rc=r.returncode,
+            stdout_head=(r.stdout or "")[:160], stderr_head=(r.stderr or "")[:200],
+            latency_ms=round((time.monotonic() - _jt0) * 1000))
         if r.returncode != 0:
             return None
         return float((r.stdout or "").rsplit(":", 1)[-1].strip())
-    except Exception:
+    except Exception as _je:
+        _jr("gate", "param_get", inputs={"node": node, "name": name}, exc=repr(_je),
+            latency_ms=round((time.monotonic() - _jt0) * 1000))
         return None
 
 
+@_jr_traced("nav_params_restore_normal", ev="gate")
 def _nav_params_restore_normal(why=""):
     """/goto 직전 호출. **반환: 주행해도 되는가(bool).** False 면 호출부가 거부해야 한다.
 
@@ -1686,6 +1782,7 @@ def _nav_params_restore_normal(why=""):
                      + (f" [{why}]" if why else ""))
         return True
     cur = _nav_param_get(_NAV2_PAD_NODE, _NAV2_PAD_PARAM)
+    _jr("gate", "nav_padding_read", why=why, want=want, cur=cur)
     if cur is not None and abs(cur - want) <= 1e-6:
         return True                 # 평소값이다 — 아무것도 쓰지 않는다(정상 경로)
     unknown = (cur is None)
@@ -1701,6 +1798,7 @@ def _nav_params_restore_normal(why=""):
         err = (w.stderr or w.stdout or "").strip()[:120]
     except Exception as e:
         ok, err = False, repr(e)
+    _jr("gate", "nav_padding_write", why=why, want=want, cur=cur, ok=ok, err=err)
     if ok:
         _log("NAV2", f"{_NAV2_PAD_PARAM} = {want} 재설정 성공"
                      + (f" [{why}]" if why else ""))
@@ -1710,6 +1808,7 @@ def _nav_params_restore_normal(why=""):
     return False
 
 
+@_jr_traced("auto_scene_step")
 def _auto_scene_step(label, n, busy_msg, noanmu_msg, phase):
     """씬 n 을 '잠금 → 실행 → 완료 대기 → 결과와 함께 개방' 순서로 돌린다.
 
@@ -1757,14 +1856,21 @@ def _auto_scene_step(label, n, busy_msg, noanmu_msg, phase):
 
 
 def _elev_status(timeout=3):
-    """엘베앱 상태(/status) 조회 — dict 또는 None. ready=정렬완료, door_open 등 포함."""
+    """엘베앱 상태(/status) 조회 — dict 또는 None. ready=정렬완료, door_open 등 포함.
+
+    블랙박스: 이미 받은 응답을 버리지 않고 넘길 뿐이다(새 호출 0). 여정 중이 아니면 레코더가
+    캐시만 갱신하고 적지 않는다."""
     try:
         import urllib.request
         r = urllib.request.urlopen("http://localhost:5000/status", timeout=timeout)
-        return json.loads(r.read().decode() or "{}")
-    except Exception:
+        st = json.loads(r.read().decode() or "{}")
+    except Exception as _je:
+        _jr("elev_status", None, _je, _jr_caller())
         return None
+    _jr("elev_status", st, None, _jr_caller())
+    return st
 
+@_jr_traced("elev_scene")
 def _elev_scene(n, move=True):
     """엘베앱 씬 n 트리거(자세 전환·자동안무). **(전송성공, run_seq)** 반환.
 
@@ -1787,11 +1893,13 @@ def _elev_scene(n, move=True):
         return False, None
     return True, r.get("run_seq")
 
+@_jr_traced("elev_select")
 def _elev_select(text):
     """버튼 자동 선택(POST /select). 호출=^(상)/s(하), 층=번호. 성공 시 True."""
     r = _elev_post("/select", {"text": str(text)}, timeout=5)
     return bool(r and r.get("ok", True))
 
+@_jr_traced("elev_press")
 def _elev_press():
     """누르기 실행(POST /press). (성공여부, 사유) 반환.
 
@@ -1801,6 +1909,7 @@ def _elev_press():
     r = _elev_post("/press", {}, timeout=15)
     return bool(r and r.get("ok")), (r or {}).get("error")
 
+@_jr_traced("elev_wait_ready", post=_jr_cancel_post)
 def _elev_wait_ready(timeout=45):
     """정렬 완료(centered && press_ready) 대기 — 취소 존중. 성공 True / 타임아웃·취소 False."""
     t0 = time.time()
@@ -1814,6 +1923,7 @@ def _elev_wait_ready(timeout=45):
         time.sleep(0.3)
     return False
 
+@_jr_traced("elev_wait_press_done", post=_jr_cancel_post)
 def _elev_wait_press_done(timeout=30):
     """누르기 완료 대기 — press 씬(0/4)의 scene_next_ok(press_ok_ts>scene_ts) True까지.
     이게 True면 '버튼 눌림 + 팔 복귀 + 그리퍼 열기'까지 끝난 상태라 이동해도 안전.
@@ -1887,6 +1997,7 @@ _EXIT_MISS_MAX  = 2       # /status 무응답이 이만큼 연속되면 앱이 �
 _rescue_hold = False
 
 
+@_jr_traced("elev_wait_exit_done")
 def _elev_wait_exit_done(seq=None):
     """⑥ 하차 완료를 엘베앱 실행 기록으로 확인. (사유, 결과dict, 진행cm) 반환.
 
@@ -2021,6 +2132,7 @@ _SCENE_POLL_SEC = 0.4
 _SCENE_MISS_MAX = 2       # /status 무응답이 이만큼 연속되면 앱이 죽은 것으로 본다
                           # (_EXIT_MISS_MAX 와 같은 근거 — 1회 표본으로 단정하지 않는다)
 
+@_jr_traced("elev_wait_scene_done")
 def _elev_wait_scene_done(n, seq=None, timeout=None):
     """씬 n 자동 안무가 끝날 때까지 대기. (사유, 결과dict) 반환.
 
@@ -2080,6 +2192,7 @@ _FRONT_LOC        = "엘리베이터 문앞"
 _FRONT_ARRIVE_SEC = 60.0
 
 
+@_jr_traced("auto_front_nav2")
 def _auto_front_nav2():
     """② 문앞 — 3단 안무 대신 Nav2 로 간다. 계속할지(bool) 반환.
 
@@ -2264,6 +2377,7 @@ def _auto_abort_elev():
     _auto_set("취소", "여정 취소됨 — 엘베앱 종료·제어권 회수")
     _http_self("/elevator_app", {"running": False})
 
+@_jr_traced("http_self")
 def _http_self(path, payload):
     """대시보드 자기 자신(8080)의 라우트를 호출 (지도전환 등 재사용)."""
     try:
@@ -2307,6 +2421,7 @@ def _auto_notify(msg: str, voice: bool = True, stow_hint: bool = False):
     "들렸다"는 아니다(전송성공≠완료)."""
     if not msg.strip():
         return          # 빈 통보는 화면에도 음성에도 의미가 없다
+    _jr("ev", "notify", text=msg, voice=voice, stow_hint=stow_hint)
     _log("AUTO", f"🚨 여정 중단 통보: {msg}")
     if stow_hint:
         _log("AUTO", f"↳ 운영자 안내: {_ARM_STOW_NOTE}")
@@ -2338,6 +2453,7 @@ def _auto_sleep(sec: float) -> bool:
     return not _AUTO["cancel"]
 
 
+@_jr_traced("press_or_pass")
 def _press_or_pass() -> bool:
     """누르기 시도. 여정을 계속해도 되면 True, 중단해야 하면 False.
 
@@ -2416,6 +2532,7 @@ def _auto_run(dest):
     # 다른 데서 True로 만들면 근거 없는 안전 주장이 된다.
     arm_safe = True     # 여정 시작 시점의 "가정" — 잰 값이 아니다. 직전에
                         # 운영자가 팔을 뻗어둔 채 여정을 시작하면 이 가정은 틀린다.
+    _AUTO["arm_safe"] = arm_safe   # 블랙박스 미러(run_end.state) — 아래 4곳도 같다. 판정에 안 쓴다
     # 🔴 손잡이가 죽은 채로 여정을 시작하면 **사람이 로봇을 멈출 수단이 없는 상태로**
     #    도는 것이다(당김 = 정지 요청). 지금은 막지 않는다 — 실기가 이 상태로 돌고
     #    있고 막으면 리허설이 통째로 불가능해진다. 대신 **조용히 넘어가지 않는다.**
@@ -2495,6 +2612,7 @@ def _auto_run(dest):
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             _procs["elevator"] = proc
             _elev_started_mono = time.monotonic()   # 고립 판정 유예 기준(=기동 시각)
+            _jr("proc", "elev", proc.pid, str(THIS_DIR / "elevator_button_press/main.py"))
             threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
         if not _wait_elev_app_up(20):
             _auto_set("오류", "엘베앱 기동 실패"); return
@@ -2513,6 +2631,7 @@ def _auto_run(dest):
         # 팔이 실제로 뻗는 것은 그 뒤 자동 접근·서보와 누르기 시퀀스다 —
         # 여기서 내려두는 건 "이 지점부터는 수납을 장담 못 한다"는 뜻이다.
         arm_safe = False
+        _AUTO["arm_safe"] = arm_safe
         _elev_scene(0)                          # place=hall + 인식자세(블로킹)
         _elev_select("^" if up else "s")        # 호출버튼 자동 선택 (^=상행 s=하행)
         if _elev_wait_ready():
@@ -2529,6 +2648,7 @@ def _auto_run(dest):
             _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
             _auto_abort_elev(); return
         arm_safe = True                         # 유일한 release 지점 (1/2)
+        _AUTO["arm_safe"] = arm_safe
 
         # ② 문앞 정렬 — 2026-09-09: 3단 안무(전진 80.8 + 우회전 90°) → Nav2 주행.
         # 팔 수납 확인은 그대로 선행한다(⑥ 직전과 같은 게이트). Nav2 든 3단이든
@@ -2561,6 +2681,7 @@ def _auto_run(dest):
         _auto_set("⑤ 층선택", f"인식 자세 + {dest_floor}층 버튼 자동 선택·정렬 중...",
                   phase="floor")
         arm_safe = False                        # 씬0과 같은 이유(위 주석 참고)
+        _AUTO["arm_safe"] = arm_safe
         _elev_scene(4)                          # place=cab + 인식자세
         _elev_select(dest_floor)                # 층버튼 자동 선택
         if _elev_wait_ready():
@@ -2576,6 +2697,7 @@ def _auto_run(dest):
             _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
             _auto_abort_elev(); return
         arm_safe = True                         # 유일한 release 지점 (2/2)
+        _AUTO["arm_safe"] = arm_safe
 
         # 엘베 이동 대기 → ⑥ 하차: 후진 186 (자동 안무)
         _auto_set("이동중", f"{dest_floor}층 이동 중 — 도착·하차 준비되면 '다음'",
@@ -2672,6 +2794,7 @@ def _auto_run(dest):
         _auto_set("완료", f"🎉 {dest} 도착! 여정 완료" if _auto_wait_arrival(dest)
                   else "목적지 도착 실패", phase="done")
     except Exception as e:
+        _jr("exception")                        # traceback 전문 — repr 만으로는 줄번호가 없다
         _auto_set("오류", f"여정 예외: {e!r}")
     finally:
         # 최종 보루 — 위 정상 반납(하차 직후)을 못 탄 모든 이탈 경로(예외·취소·
@@ -2689,6 +2812,149 @@ def _auto_run(dest):
             pass
         with _auto_lock:
             _AUTO["active"] = False; _AUTO["waiting"] = False
+        _jr_end()     # 블랙박스 run_end — finally 맨 끝(리스 반납 결과까지 담는다)
+
+
+# ── 여정 블랙박스 훅 보조 ─────────────────────────────────────────────────────────
+# 전부 **메모리 값만** 읽고 스스로 예외를 삼킨다(여정 스레드에서 불린다).
+# 파일·/proc·pgrep 이 드는 것은 deferred 로 writer 스레드에 넘긴다.
+
+def _jr_pose():
+    """pose 복사본 + 신선도. amcl_pose 는 정지 중 갱신되지 않는 게 정상이라 pose_age 하나로는
+    '멈춤'과 '측위 사망'을 못 가른다 → 마지막 0 아닌 cmd_vel 경과를 나란히 둔다
+    ("명령은 나가는데 pose 가 안 온다"만이 측위 사망 시그니처다)."""
+    try:
+        now = time.monotonic()
+        pa = _ready.get("amcl") or 0.0
+        return dict(_robot_pose,
+                    pose_age_s=(round(now - pa, 1) if pa > 0 else None),
+                    cmd_age_s=(round(now - _last_move_cmd, 1) if _last_move_cmd > 0 else None))
+    except Exception:
+        return None
+
+
+def _jr_sample():
+    """1Hz 샘플 — 여정 스레드가 아니라 샘플러 스레드에서 불린다."""
+    return {"pose": _jr_pose(), "step": _AUTO.get("step"), "phase": _AUTO.get("phase"),
+            "waiting": _AUTO.get("waiting"), "floor": _current_floor,
+            "lease_held": _elev_lease_held}
+
+
+def _jr_procs():
+    """writer 스레드에서 — 세 프로세스가 **실제로 로드한** 코드의 정체(/proc·mtime·md5).
+    엘베앱은 이미 떠 있으면 재사용되므로(아래 _auto_run) pid 로 기동 시각을 따로 잰다."""
+    out = {"dash": _jlog.proc_identity(os.getpid(), __file__, at_import=_DASH_SRC)}
+    ip = _procs.get("iface")
+    out["iface"] = _jlog.proc_identity(
+        getattr(ip, "pid", None) if (ip is not None and ip.poll() is None) else None,
+        THIS_DIR / "interface.py")
+    ep = _procs.get("elevator")
+    if ep is not None and ep.poll() is None:
+        pids, via = [ep.pid], "popen"
+    else:
+        pids, via = _elev_app_pids(), "proc_scan"
+    out["elev"] = _jlog.proc_identity(pids[0] if pids else None,
+                                      THIS_DIR / "elevator_button_press/main.py",
+                                      found=len(pids), via=via)
+    return out
+
+
+def _jr_begin(dest, remote_addr=None):
+    """run_start — /auto_goto 가 여정 스레드를 띄우기 **직전**(요청 스레드)."""
+    if _JR is None:
+        return
+    try:
+        _JR.begin(dest, {
+            "remote_addr": remote_addr, "cur_floor": _current_floor,
+            "floor_confirmed": _floor_confirmed, "loaded_map_path": _loaded_map_path,
+            "manual_mode": _manual_mode, "lease_held": _elev_lease_held,
+            "rescue_hold": _rescue_hold, "battery": dict(_battery), "pose": _jr_pose(),
+            "readiness": {"amcl": _readiness_amcl(),
+                          "battery": _readiness_signal("battery", "배터리"),
+                          "handle": _readiness_signal("handle", "손잡이"),
+                          "nav2": _readiness_polled("nav2", "nav2"),
+                          "gripper_camera": _readiness_polled("gripper_camera", "그리퍼캠"),
+                          "elev_app": _readiness_polled("elev_app", "엘베앱")},
+        }, deferred={
+            "dest_floor": lambda: (_loc(dest) or {}).get("floor"),   # yaml 읽기 — writer 에서
+            "procs": _jr_procs,
+        }, sample_fn=_jr_sample)
+    except Exception:
+        pass
+
+
+def _jr_end():
+    """run_end — `_auto_run` finally 맨 끝. 물리 상태는 '실패한 단계부터 재개'의 입력이 된다."""
+    if _JR is None:
+        return
+    try:
+        _JR.end({"arm_safe": _AUTO.get("arm_safe"), "lease_held": _elev_lease_held,
+                 "rescue_hold": _rescue_hold, "cancel_flag": bool(_AUTO.get("cancel")),
+                 "mode": _AUTO.get("mode"), "dest_floor": _AUTO.get("dest_floor"),
+                 "floor": _current_floor, "floor_confirmed": _floor_confirmed,
+                 "pose": _jr_pose()},
+                deferred={"elev_running": _elev_app_running})   # pgrep — writer 에서
+    except Exception:
+        pass
+
+
+def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result):
+    """_auto_wait_arrival 의 판정 — 마지막 거리·정지 지속·경과·pose 신선도."""
+    if _JR is None:
+        return
+    try:
+        now = time.monotonic()
+        _JR.gate("arrival", inputs={"name": name, "x": tx, "y": ty, "tol": tol,
+                                    "timeout": timeout},
+                 result=result, why=why,
+                 d_last=(_dist_to(tx, ty) if tx is not None else None),
+                 settled_s=(round(now - stable_since, 2) if stable_since else None),
+                 elapsed_s=(round(now - t0, 1) if t0 else None), pose=_jr_pose())
+    except Exception:
+        pass
+
+
+def _jr_confirm_id(step, msg):
+    """'다음' 자리 식별자 — 리포트가 자리별로 묶는 키
+    (wip/20260911-confirm-points-inventory.md 의 C1~C9). `_auto_set(..., wait=True)` 의 단계
+    이름·문구로 가른다. 문구를 바꾸면 여기도 같이 볼 것 — 못 가르면 'C?_<단계>' 로 남아
+    리포트에서 바로 보인다."""
+    m = msg or ""
+    if step in ("③ 문열림", "④ 엘리베이터 안") and "전송 실패" in m:
+        return "C5_scene_post_fail"
+    if step == "② 문앞정렬":
+        return "C3_front_arrive_fail" if "도착 실패" in m else "C4_front_arrived"
+    return {"① 호출": "C1_call_press", "재시도": "C2_press_retry_manual",
+            "③ 문열림": "C6_door_open", "④ 엘리베이터 안": "C7_ride_in",
+            "⑤ 층선택": "C8_floor_press", "이동중": "C9_moving_exit"}.get(step, f"C?_{step}")
+
+
+if _JR is not None:
+    _JR.pose_fn = _jr_pose
+    _JR.confirm_id_fn = _jr_confirm_id
+
+
+@app.after_request
+def _jr_after_request(resp):
+    """블랙박스 — 응답을 **읽기만** 한다. 무엇이 터져도 resp 를 그대로 돌려준다.
+    두 가지를 잡는다(2026-09-11 verifier):
+      · /auto_goto 거부 사유 — 지금은 화면 토스트로만 사라진다(여정 파일이 안 생기는 실패).
+      · /switch_map 응답 본문 — ok=False 가 HTTP 200 으로 와서 `_http_self` 가 True 로 넘긴다.
+        여정의 하차 후 지도 전환이 그 반환을 보지 않는다. 여기서는 **기록만** 한다."""
+    try:
+        if _JR is not None and request.method == "POST":
+            if request.path == "/switch_map":
+                _JR.gate("switch_map_resp", status=resp.status_code,
+                         body=resp.get_json(silent=True), req=request.get_json(silent=True))
+            elif request.path == "/auto_goto":
+                body = resp.get_json(silent=True) or {}
+                if not body.get("ok"):
+                    _JR.reject((request.get_json(silent=True) or {}).get("dest"),
+                               body.get("error"), status=resp.status_code,
+                               remote_addr=request.remote_addr)
+    except Exception:
+        pass
+    return resp
 
 @app.route("/auto_goto", methods=["POST"])
 def auto_goto():
@@ -2729,6 +2995,7 @@ def auto_goto():
         if _st.get("no_ocr"):
             return jsonify(ok=False, error="사진모드에서는 여정을 시작할 수 없습니다 "
                                            "— 엘베앱을 정상 모드로 다시 켜세요"), 409
+    _jr_begin(dest, request.remote_addr)     # 블랙박스 run_start — 스레드 시작 직전
     threading.Thread(target=_auto_run, args=(dest,), daemon=True).start()
     return jsonify(ok=True, dest=dest)
 
@@ -2744,12 +3011,20 @@ def auto_confirm():
             step = _AUTO.get("step", "")
             locked = True
         else:
+            step = _AUTO.get("step", "")      # 블랙박스·로그용 — 판정에 안 쓴다
             _AUTO["waiting"] = False
             locked = False
     if locked:
         _log("AUTO", f"'다음 확인' 무시 — [{step}] 동작 중이라 잠겨 있다 "
                      "(그래도 넘어가려면 '강제로 넘어가기')")
+        _jr("human", "confirm_locked", step=step, remote_addr=request.remote_addr)
         return jsonify(ok=False, error="동작 중 — 잠김"), 409
+    if _AUTO.get("active"):
+        # 받아들인 클릭도 남긴다 — 예전엔 잠겨서 무시된 클릭만 로그가 있어 "누가 언제 눌러
+        # 넘어갔나"가 없었다(2026-09-11 advisor). 대기 시간은 블랙박스가 잰다.
+        _w = _jr("human", "confirm", step=step, remote_addr=request.remote_addr)
+        _log("AUTO", f"'다음 확인' 수락 — [{step}]"
+                     + (f" (대기 {_w:.0f}s)" if isinstance(_w, (int, float)) else ""))
     return jsonify(ok=True)
 
 
@@ -2776,6 +3051,8 @@ def auto_force():
                  + ("베이스 정지 요청 전송됨" if stopped
                     else "🚨 정지 요청 전송 실패 — 로봇이 계속 움직일 수 있다")
                  + f" / 그 시점: {where}")
+    _jr("human", "force", step=step, stopped=stopped, where=where,
+        remote_addr=request.remote_addr)
     # 3) 그다음에 진행
     with _auto_lock:
         _AUTO["force"] = True
@@ -2786,6 +3063,7 @@ def auto_force():
 def auto_cancel():
     with _auto_lock:
         _AUTO["cancel"] = True; _AUTO["waiting"] = False
+    _jr("human", "cancel", step=_AUTO.get("step"), remote_addr=request.remote_addr)
     _write("iface", "/cancel")
     return jsonify(ok=True)
 
@@ -3563,6 +3841,7 @@ def main():
                 _log("SYS", "파일 로그 열기 실패 — 계측 비활성")
     else:
         _log("SYS", "robot_diag 임포트 실패 — 파일 로그 비활성")   # 계측이 조용히 죽는 것 방지(#15)
+    _jr("boot")   # 코드 정체 한 줄([CODE]) — git 은 백그라운드, run_start 가 그 캐시를 싣는다
     if not (WEB_DIR / "index.html").is_file():
         # 없으면 '/'가 404로 조용히 죽는다 — 로그로 드러내야 원인을 안다.
         _log("SYS", f"index.html 없음 — 대시보드 UI 비활성: {WEB_DIR / 'index.html'}")
