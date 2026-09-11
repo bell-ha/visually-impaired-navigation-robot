@@ -1565,7 +1565,10 @@ _AUTO = {"active": False, "dest": "", "step": "", "msg": "",
          # '먼저' 멈추고 나서 이걸 세운다 — 순서가 바뀌면 이 버튼이 막으려던 위험이 된다.
          # 소비하는 쪽(_elev_wait_scene_done / _auto_wait_confirm)이 즉시 False 로 되돌린다.
          "force": False,
-         "phase": "", "dest_floor": "", "mode": ""}
+         "phase": "", "dest_floor": "", "mode": "",
+         # paused: 여정은 살아 있고 **다음 이동 명령만 내지 않는 상태**(STOP S1). 앱·리스·하트비트는
+         # 그대로 둔다 — 종료가 아니다. 이동 명령 직전마다 _auto_hold 가 이 값을 본다.
+         "paused": False}
 _auto_lock = threading.Lock()
 
 def _auto_set(step, msg, wait=False, phase=None):
@@ -1576,6 +1579,37 @@ def _auto_set(step, msg, wait=False, phase=None):
             _AUTO["phase"] = phase
     _jr("step", step, msg, wait, phase)
     _log("AUTO", f"[{step}] {msg}" + ("  — 확인 대기" if wait else ""))
+
+# ── 멈춤(STOP S1) — 이동 게이트와 대기 타이머 ─────────────────────────────────────
+# 멈춤은 '다음 이동 명령을 내지 않는다'이다. 지금 돌고 있는 동작을 끊는 것은 정지 라우트의 몫이고
+# (S2), 여기는 끊긴 뒤에 여정 스레드가 **새 명령을 내지 않게** 막는다. 게이트 없이 정지 버튼만
+# 있으면 ⑥ 이후에 정지를 눌러도 /goto 가 나간다 — 거짓 안전감이다(advisor §8).
+# 🔴 멈춤이 아니면 게이트는 아무것도 하지 않는다(취소 플래그도 보지 않는다). 그래야 멈춤 없는
+#    기존 흐름·취소 시퀀스가 한 줄도 바뀌지 않는다. False 는 '멈춘 채 취소'일 때뿐이다.
+
+
+def _auto_pause_wait():
+    """멈춤이 풀리거나 취소될 때까지 기다린다. 멈춰 있던 초를 돌려준다(대기 타이머에서 뺄 값)."""
+    t = time.monotonic()
+    while _AUTO.get("paused") and not _AUTO.get("cancel"):
+        time.sleep(0.2)
+    return time.monotonic() - t
+
+
+@_jr_traced("auto_hold", ev="gate")
+def _auto_hold(label):
+    """이동 명령 직전 게이트. 멈춤이면 풀릴 때까지 기다린다. 계속해도 되면 True, 멈춘 채 취소면 False.
+    False 를 받은 자리는 **그 자리의 기존 취소 처리와 똑같이** 끝낸다(새 분기를 만들지 않는다)."""
+    if not _AUTO.get("paused"):
+        return True
+    _log("AUTO", f"⏸ 멈춤 — [{label}] 이동 명령을 내지 않고 기다린다")
+    waited = _auto_pause_wait()
+    if _AUTO.get("cancel"):
+        _log("AUTO", f"⏹ 멈춘 채 취소 — [{label}] ({waited:.0f}s)")
+        return False
+    _log("AUTO", f"▶ 재개 — [{label}] ({waited:.0f}s 멈춤)")
+    return True
+
 
 # 도착 '정지' 판정의 yaw 임계 — 폴링(0.3s) 사이 yaw 변화가 이보다 작아야 멈춘 것으로 본다.
 # 2026-09-11 A2(verifier 재현): 예전엔 xy 만 봐서 RotateToGoal 제자리 회전 중에 '도착'이 났다
@@ -1610,6 +1644,23 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
         if _AUTO["cancel"]:
             _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "cancel", False)
             return False
+        if _AUTO.get("paused"):
+            # 멈춤(S1): 멈춘 시간은 시간초과에서 뺀다. 정지가 Nav2 목표를 취소했으므로 풀리면
+            # 목표를 다시 낸다(interface 는 /cancel 로 LOCKED 지만 _handle_goto 는 상태를 안 본다).
+            # 정지 판정(stable_since·last)은 처음부터 다시 잰다.
+            t0 += _auto_pause_wait()
+            stable_since, last = None, None
+            if _AUTO["cancel"]:
+                continue                  # 위 취소 분기가 기록하고 끝낸다
+            if not _nav_params_restore_normal(f"재개 /goto {name}"):
+                _log("AUTO", f"🚨 재개 — Nav2 파라미터를 평소값으로 되돌리지 못해 '{name}' 목표를 "
+                             "다시 내지 않는다")
+                _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout,
+                                 "resume_params_fail", False)
+                return False
+            _write("iface", f"/goto {name}")
+            _log("AUTO", f"▶ 재개 — '{name}' 주행 목표를 다시 냈다")
+            continue
         rx, ry, ryaw = _robot_pose["x"], _robot_pose["y"], _robot_pose["yaw_deg"]
         d = _dist_to(tx, ty)
         near    = (d is not None and d <= tol)
@@ -1639,6 +1690,9 @@ def _auto_wait_confirm(timeout=900):
     while time.monotonic() - t0 < timeout:
         if _AUTO["cancel"]:
             return False
+        if _AUTO.get("paused"):
+            t0 += _auto_pause_wait()        # 멈춤(S1) 동안은 시간초과를 세지 않는다
+            continue
         with _auto_lock:
             if _AUTO.get("force"):
                 # 안무가 막 끝난 순간에 강제 버튼이 눌린 경우. 여기서 소비하지 않으면
@@ -1868,6 +1922,8 @@ def _auto_scene_step(label, n, busy_msg, noanmu_msg, phase):
     with _auto_lock:
         _AUTO["force"] = False        # 이전 단계에서 남았을 리 없지만 확실히 턴다
     _auto_set(label, busy_msg, wait=False, phase=phase)      # ← 여기서 '다음'이 잠긴다
+    if not _auto_hold(label):
+        return False, "cancel", None                         # 아래 cancel 분기와 같은 반환
     sent, seq = _elev_scene(n)
     if not sent:
         _auto_set(label, f"⚠ 엘베앱에 {label} 전송 실패 — 확인 후 '다음'",
@@ -1954,13 +2010,20 @@ def _elev_press():
     return bool(r and r.get("ok")), (r or {}).get("error")
 
 @_jr_traced("elev_wait_ready", post=_jr_cancel_post)
-def _elev_wait_ready(timeout=45):
-    """정렬 완료(centered && press_ready) 대기 — 취소 존중. 성공 True / 타임아웃·취소 False."""
+def _elev_wait_ready(timeout=45, tok=None):
+    """정렬 완료(centered && press_ready) 대기 — 취소 존중. 성공 True / 타임아웃·취소 False.
+    tok: 고른 버튼. 멈춤(S1)이 풀리면 이걸로 다시 고른다 — 정지의 /reset 이 타겟을 지웠다."""
     t0 = time.time()
     while time.time() - t0 < timeout:
         with _auto_lock:
             if _AUTO.get("cancel"):
                 return False
+        if _AUTO.get("paused"):
+            t0 += _auto_pause_wait()        # 멈춘 시간은 시간초과에서 뺀다
+            if not _AUTO.get("cancel") and tok is not None:
+                _elev_select(tok)
+                _log("AUTO", f"▶ 재개 — 버튼 '{tok}' 을 다시 골랐다")
+            continue
         st = _elev_status()
         if st and st.get("ready"):
             return True
@@ -1979,6 +2042,11 @@ def _elev_wait_press_done(timeout=30):
         with _auto_lock:
             if _AUTO.get("cancel"):
                 return False
+        if _AUTO.get("paused"):
+            # 멈춘 시간은 시간초과에서 뺀다. 누르기는 **다시 내지 않는다**(사용자 확정: 켜진 버튼을
+            # 다시 누르면 취소된다).
+            t0 += _auto_pause_wait()
+            continue
         st = _elev_status()
         if st and st.get("scene_next_ok"):
             return True
@@ -2349,6 +2417,8 @@ def _auto_front_nav2():
         return False
     _auto_set("② 문앞정렬", "문 앞으로 Nav2 주행 중... 로봇이 멈추면 '다음'이 열립니다",
               wait=False, phase="front")
+    if not _auto_hold("② 문앞 주행"):
+        return False
     _write("iface", f"/goto {_FRONT_LOC}")
     arrived = _auto_wait_arrival(_FRONT_LOC, timeout=_FRONT_ARRIVE_SEC)
     # 🔴 제어권을 돌려주기 **전에** Nav2 가 바퀴를 놓았는지 확인한다(A1·A2 — _NAV_* 주석).
@@ -2376,6 +2446,8 @@ def _auto_front_nav2():
         return _auto_wait_confirm()
     # 단계 기록만 ② 로 넘긴다 — 안무는 띄우지 않는다(Nav2 가 이미 데려다 놨다).
     # 건너뛰면 [SCENE] 매듭·누적 리셋이 없어 다음 단계 로그가 ① 로 남는다.
+    if not _auto_hold("② 단계 전환"):
+        return False
     _elev_scene(1, move=False)
     d = _dist_to(p.get("x"), p.get("y"))
     try:
@@ -2650,6 +2722,10 @@ def _press_or_pass() -> bool:
 
     여기서는 아무것도 움직이지 않는다. 팔 복귀 확인(arm_safe)은 여전히
     _elev_wait_press_done()만 풀 수 있다(S1 불변식)."""
+    if not _auto_hold("누르기"):
+        _auto_notify("여정을 멈췄습니다", stow_hint=True)
+        _auto_set("오류", "취소됨 — 여정 중단")
+        return False
     ok, reason = _elev_press()
     if ok:
         return True
@@ -2690,6 +2766,10 @@ def _press_or_pass() -> bool:
         _auto_set("오류", f"누르기 거부: {why} — 여정 중단")
         return False
 
+    if not _auto_hold("누르기 재시도"):
+        _auto_notify("여정을 멈췄습니다", stow_hint=True)
+        _auto_set("오류", "취소됨 — 여정 중단")
+        return False
     ok2, reason2 = _elev_press()      # 재시도는 여기 한 번뿐
     if ok2:
         return True
@@ -2730,7 +2810,7 @@ def _auto_run(dest):
     try:
         with _auto_lock:
             _AUTO.update(active=True, dest=dest, cancel=False, force=False,
-                         phase="", mode="")
+                         phase="", mode="", paused=False)
         d = _loc(dest)
         if not d:
             _auto_set("오류", f"'{dest}' 좌표를 location.yaml에서 못 찾음"); return
@@ -2754,6 +2834,8 @@ def _auto_run(dest):
                 _auto_set("오류", "🚨 Nav2 파라미터를 평소값으로 되돌리지 못했다 — "
                                   "주행 거부(좁은 안전거리로 복도를 달릴 수 있다)")
                 return
+            if not _auto_hold("같은 층 주행"):
+                _auto_set("완료", "도착 실패", phase="done"); return   # 도착 대기의 취소 결말과 같게
             _write("iface", f"/goto {dest}")
             _auto_set("완료", f"{dest} 도착 ✅" if _auto_wait_arrival(dest) else "도착 실패",
                       phase="done")
@@ -2783,6 +2865,8 @@ def _auto_run(dest):
             _auto_set("오류", "🚨 Nav2 파라미터를 평소값으로 되돌리지 못했다 — "
                               "승차지점 주행 거부")
             return
+        if not _auto_hold("승차지점 주행"):
+            _auto_set("오류", "승차지점 도착 실패(취소/시간초과)"); return
         _write("iface", "/goto 엘리베이터 탑승지점")
         if not _auto_wait_arrival("엘리베이터 탑승지점"):
             _auto_set("오류", "승차지점 도착 실패(취소/시간초과)"); return
@@ -2822,9 +2906,11 @@ def _auto_run(dest):
         # 여기서 내려두는 건 "이 지점부터는 수납을 장담 못 한다"는 뜻이다.
         arm_safe = False
         _AUTO["arm_safe"] = arm_safe
+        if not _auto_hold("① 인식 자세"): _auto_abort_elev(); return
         _elev_scene(0)                          # place=hall + 인식자세(블로킹)
+        if not _auto_hold("① 호출 버튼 선택"): _auto_abort_elev(); return
         _elev_select("^" if up else "s")        # 호출버튼 자동 선택 (^=상행 s=하행)
-        if _elev_wait_ready():
+        if _elev_wait_ready(tok=("^" if up else "s")):
             _auto_set("① 호출", f"정렬 완료 ✅ — '다음' 누르면 호출({dir_txt}) 누름", wait=True)
         else:
             _auto_set("① 호출", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
@@ -2872,9 +2958,11 @@ def _auto_run(dest):
                   phase="floor")
         arm_safe = False                        # 씬0과 같은 이유(위 주석 참고)
         _AUTO["arm_safe"] = arm_safe
+        if not _auto_hold("⑤ 인식 자세"): _auto_abort_elev(); return
         _elev_scene(4)                          # place=cab + 인식자세
+        if not _auto_hold("⑤ 층 버튼 선택"): _auto_abort_elev(); return
         _elev_select(dest_floor)                # 층버튼 자동 선택
-        if _elev_wait_ready():
+        if _elev_wait_ready(tok=dest_floor):
             _auto_set("⑤ 층선택", f"정렬 완료 ✅ — '다음' 누르면 {dest_floor}층 누름", wait=True)
         else:
             _auto_set("⑤ 층선택", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
@@ -2914,6 +3002,8 @@ def _auto_run(dest):
         #   _scene_run_begin 을 부르므로 타임아웃이 두 경우에 다 걸린다. 그래서
         #   추측하지 않고 _exit_failed 로 보낸다: 거기서 /step_stop 이 먼저 나가
         #   혹시 움직이고 있었다면 멈춘다.
+        # 멈춘 채 '다음'(하차)을 눌러도 여기서 막힌다 — 정지가 하차보다 우선한다(추가 코드 없이).
+        if not _auto_hold("⑥ 하차"): _auto_abort_elev(); return
         _sent5, _seq5 = _elev_scene(5)
         if not _sent5 or _seq5 is None:
             _exit_failed("post" if not _sent5 else "noseq", None, None)
@@ -3034,6 +3124,8 @@ def _auto_run(dest):
             _auto_set("오류", "🚨 Nav2 파라미터 복원 실패 — 목적지 주행 거부 "
                               "(하차는 완료)", phase="drive")
             return
+        if not _auto_hold("목적지 주행"):
+            _auto_set("완료", "목적지 도착 실패", phase="done"); return   # 도착 대기의 취소 결말과 같게
         _jr("ev", "amcl", where="before_dest_goto", pose=_jr_pose(), elev=_jr("elev_brief"))
         _write("iface", f"/goto {dest}")
         _auto_set("완료", f"🎉 {dest} 도착! 여정 완료" if _auto_wait_arrival(dest)
@@ -3056,7 +3148,7 @@ def _auto_run(dest):
         except Exception:
             pass
         with _auto_lock:
-            _AUTO["active"] = False; _AUTO["waiting"] = False
+            _AUTO["active"] = False; _AUTO["waiting"] = False; _AUTO["paused"] = False
         _jr_end()     # 블랙박스 run_end — finally 맨 끝(리스 반납 결과까지 담는다)
 
 
@@ -3319,7 +3411,7 @@ def auto_status():
     with _auto_lock:
         return jsonify(**{k: _AUTO[k] for k in
                           ("active", "dest", "step", "msg", "waiting",
-                           "force", "phase", "dest_floor", "mode")})
+                           "force", "phase", "dest_floor", "mode", "paused")})
 
 _CONFIRMED_LOCATIONS = {
     "인공지능 플랫폼",
