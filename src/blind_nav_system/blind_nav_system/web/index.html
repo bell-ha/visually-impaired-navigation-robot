@@ -380,10 +380,6 @@
               <option value="2">2층</option>
               <option value="1">1층</option>
             </select>
-            <label style="font-size:0.68rem;color:var(--text-dim);display:flex;align-items:center;gap:3px;cursor:pointer;"
-                   title="전환 직후 AMCL 위치를 엘리베이터 하차지점으로 자동 설정. 기본 OFF — 엘리베이터로 층을 이동한 직후에만 켜세요. 복도에서 켠 채로 누르면 측위가 하차지점으로 끌려갑니다(위험이 비대칭: 안 켜서 잃는 건 편의, 켜서 잃는 건 측위 전체)">
-              <input type="checkbox" id="init-exit-chk">하차지점 초기화
-            </label>
             <button id="map-switch-btn" onclick="switchMap()" style="background:var(--neutral-bg);color:var(--text);border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;">지도 전환</button>
           </span>
         </div>
@@ -646,14 +642,13 @@ pollFloorBtn();
 
 function switchMap() {
   const f   = document.getElementById('floor-sel').value;
-  const ini = document.getElementById('init-exit-chk').checked;
   const same = (_loadedFloor !== null && _loadedFloor === f);
   const q = same
     ? `${f}층으로 확정할까요? (지도는 이미 ${f}층 — 다시 읽지 않습니다)`
     : `${f}층 지도로 전환할까요? (약 6초)`;
-  if (!confirm(q + (ini ? '\n⚠ AMCL 위치가 엘리베이터 하차지점으로 초기화됩니다' : ''))) return;
+  if (!confirm(q)) return;
   fetch('/switch_map', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({floor: f, init_exit: ini})})
+    body: JSON.stringify({floor: f})})
     .then(r => r.json())
     .then(d => {
       if (!d.ok) alert('지도 전환 실패: ' + d.error);
