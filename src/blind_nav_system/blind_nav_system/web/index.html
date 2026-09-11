@@ -180,6 +180,11 @@
 <header>
   <h1>시각장애인 안내 로봇 대시보드</h1>
   <span class="badge badge-auto" id="mode-badge">자동 모드</span>
+  <!-- ■ 정지 — 항상 보이는 자리(STOP S2). 수동 섹션 '■ 비상 정지'와 같은 /stop 이다.
+       자동 여정 중이면 여정이 **멈춤**이 된다(재개는 자동 여정 패널의 ▶ 재개). 확인 창 없음. -->
+  <button class="btn btn-danger btn-sm" id="hdr-stop-btn" onclick="emergencyStop()"
+          style="font-size:0.9rem;padding:6px 16px;white-space:nowrap"
+          title="로봇 정지 — 자동 여정 중이면 멈춤(재개는 자동 여정 패널)">■ 정지</button>
 </header>
 <div class="readiness-bar" id="readiness-bar">
   <div class="readiness-pill status-unknown" id="ready-amcl"><span class="readiness-label">측위</span><span class="readiness-detail">모름</span></div>
@@ -418,6 +423,8 @@
         <!-- 로봇이 움직이는 동안에만 나타난다. '다음 확인'과 같은 줄에 두지 않는다 —
              잘못 눌리면 정렬이 끝나지 않은 채로 다음 단계가 시작되기 때문이다. -->
         <button id="auto-force-btn" onclick="autoForce()" style="display:none;width:100%;margin-top:5px;background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn-border);border-radius:6px;padding:6px;cursor:pointer;font-size:0.76rem;">⏭ 강제로 넘어가기 (로봇을 멈추고 다음 단계로)</button>
+        <!-- ▶ 재개 — 여정이 멈춤(■ 정지)일 때만 보인다(STOP S2). -->
+        <button id="auto-resume-btn" onclick="autoResume()" style="display:none;width:100%;margin-top:5px;background:var(--ok);color:#fff;border:none;border-radius:6px;padding:7px;cursor:pointer;font-weight:700;font-size:0.86rem;">▶ 재개</button>
       </div>
     </div>
 
@@ -947,6 +954,7 @@ function autoGoto() {
   }).catch(() => {});
 }
 function autoConfirm() { fetch('/auto_confirm', {method:'POST'}).catch(() => {}); }
+function autoResume()  { fetch('/auto_resume',  {method:'POST'}).catch(() => {}); }   // 멈춤 풀기(409 면 폴링이 버튼을 숨긴다)
 function autoForce() {
   // 정지가 먼저, 진행이 나중 — 서버(/auto_force)가 그 순서를 지킨다.
   if (!confirm('로봇을 지금 멈추고 다음 단계로 넘어갈까요?\n정렬이 끝나지 않은 상태로 진행됩니다.')) return;
@@ -1010,12 +1018,15 @@ setInterval(() => {
     const cb = document.getElementById('auto-confirm-btn');
     const gb = document.getElementById('auto-go-btn');
     const fb = document.getElementById('auto-force-btn');
+    const rb = document.getElementById('auto-resume-btn');
     if (!st || !cb || !gb) return;
     // 강제 버튼은 '잠겨 있는 동안'에만 보인다 = 로봇이 실제로 움직이는 구간.
     if (fb) fb.style.display = (d.active && !d.waiting) ? 'block' : 'none';
+    // 재개 버튼은 멈춤일 때만(STOP S2)
+    if (rb) rb.style.display = (d.active && d.paused) ? 'block' : 'none';
     if (d.active) {
-      st.textContent = `[${d.step}] ${d.msg}`;
-      st.style.color = d.waiting ? 'var(--warn)' : 'var(--ok)';
+      st.textContent = (d.paused ? '⏸ 멈춤 — ' : '') + `[${d.step}] ${d.msg}`;
+      st.style.color = d.paused ? 'var(--bad)' : (d.waiting ? 'var(--warn)' : 'var(--ok)');
       gb.disabled = true; gb.style.opacity = '0.5';
       if (d.waiting) { cb.disabled = false; cb.style.background = 'var(--ok)'; cb.style.color = '#fff'; }
       else { cb.disabled = true; cb.style.background = 'var(--neutral-bg)'; cb.style.color = 'var(--text-faint)'; }

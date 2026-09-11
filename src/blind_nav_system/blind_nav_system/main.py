@@ -835,13 +835,54 @@ def cmd():
 
 @app.route("/stop", methods=["POST"])
 def stop():
+    """■ 정지 — 헤더 '■ 정지'와 수동 섹션 '■ 비상 정지'가 같은 라우트다(STOP S2, advisor §8).
+
+    순서가 곧 설계다:
+      1) 자동 여정이 돌고 있으면 **가장 먼저** 멈춤(paused) — 여정 스레드가 다음 이동 명령을 내지
+         않게(S1 게이트). 멈춤은 종료가 아니다: 앱·리스·하트비트는 그대로 둔다.
+      2) interface /cancel — Nav2 목표 취소(_go_locked → nav.stop, 음성 없음). 여정 밖에서도 보낸다.
+         /pull 은 쓰지 않는다(음성 흐름·마이크를 연다).
+      3) 엘베앱이 떠 있으면 /step_stop·/reset(각 ≤1s) — 안무·스텝 중단, 타겟 해제.
+      4) 수동 명령 0 + cmd_vel 0 을 0.1s 간격 10회.
+    3)·4) 는 **데몬 스레드**에서 따로 돈다 — 엘베앱이 무응답이어도 핸들러와 0 명령이 기다리지 않는다.
+    응답은 즉시(확인 창 없음). 풀기는 /auto_resume, 여정을 끝내기는 /auto_cancel(바꾸지 않았다)."""
     global _manual_active
+    with _auto_lock:
+        journey = bool(_AUTO.get("active"))
+        if journey:
+            _AUTO["paused"] = True
+        step = _AUTO.get("step", "")
+    iface_ok = _write("iface", "/cancel")
     with _manual_lock:
         _manual_cmd["lx"] = 0.0
         _manual_cmd["az"] = 0.0
         _manual_active = False
     publish_cmd(0.0, 0.0)
-    return jsonify(ok=True)
+
+    def _stop_elev():
+        try:
+            if _elev_app_running():
+                _elev_post("/step_stop", {}, timeout=1)
+                _elev_post("/reset", {}, timeout=1)
+        except Exception:
+            pass
+
+    def _stop_zero():
+        for _ in range(10):
+            try:
+                publish_cmd(0.0, 0.0)
+            except Exception:
+                pass
+            time.sleep(0.1)
+    threading.Thread(target=_stop_elev, name="stop-elev", daemon=True).start()
+    threading.Thread(target=_stop_zero, name="stop-zero", daemon=True).start()
+    _log("AUTO" if journey else "MAIN",
+         "■ 정지 — " + (f"여정 멈춤 [{step}]" if journey else "여정 없음")
+         + " · Nav2 취소 " + ("전송" if iface_ok else "🚨 전송 실패(interface 없음)")
+         + f" ({request.remote_addr})")
+    _jr("human", "stop", step=step, journey=journey, iface_cancel=iface_ok,
+        remote_addr=request.remote_addr)
+    return jsonify(ok=True, paused=journey)
 
 # ── 엘리베이터 제어권 (주도권은 대시보드가 소유, 5000에 부여/회수) ─────────────
 _elev_authority = False   # 우리가 아는 엘리베이터 앱의 제어권 보유 상태
@@ -3423,6 +3464,22 @@ def auto_cancel():
         _AUTO["cancel"] = True; _AUTO["waiting"] = False
     _jr("human", "cancel", step=_AUTO.get("step"), remote_addr=request.remote_addr)
     _write("iface", "/cancel")
+    return jsonify(ok=True)
+
+
+@app.route("/auto_resume", methods=["POST"])
+def auto_resume():
+    """▶ 재개 — 멈춘 여정만 푼다(STOP S2). 여정이 없거나 멈춤이 아니면 409.
+    끊긴 명령의 재발행은 여정 스레드가 한다(S1: 도착 대기는 /goto, 조준 대기는 /select — 누르기는 안 한다)."""
+    with _auto_lock:
+        ok = bool(_AUTO.get("active") and _AUTO.get("paused"))
+        if ok:
+            _AUTO["paused"] = False
+        step = _AUTO.get("step", "")
+    if not ok:
+        return jsonify(ok=False, error="멈춘 여정이 없습니다"), 409
+    _log("AUTO", f"▶ 재개 — [{step}] ({request.remote_addr})")
+    _jr("human", "resume", step=step, remote_addr=request.remote_addr)
     return jsonify(ok=True)
 
 @app.route("/auto_status")
