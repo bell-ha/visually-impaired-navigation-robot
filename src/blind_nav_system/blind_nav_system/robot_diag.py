@@ -16,7 +16,7 @@ system main / elevator main 공용. 목적: 실시간으로 못 보는 증상을
     퍼블리셔 어느 쪽이든 매칭. (즉 '버스에 프레임이 흐르는지'를 본다)
 
 로그 위치: ~/.ros/robot_diag/<tag>/<tag>_<YYYYMMDD_HHMMSS>_pid<PID>.log
-          (프로세스별 폴더 분리 + 7일 지난 로그 자동 정리)
+          (프로세스별 폴더 분리. 자동 삭제 없음 — retain_days 기본 0)
 """
 
 import os
@@ -65,7 +65,8 @@ def shm_count():
 
 
 def _prune_old(directory, days):
-    """directory 안에서 days일 지난 .log 파일 자동 삭제 (보관 정책)."""
+    """directory 안에서 days일 지난 .log 파일 자동 삭제 (보관 정책).
+    days 가 0·None 이면 아무것도 지우지 않는다 — DiagLogger 의 기본값이 0 이다(아래 주석)."""
     if not days or days <= 0:
         return
     cutoff = time.time() - days * 86400
@@ -89,17 +90,22 @@ class DiagLogger:
     로그는 프로세스별 하위 폴더로 분리 저장:
         ~/.ros/robot_diag/system/system_<stamp>_pid<PID>.log
         ~/.ros/robot_diag/elevator/elevator_<stamp>_pid<PID>.log
-    실행 시마다 retain_days(기본 7일)보다 오래된 파일은 자동 정리된다.
+    retain_days 기본 0 = **지우지 않는다**(2026-09-11 사용자 결정). 양수를 넘기면 그 일수보다
+    오래된 .log 를 생성 시 지운다.
+    왜 0 인가: 사용자 — "항상 기록을 해야해. 나는 수도없이 이 과정을 돌려볼거고, 이상이 있으면
+    즉각적으로 수정을 할거야." 예전 기본 7일은 대시보드·엘베앱·nav 블랙박스가 **뜰 때마다** 정리를
+    돌려 8/27~9/4 원자료가 이미 사라졌다(FINDINGS #92·#192). 7일치가 14MB 이고 디스크 여유가
+    351G 라 지울 이유가 없다.
     """
 
-    def __init__(self, tag, retain_days=7):
+    def __init__(self, tag, retain_days=0):
         self.tag = tag
         self.dir = os.path.join(LOG_DIR, tag)   # ← 프로세스별 폴더 분리
         try:
             os.makedirs(self.dir, exist_ok=True)
         except Exception:
             pass
-        _prune_old(self.dir, retain_days)        # ← 7일 지난 로그 자동 삭제
+        _prune_old(self.dir, retain_days)        # ← retain_days>0 일 때만 삭제(기본 0 = 삭제 안 함)
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.path = os.path.join(self.dir, f"{tag}_{stamp}_pid{os.getpid()}.log")
         self._lock = threading.Lock()

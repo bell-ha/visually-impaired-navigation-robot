@@ -10,7 +10,7 @@
   (같은 시각 별도 recorder 프로세스는 nav2 드롭 838개를 정상 수집).
   → nav2 멈춤/드롭/복구를 확실히 파일로 남긴다.
 
-기록 위치: ~/.ros/robot_diag/nav/nav_<YYYYMMDD_HHMMSS>_pid<PID>.log  (7일 자동 보관)
+기록 위치: ~/.ros/robot_diag/nav/nav_<YYYYMMDD_HHMMSS>_pid<PID>.log  (자동 삭제 없음 — retain_days 기본 0)
 실행:     대시보드(main.py)가 start_subprocesses에서 자동 spawn → 수동 실행 불필요.
           (interface.py / vision_assistant.py 와 똑같이 대시보드가 켜줌)
 """
@@ -18,7 +18,7 @@ import os
 import sys
 import time
 
-# 기존 blackbox의 포맷·7일 보관정책·nav 필터를 그대로 재사용 (import 자체는 부작용 없음)
+# 기존 blackbox의 포맷·보관정책(기본 삭제 안 함)·nav 필터를 그대로 재사용 (import 자체는 부작용 없음)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from robot_diag import DiagLogger, _NAV_NODES, _NAV_KW, _LVL_NAME
@@ -31,7 +31,7 @@ def main():
         print("robot_diag_nav: robot_diag 임포트 실패 — 종료", flush=True)
         return
 
-    logger = DiagLogger("nav")            # ~/.ros/robot_diag/nav/ (생성 시 7일 지난 로그 자동 정리)
+    logger = DiagLogger("nav")            # ~/.ros/robot_diag/nav/ (자동 삭제 없음 — retain_days 기본 0)
     try:
         logger.boot_snapshot({"role": "nav-blackbox (독립 프로세스 — 호스트 spin과 무관)"})
     except Exception:
