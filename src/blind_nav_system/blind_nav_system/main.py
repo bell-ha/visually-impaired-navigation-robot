@@ -1577,6 +1577,20 @@ def _auto_set(step, msg, wait=False, phase=None):
     _jr("step", step, msg, wait, phase)
     _log("AUTO", f"[{step}] {msg}" + ("  — 확인 대기" if wait else ""))
 
+# 도착 '정지' 판정의 yaw 임계 — 폴링(0.3s) 사이 yaw 변화가 이보다 작아야 멈춘 것으로 본다.
+# 2026-09-11 A2(verifier 재현): 예전엔 xy 만 봐서 RotateToGoal 제자리 회전 중에 '도착'이 났다
+# (xy 도착 1.75초 뒤 yaw 129.5° / 목표 83.3° — 46° 남은 채 제어권 이양).
+# 1° 인 근거:
+#   · AMCL 은 update_min_a 0.1 rad(5.73°) 를 돌아야 pose 를 낸다(nav2_params_human.yaml) —
+#     회전 중에 보이는 yaw 변화는 한 번에 ≥5.7° 이고, 멈춰 있으면 pose 가 안 나와 변화는 0 이다.
+#     그 사이에 걸리는 값이 없으므로 1° 는 잡음에 흔들리지 않고 회전은 놓치지 않는다.
+#   · 회전 상한 max_vel_theta 0.4 rad/s = 22.9°/s → 폴링 한 번에 최대 6.9°.
+# 한계: 마지막 5.7° 미만의 회전은 AMCL 이 pose 를 내지 않아 이 판정으로 안 보인다
+#   (yaw_goal_tolerance 0.05 rad = 2.9°). 제어권을 넘기는 자리는 _nav_release_wheels 가 바퀴
+#   명령(cmd_vel)으로 한 번 더 막는다.
+_ARRIVE_YAW_STILL_DEG = 1.0
+
+
 def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
     """name 지점 '정밀 도착'까지 대기. nav이 5cm로 서므로, 여기선 목표 tol(기본 10cm)
     이내에서 로봇이 settle초간 '멈춰있으면'(=nav 완료 = 정밀 도착) True.
@@ -1596,11 +1610,14 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
         if _AUTO["cancel"]:
             _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "cancel", False)
             return False
-        rx, ry = _robot_pose["x"], _robot_pose["y"]
+        rx, ry, ryaw = _robot_pose["x"], _robot_pose["y"], _robot_pose["yaw_deg"]
         d = _dist_to(tx, ty)
         near    = (d is not None and d <= tol)
+        # 정지 = 폴링 간 xy 2cm 미만 **그리고** yaw _ARRIVE_YAW_STILL_DEG 미만(A2 — 위 상수 주석)
         stopped = (last is not None and rx is not None
-                   and _math_auto.hypot(rx - last[0], ry - last[1]) < 0.02)  # 폴링 간 2cm 미만 = 정지
+                   and _math_auto.hypot(rx - last[0], ry - last[1]) < 0.02
+                   and ryaw is not None and last[2] is not None
+                   and abs((ryaw - last[2] + 180.0) % 360.0 - 180.0) < _ARRIVE_YAW_STILL_DEG)
         if near and stopped:
             if stable_since is None:
                 stable_since = time.monotonic()
@@ -1610,7 +1627,7 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
         else:
             stable_since = None
         if rx is not None:
-            last = (rx, ry)
+            last = (rx, ry, ryaw)
         time.sleep(0.3)
     _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "timeout", False)
     return False
@@ -2362,8 +2379,10 @@ def _auto_front_nav2():
     _elev_scene(1, move=False)
     d = _dist_to(p.get("x"), p.get("y"))
     try:
-        tgt_yaw = math.degrees(2.0 * math.atan2(float(p.get("z") or 0.0),
-                                                float(p.get("w") or 1.0)))
+        # 모듈 최상위에 `import math` 가 없다 — 예전 `math.degrees` 는 NameError 로 except 에 떨어져
+        # 이 로그의 방향이 도입 이후 **항상 "?"** 였다(A2 를 로그로 잡을 유일한 수단이 죽어 있었다).
+        tgt_yaw = _math_auto.degrees(2.0 * _math_auto.atan2(float(p.get("z") or 0.0),
+                                                            float(p.get("w") or 1.0)))
         dy = (_robot_pose["yaw_deg"] - tgt_yaw + 180.0) % 360.0 - 180.0
     except Exception:
         dy = None
