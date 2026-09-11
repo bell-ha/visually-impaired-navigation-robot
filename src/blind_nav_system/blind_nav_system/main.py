@@ -2463,6 +2463,39 @@ def _http_self(path, payload):
         _log("AUTO", f"{path} 호출 실패: {e}")
         return False
 
+
+# /switch_map 핸들러의 최악 소요 ≈ 13s = _map_loaded_floor 의 ros2 param get(timeout 5s)
+# + load_map 대기(6.0s) + 엘베앱 /floor 통보(timeout 2s). _http_self 의 10s 로는 정상 전환도
+# 시간초과로 끊긴다(2026-09-11 verifier A3 재현: 10.05s 'timed out' 뒤 지도 전환은 뒤늦게 성공).
+# 시간초과가 '실패'가 아니라 '아직 모름'이 되지 않게 핸들러 최악의 2배 넘게 둔다.
+_SWITCH_MAP_TIMEOUT = 30.0
+
+
+@_jr_traced("http_self_json")
+def _http_self_json(path, payload, timeout):
+    """_http_self 와 같은 POST 이지만 **응답 본문**을 돌려준다. (본문 dict | None, 오류 | None).
+
+    _http_self 는 HTTP 200 이면 True 라서 {"ok": false} 를 성공으로 넘긴다. 판정이 본문에
+    실리는 라우트(/switch_map — "map_server 서비스 없음"·"load_map 실패"가 200 으로 온다)는
+    이걸 써야 한다. 4xx/5xx 도 본문을 읽는다(라우트가 사유를 싣는다)."""
+    try:
+        import urllib.request
+        import urllib.error
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(
+                f"http://localhost:8080{path}",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"}, method="POST"), timeout=timeout)
+            raw = r.read()
+        except urllib.error.HTTPError as he:
+            raw = he.read()
+        body = json.loads((raw or b"").decode() or "{}")
+        return (body if isinstance(body, dict) else None), (None if isinstance(body, dict)
+                                                             else "본문이 dict 아님")
+    except Exception as e:
+        _log("AUTO", f"{path} 호출 실패: {e}")
+        return None, repr(e)
+
 # 중단 지점은 전부 팔이 뻗어 있을 수 있는 자리인데 자동 수납은 하지 않는다
 # (그리퍼 선행 닫기가 패널·문틀에 걸린다). 그 상태로 밀거나 수동주행하면
 # 막으려던 충돌이 사람 손으로 다시 난다 — 운영자에게만 알린다.
@@ -2592,7 +2625,7 @@ def _press_or_pass() -> bool:
 
 def _auto_run(dest):
     """반자동 여정 상태머신 (백그라운드 스레드)."""
-    global _elev_started_mono, _rescue_hold
+    global _elev_started_mono, _rescue_hold, _floor_confirmed
     # 지난 여정의 구조 유지 플래그를 물려받지 않는다 — 앱을 끄지 않고 새 여정을
     # 시작하면 True인 채 상속돼 이번 여정의 finally도 반납을 건너뛴다(가드가 계속
     # 꺼진 채 남는 #91 재발). 이건 해제(release)가 아니라 진입 시 상태 위생이고,
@@ -2850,13 +2883,42 @@ def _auto_run(dest):
 
         # 7) 지도 전환 + 하차지점 초기화 (자동)
         _auto_set("지도전환", f"{dest_floor}층 지도 전환 + 하차지점 초기화", phase="exit")
-        _http_self("/switch_map", {"floor": dest_floor, "init_exit": True})
+        # 🔴 결과를 본다(2026-09-11 verifier S3 재현). 예전에는 반환을 버렸다 — ok=False 가
+        #    HTTP 200 으로 와도, 10s 시간초과가 나도 그대로 /goto 로 갔다. 그러면 틀린 층에서
+        #    "🎉 도착"을 선언하고(전 층이 같은 지도 all.pgm 이라 AMCL 이 반박하지 않는다),
+        #    _current_floor·확정이 옛 층에 남아 **다음 여정의 ▲▼ 판정이 확정 플래그를 통과한다.**
+        #    확인 근거는 **우리가 보낸 이 POST 의 성공 응답**뿐이다. GET /switch_map 의
+        #    loaded_floor 는 근거가 못 된다 — 층 지도가 전부 같은 이미지라 틀린 층도 일치로 보인다.
+        #    시간초과·예외·본문 없음은 '모름'이고, 모르면 확정을 내린다. (핸들러가 시간초과 뒤에
+        #    끝나 확정을 다시 올리는 경우는 load_map 이 실제로 성공했을 때뿐이라 거짓 확정이 아니다.
+        #    여정은 어느 쪽이든 아래에서 목적지 주행 전에 멈춘다.)
+        _sw_body, _sw_err = _http_self_json("/switch_map", {"floor": dest_floor, "init_exit": True},
+                                            _SWITCH_MAP_TIMEOUT)
+        _sw_ok = bool(_sw_body) and _sw_body.get("ok") is True \
+            and str(_sw_body.get("floor")) == str(dest_floor)
+        _sw_why = ""
+        if not _sw_ok:
+            _floor_confirmed = False
+            _sw_why = (_sw_body or {}).get("error") or _sw_err or f"응답 이상 {_sw_body}"
+            _log("AUTO", f"🚨 {dest_floor}층 지도 전환을 확인하지 못했다 — {_sw_why}. 현재 층 확정 "
+                         f"해제(_current_floor={_current_floor} 는 그대로, 확정=False)")
         time.sleep(2)
 
         # 8) 엘베앱 OFF (제어권 회수 + 종료)
         _auto_set("엘베종료", "엘리베이터 앱 종료 + 제어권 회수", phase="exit")
         _http_self("/elevator_app", {"running": False})
         time.sleep(1)
+
+        if not _sw_ok:
+            # 층을 모르는 채 목적지로 가지 않는다. 앱 종료(8)까지는 정상 경로와 같게 두었다 —
+            # 리스는 이미 반납했고 로봇은 엘리베이터 밖이라, 앱을 남겨 둘 이유가 없다.
+            # 음성은 새로 만들지 않는다 — 같은 단계(하차 뒤 목적지 출발 불가)의 기존 문구를 쓴다.
+            _auto_notify("엘리베이터에서 나왔지만 목적지로 출발할 수 없습니다. "
+                         "도움을 요청하세요")
+            _auto_set("오류", f"🚨 {dest_floor}층 지도 전환 확인 실패({_sw_why}) — 층 확정 해제, "
+                              "목적지 주행 거부(하차는 완료). 대시보드에서 현재 층을 다시 "
+                              "선택하세요", phase="drive")
+            return
 
         # 9) 목적지 주행 (자동)
         _auto_set("주행", f"{dest}로 이동 중...", phase="drive")
