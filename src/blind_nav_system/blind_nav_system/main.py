@@ -2191,6 +2191,69 @@ _FRONT_LOC        = "엘리베이터 문앞"
 # 조용히 3분 넘게 서 있다가 실패한다.
 _FRONT_ARRIVE_SEC = 60.0
 
+# ── 바퀴 주인 넘기기 — Nav2 → 엘베앱 (2026-09-11 A1·A2, verifier 재현) ───────────────
+# /cmd_vel 에 중재자가 없다(_auto_front_nav2 독스트링). Nav2 가 바퀴를 잡은 채 엘베앱에
+# 제어권을 돌려주면 주인이 둘이 된다. 재현된 두 경로:
+#   A1 ② 60초 미도착 → Nav2 목표가 살아 있는 채 /authority granted=true → '다음'만 누르면
+#      ④ 전진 185cm 까지 Nav2 goal 이 산다.
+#   A2 _auto_wait_arrival 은 xy 만 보므로 RotateToGoal 제자리 회전 중에 '도착'이 난다
+#      (xy 도착 1.75초 뒤 yaw 46° 남은 채 제어권 이양). 승차지점 첫 부여도 같은 판정을 쓴다.
+# '놓았다'의 근거는 pose 가 아니라 **바퀴 명령**이다. amcl_pose 는 update_min_d 0.15 /
+# update_min_a 0.1 을 넘어야 갱신돼 '멈춤'과 '못 받음'을 못 가른다. 대시보드는 이미
+# /stretch/cmd_vel 을 구독해 0 아닌 명령 시각을 _last_move_cmd 에 둔다(구독 추가 0).
+_NAV_QUIET_SEC  = 1.0    # 0 아닌 cmd_vel 이 이만큼 없으면 '바퀴를 놓았다'
+# 도착 뒤 Nav2 가 스스로 끝나기를 기다리는 상한 — 회전을 중간에 끊지 않으려고.
+# max_vel_theta 0.4 rad/s(nav2_params_human.yaml)로 180° 가 7.9s 다. 넘으면 /cancel.
+_NAV_SETTLE_SEC = 10.0
+_NAV_CANCEL_SEC = 5.0    # /cancel 뒤 멈추기를 기다리는 상한(컨트롤러는 취소 즉시 0 을 낸다)
+# cmd_vel 콜백이 살아 있다는 증거. 스핀 스레드가 굶거나 죽으면 _last_move_cmd 가 멈춰서
+# '조용함'으로 **보인다**. /battery 는 드라이버 상태 타이머 30Hz(stretch_driver rate)이고
+# 같은 스핀의 _battery_callback 이 받으므로, 그게 5초 넘게 조용하면 '모른다'로 본다.
+_SPIN_ALIVE_SEC = 5.0
+
+
+def _cmd_quiet_wait(quiet_sec, timeout):
+    """0 아닌 /stretch/cmd_vel 이 quiet_sec 동안 없을 때까지 대기. (조용해졌나, 사유).
+    사유: "quiet" / "moving"(상한까지 명령이 계속 나옴) / "spin_dead"(콜백 생존 증거 없음)."""
+    t0 = time.monotonic()
+    while True:
+        now = time.monotonic()
+        if now - (_ready.get("battery") or 0.0) > _SPIN_ALIVE_SEC:
+            return False, "spin_dead"
+        if now - _last_move_cmd >= quiet_sec:
+            return True, "quiet"
+        if now - t0 >= timeout:
+            return False, "moving"
+        time.sleep(0.1)
+
+
+@_jr_traced("nav_release_wheels", ev="gate")
+def _nav_release_wheels(arrived, where):
+    """엘베앱에 제어권을 넘기기 **전에** Nav2 가 바퀴를 놓았는지 확인한다. 놓았으면 True.
+
+    False 면 호출부는 제어권을 넘기지 말고 여정을 끊어야 한다 — 두 주체가 같은 바퀴를
+    잡는 것보다 멈추는 편이 낫다(fail-closed).
+      · 도착했으면 먼저 스스로 끝나기를 기다린다. 정상 경로는 여기서 바로 True 이고
+        /cancel 을 보내지 않는다(interface 의 도착 안내·상태 전이를 건드리지 않는다).
+      · 미도착이거나 도착 뒤에도 명령이 계속 나오면 interface 에 /cancel 을 보낸다.
+        /auto_cancel 과 같은 경로다(_go_locked → nav.stop, 음성 없음). 그 뒤 다시 기다린다."""
+    if arrived:
+        quiet, why = _cmd_quiet_wait(_NAV_QUIET_SEC, _NAV_SETTLE_SEC)
+        if quiet:
+            return True
+        if why == "spin_dead":
+            _log("AUTO", f"🚨 {where}: cmd_vel 콜백 생존 증거 없음(/battery {_SPIN_ALIVE_SEC:.0f}s 넘게 "
+                         "조용) — 바퀴를 놓았는지 모른다")
+            return False
+        _log("AUTO", f"⚠ {where}: 도착 판정 뒤 {_NAV_SETTLE_SEC:.0f}s 동안 Nav2 명령이 계속 나온다 "
+                     "— /cancel 로 끊는다")
+    sent = _write("iface", "/cancel")
+    quiet, why = _cmd_quiet_wait(_NAV_QUIET_SEC, _NAV_CANCEL_SEC)
+    _log("AUTO", f"{where}: Nav2 목표 취소 요청 "
+                 + ("전송" if sent else "🚨 전송 실패(interface 없음)") + " → "
+                 + ("바퀴 멈춤 확인" if quiet else f"🚨 멈춤 확인 실패({why})"))
+    return quiet
+
 
 @_jr_traced("auto_front_nav2")
 def _auto_front_nav2():
@@ -2244,6 +2307,15 @@ def _auto_front_nav2():
               wait=False, phase="front")
     _write("iface", f"/goto {_FRONT_LOC}")
     arrived = _auto_wait_arrival(_FRONT_LOC, timeout=_FRONT_ARRIVE_SEC)
+    # 🔴 제어권을 돌려주기 **전에** Nav2 가 바퀴를 놓았는지 확인한다(A1·A2 — _NAV_* 주석).
+    #    못 확인하면 제어권을 돌려주지 않는다. 여기서 False 를 돌려주면 _auto_run 이 엘베앱을
+    #    끈다 — 팔은 ① 누르기 뒤 수납 확인된 상태(arm_safe)라 앱 종료로 잃는 것은 패드뿐이고,
+    #    Nav2 가 아직 바퀴를 잡고 있다면 패드는 어차피 쓸 수 없다.
+    if not _nav_release_wheels(arrived, "② 문앞"):
+        _auto_notify("로봇이 멈췄는지 확인하지 못해 여정을 멈췄습니다. 도움을 요청하세요")
+        _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 엘베앱 제어권을 돌려주지 "
+                          "않고 ② 중단", phase="front")
+        return False
     # 도착 여부와 무관하게 제어권은 되돌린다 — ③ 문대기·④ 엘리베이터 안이 엘베앱이고,
     # 실패해도 사람이 엘베UI 조종 패드로 수습해야 한다(패드는 제어권이 있어야 듣는다).
     if not _grant_elev_lease(True, "② 문앞 구간 종료 — 엘베 모드 복귀"):
@@ -2616,6 +2688,12 @@ def _auto_run(dest):
             threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
         if not _wait_elev_app_up(20):
             _auto_set("오류", "엘베앱 기동 실패"); return
+        # 🔴 첫 제어권 부여도 같다 — 승차지점 '도착'은 xy 만 본 판정이라 Nav2 가 아직
+        #    제자리 회전 중일 수 있다(A2). 확인 못 하면 제어권을 주지 않는다.
+        if not _nav_release_wheels(True, "승차지점"):
+            _auto_notify("로봇이 멈췄는지 확인하지 못해 여정을 멈췄습니다. 도움을 요청하세요")
+            _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 엘베앱 제어권 부여 거부")
+            return
         if not _grant_elev_lease(True, "엘베 여정 시작"):
             _auto_set("오류", "제어권 부여 실패 — 여정 중단"); return
 
