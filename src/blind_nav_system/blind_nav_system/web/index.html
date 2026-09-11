@@ -396,6 +396,15 @@
     <div>
       <h2>🤖 자동 여정 (엘베 포함)</h2>
       <div style="margin-top:6px">
+        <!-- 주행 속도 — 출발 전에 맞추는 값이라 목적지·출발 줄 바로 위에 둔다. 여정 중엔 잠긴다
+             (서버 409 와 같다). 값은 컨트롤러에서 읽은 실제 값이고, 못 읽으면 '?' 와 사유 툴팁. -->
+        <div id="drive-speed-row" style="margin-bottom:8px">
+          <label for="speed" style="color:var(--text-dim);font-size:0.8rem"
+                 title="자율주행(Nav2) 최고 속도 — 수동 조작 속도도 같은 값을 쓴다">주행 속도 <span id="spv">…</span> m/s</label>
+          <input type="range" id="speed" min="0.10" max="0.40" step="0.02" value="0.26" style="width:100%"
+                 oninput="_speedDisplay(this.value)" onchange="_speedApply(this.value)">
+          <div id="speed-note" style="font-size:0.72rem;color:var(--warn)"></div>
+        </div>
         <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
           <select id="auto-dest" style="flex:1;background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:0.82rem;"></select>
           <button id="auto-go-btn" onclick="autoGoto()" style="background:var(--ok);color:#fff;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:700;font-size:0.82rem;white-space:nowrap;">🚀 출발</button>
@@ -450,13 +459,8 @@
     </div>
 
     <div>
-      <h2>속도 설정</h2>
+      <h2>음성 속도</h2>
       <div id="speed-settings" style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
-        <div>
-          <label style="color:var(--text-dim);font-size:0.8rem">속도: <span id="spv">0.26</span> m/s</label>
-          <input type="range" id="speed" min="0.10" max="0.40" step="0.02" value="0.26" style="width:100%"
-                 oninput="_speedDisplay(this.value)" onchange="_speedApply(this.value)">
-        </div>
         <div>
           <label style="color:var(--text-dim);font-size:0.8rem">TTS 속도: <span id="tts-speed-val">1.5</span>x</label>
           <input type="range" min="0.5" max="2.0" step="0.1" value="1.5" style="width:100%"
@@ -515,6 +519,7 @@ function loadLocations() {
   }).catch(() => {});
 }
 loadLocations();
+loadRobotSpeed();   // 실제 주행 속도 1회
 
 function getSpeed() { return parseFloat(document.getElementById('speed').value); }   // 슬라이더 값 = m/s 직접
 
@@ -525,16 +530,63 @@ function _speedDisplay(v) {
   document.getElementById('spv').textContent = parseFloat(v).toFixed(2);
 }
 
-// onchange(또는 키패드 +/-) = 실제 반영: 수동 teleop 속도 + /robot_speed(자율주행) POST 1회
-function _speedApply(v) {
-  v = parseFloat(v);
-  _speedDisplay(v);
+// 서버가 확인한 실제 값 — 컨트롤러에서 읽었거나 POST 성공으로 확인된 값. 모르면 null.
+let speedActual = null;
+function _speedShowActual(v, why) {
+  const el = document.getElementById('spv');
+  if (v === null || v === undefined) { el.textContent = '?'; el.title = why || '읽지 못함'; return; }
+  el.textContent = parseFloat(v).toFixed(2);
+  el.title = '';
+}
+// 비모달 알림(sysNote·elevNote 와 같은 방식) — alert 는 주행 중 cmdInterval 을 멈춘다.
+let speedNoteTimer = null;
+function speedNote(msg, ms) {
+  const el = document.getElementById('speed-note');
+  if (!el) return;
+  el.textContent = msg;
+  clearTimeout(speedNoteTimer);
+  if (ms) speedNoteTimer = setTimeout(() => { el.textContent = ''; }, ms);
+}
+function _speedTeleop(v) {
   if (activeDir) {
     const [lxMul, azMul] = DIR_MUL[activeDir];
     currentLx = lxMul * v;
     currentAz = azMul * v * 2;
   }
-  fetch('/robot_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: v})});
+}
+// 실제 값 읽기 — 페이지 로드 1회 + Launch 시작 성공 뒤 1회. 🔴 주기 폴링 금지(ros2 CLI 반복 = DDS churn).
+function loadRobotSpeed() {
+  fetch('/robot_speed').then(r => r.json()).then(d => {
+    if (d.ok) {
+      speedActual = d.speed;
+      document.getElementById('speed').value = d.speed;
+      _speedShowActual(d.speed);
+    } else {
+      speedActual = null;
+      _speedShowActual(null, d.error);
+    }
+  }).catch(() => _speedShowActual(null, '대시보드 응답 없음'));
+}
+// 실패(여정 중 409 포함)면 슬라이더를 마지막 실제 값으로 되돌리고 사유를 띄운다.
+function _speedRevert(msg) {
+  const s = document.getElementById('speed');
+  if (speedActual !== null) s.value = speedActual;
+  _speedTeleop(parseFloat(s.value));
+  _speedShowActual(speedActual, msg);
+  speedNote(msg, 8000);
+}
+
+// onchange(또는 키패드 +/-) = 실제 반영: 수동 teleop 속도 + /robot_speed(자율주행) POST 1회
+function _speedApply(v) {
+  v = parseFloat(v);
+  _speedDisplay(v);
+  _speedTeleop(v);
+  fetch('/robot_speed', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({speed: v})})
+    .then(r => r.json()).then(d => {
+      // fetch 는 409·502 에 reject 하지 않는다 — d.ok 를 봐야 거부가 침묵하지 않는다.
+      if (d.ok) { speedActual = d.speed; _speedShowActual(d.speed); speedNote(''); return; }
+      _speedRevert('⚠ ' + (d.error || '속도 변경 실패'));
+    }).catch(() => _speedRevert('⚠ 속도 변경 요청 실패'));
 }
 
 function setSpeed(v) {
@@ -948,6 +1000,12 @@ setInterval(() => {
   fetch('/auto_status').then(r => r.json()).then(d => {
     autoJourneyActive = !!d.active;
     _updateSnapshotBtn();
+    // 주행 속도는 여정 중 잠긴다(서버 409 와 같게 화면에서도)
+    const spd = document.getElementById('speed');
+    if (spd) {
+      spd.disabled = !!d.active;
+      spd.title = d.active ? '자동 여정 중에는 바꿀 수 없습니다 — 취소 후 다시' : '';
+    }
     const st = document.getElementById('auto-status');
     const cb = document.getElementById('auto-confirm-btn');
     const gb = document.getElementById('auto-go-btn');
@@ -1103,6 +1161,8 @@ function toggleSysProc(name, external) {
     // fetch는 409에 reject하지 않는다 — 여기서 d.ok를 안 보면 거부가 침묵한다.
     if (!d.ok) { sysNote('⚠ ' + (d.error || '실패'), 8000); pollSysProcStatus(); return; }
     updateSysProcUI(name, {state: d.running ? 'mine' : 'off', running: d.running});
+    // Launch 를 띄웠으면 컨트롤러가 뜬 뒤 실제 속도를 한 번 읽는다(바로 읽으면 노드가 아직 없다).
+    if (name === 'launch' && d.running) setTimeout(loadRobotSpeed, 20000);
   }).catch(() => {});
 }
 

@@ -1218,8 +1218,16 @@ def readiness():
         elev_app=_readiness_polled("elev_app", "엘베앱"),
     )
 
-@app.route("/robot_speed", methods=["POST"])
+@app.route("/robot_speed", methods=["GET", "POST"])
 def set_robot_speed():
+    if request.method == "GET":
+        # 실제 값 — 컨트롤러에서 읽는다(화면에 지어낸 기본값을 보여주지 않으려고).
+        # 🔴 주기 폴링 금지: ros2 CLI 를 반복 띄우면 DDS 참가자가 계속 생겼다 사라진다(#22).
+        #    UI 는 페이지 로드 1회 + Launch 시작 성공 뒤 1회만 부른다. 여정 중에도 읽기는 연다.
+        v, why = _nav_param_get_detail("/controller_server", "FollowPath.max_vel_x")
+        if v is None:
+            return jsonify(ok=False, error=why or "읽기 실패")
+        return jsonify(ok=True, speed=round(v, 3))
     # 여정 중에는 잠근다 — 실행 도중 컨트롤러 속도가 바뀌면 그 실행의 기록이 해석 불가가 된다.
     # (실제 값을 기록하는 쪽은 ros2 param get 을 새로 불러야 해서 택하지 않았다)
     _g = _journey_gate('로봇 속도 변경')
@@ -1227,16 +1235,21 @@ def set_robot_speed():
         return _g
     speed = float(request.json.get("speed", 0.26))
     speed = max(0.10, min(0.50, speed))
-    subprocess.run(
-        ["ros2", "param", "set", "/controller_server",
-         "FollowPath.max_vel_x", str(speed)],
-        capture_output=True, timeout=5
-    )
-    subprocess.run(
-        ["ros2", "param", "set", "/controller_server",
-         "FollowPath.max_speed_xy", str(speed)],
-        capture_output=True, timeout=5
-    )
+    # 두 번의 set 이 **둘 다** 성공했을 때만 성공이다. 예전엔 결과를 안 보고 무조건 "변경"
+    # 로그를 남겼다 — 데몬이 없거나 컨트롤러가 안 떠 있어도 화면은 바뀐 값으로 보였다.
+    fails = []
+    for pname in ("FollowPath.max_vel_x", "FollowPath.max_speed_xy"):
+        try:
+            r = subprocess.run(["ros2", "param", "set", "/controller_server", pname, str(speed)],
+                               capture_output=True, timeout=5, text=True)
+            out = (r.stdout or "").strip()
+            if r.returncode != 0 or "Set parameter successful" not in out:
+                fails.append(f"{pname}: rc={r.returncode} {((r.stderr or '').strip() or out)[:120]}")
+        except Exception as e:
+            fails.append(f"{pname}: {e!r}")
+    if fails:
+        _log("MAIN", f"속도 변경 실패 → {speed} m/s — " + " / ".join(fails))
+        return jsonify(ok=False, speed=speed, error="속도 변경 실패 — " + " / ".join(fails)), 502
     _log("MAIN", f"로봇 속도 변경 → {speed} m/s")
     return jsonify(ok=True, speed=speed)
 
@@ -1840,6 +1853,12 @@ def _nav_param_get(node, name):
       /global_costmap/global_costmap 을 "Node not found" 로 놓쳤다(같은 노드를
       ros2 node list 는 보여준다). 그래서 여기서는 데몬 경로를 그대로 쓴다.
     """
+    return _nav_param_get_detail(node, name)[0]
+
+
+def _nav_param_get_detail(node, name):
+    """_nav_param_get 과 같은 ros2 param get 한 번 — (값 float | None, 못 읽은 사유 | None).
+    사유가 화면에 필요한 곳(주행 속도 슬라이더의 '?' 툴팁)용이다. 판정·블랙박스 기록은 같다."""
     _jt0 = time.monotonic()
     try:
         r = subprocess.run(["ros2", "param", "get", node, name],
@@ -1848,12 +1867,12 @@ def _nav_param_get(node, name):
             stdout_head=(r.stdout or "")[:160], stderr_head=(r.stderr or "")[:200],
             latency_ms=round((time.monotonic() - _jt0) * 1000))
         if r.returncode != 0:
-            return None
-        return float((r.stdout or "").rsplit(":", 1)[-1].strip())
+            return None, ((r.stderr or r.stdout or "").strip()[:160] or f"rc={r.returncode}")
+        return float((r.stdout or "").rsplit(":", 1)[-1].strip()), None
     except Exception as _je:
         _jr("gate", "param_get", inputs={"node": node, "name": name}, exc=repr(_je),
             latency_ms=round((time.monotonic() - _jt0) * 1000))
-        return None
+        return None, repr(_je)
 
 
 @_jr_traced("nav_params_restore_normal", ev="gate")
