@@ -145,12 +145,13 @@ def _jr(method, *args, **kwargs):
     return None
 
 
-def _jr_traced(name, post=None, ev="call"):
-    """호출 기록 데코레이터 — 인자·반환·지연만 적고 그대로 통과시킨다. 레코더가 없으면 원 함수."""
+def _jr_traced(name, post=None, ev="call", cap=None):
+    """호출 기록 데코레이터 — 인자·반환·지연만 적고 그대로 통과시킨다. 레코더가 없으면 원 함수.
+    cap: 반환값을 JSON 으로 이 글자 수까지만 남긴다(응답 본문처럼 클 수 있는 것)."""
     if _JR is None:
         return lambda fn: fn
     try:
-        return _JR.traced(name, post=post, ev=ev)
+        return _JR.traced(name, post=post, ev=ev, cap=cap)
     except Exception:
         return lambda fn: fn
 
@@ -208,6 +209,7 @@ def _capture(proc: subprocess.Popen, name: str):
             continue
         _log(name, line)
 
+@_jr_traced("write")   # /goto·/cancel·/say — "Nav2 목표를 끊었나"(A1)를 기록으로 증명하려고
 def _write(name: str, cmd: str) -> bool:
     """자식 프로세스 stdin에 한 줄 보낸다.
 
@@ -395,6 +397,9 @@ def _load_exit_point():
 
 # ── 현재 위치 (AMCL) ──────────────────────────────────────────────────────────
 _robot_pose = {"x": None, "y": None, "z": None, "w": None, "yaw_deg": None}
+# AMCL 공분산 — 블랙박스 기록 전용(판정에 안 쓴다). _robot_pose 에 섞지 않는다:
+# /robot_pose 가 그 dict 를 그대로 응답으로 내보낸다(API 불변).
+_amcl_cov = {"xx": None, "yy": None, "yawyaw": None, "t": 0.0}
 
 def _amcl_pose_cb(msg):
     try:
@@ -407,6 +412,9 @@ def _amcl_pose_cb(msg):
                            z=round(q.z, 4), w=round(q.w, 4),
                            yaw_deg=round(math.degrees(yaw), 1))
         _ready["amcl"] = time.monotonic()
+        _c = msg.pose.covariance
+        _amcl_cov.update(xx=round(float(_c[0]), 5), yy=round(float(_c[7]), 5),
+                         yawyaw=round(float(_c[35]), 6), t=_ready["amcl"])
     except Exception:
         pass   # 콜백 예외가 절대 rclpy.spin 스레드를 죽이지 않게
 
@@ -1626,6 +1634,7 @@ def _auto_wait_confirm(timeout=900):
         time.sleep(0.2)
     return False
 
+@_jr_traced("elev_post", cap=2000)   # 응답 본문 — /select·/press 거부 사유 문자열이 여기 있다
 def _elev_post(path, payload=None, timeout=20):
     """엘베앱(5000) POST — 응답 JSON(dict) 또는 None."""
     try:
@@ -2895,6 +2904,10 @@ def _auto_run(dest):
         # 캐빈/문턱에서 /switch_map·/goto로 넘어간다. 씬 ①②③④와 ⑥직전이 전부
         # 확인 대기를 거치는데 이 한 자리만 상수였다.
         ex_reason, ex_res, ex_cm = _elev_wait_exit_done(_seq5)
+        # 블랙박스: 하차 종료 시점의 측위. 하차지점 초기화를 끈 뒤(3f31e43)로는 캐빈 안에서 흔들린
+        # AMCL 을 목적지 주행이 그대로 이어받는다 — 그 출발값을 남긴다(odom 은 구독 없음).
+        _jr("ev", "amcl", where="exit_done", exit_reason=ex_reason, pose=_jr_pose(),
+            elev=_jr("elev_brief"))
         if ex_reason == "fallback":
             # 좌표가 거부돼 하드코딩(-186cm)으로 물러섰지만 그 후진은 완주했다 =
             # 엘리베이터에서는 나왔다. 목표 자세는 아니므로 경고는 하되 구조 절차는
@@ -2989,6 +3002,7 @@ def _auto_run(dest):
             _auto_set("오류", "🚨 Nav2 파라미터 복원 실패 — 목적지 주행 거부 "
                               "(하차는 완료)", phase="drive")
             return
+        _jr("ev", "amcl", where="before_dest_goto", pose=_jr_pose(), elev=_jr("elev_brief"))
         _write("iface", f"/goto {dest}")
         _auto_set("완료", f"🎉 {dest} 도착! 여정 완료" if _auto_wait_arrival(dest)
                   else "목적지 도착 실패", phase="done")
@@ -3027,7 +3041,8 @@ def _jr_pose():
         pa = _ready.get("amcl") or 0.0
         return dict(_robot_pose,
                     pose_age_s=(round(now - pa, 1) if pa > 0 else None),
-                    cmd_age_s=(round(now - _last_move_cmd, 1) if _last_move_cmd > 0 else None))
+                    cmd_age_s=(round(now - _last_move_cmd, 1) if _last_move_cmd > 0 else None),
+                    cov={k: _amcl_cov.get(k) for k in ("xx", "yy", "yawyaw")})
     except Exception:
         return None
 
@@ -3087,7 +3102,8 @@ def _jr_end():
     if _JR is None:
         return
     try:
-        _JR.end({"arm_safe": _AUTO.get("arm_safe"), "lease_held": _elev_lease_held,
+        _JR.end({"dest": _AUTO.get("dest"),
+                 "arm_safe": _AUTO.get("arm_safe"), "lease_held": _elev_lease_held,
                  "rescue_hold": _rescue_hold, "cancel_flag": bool(_AUTO.get("cancel")),
                  "mode": _AUTO.get("mode"), "dest_floor": _AUTO.get("dest_floor"),
                  "floor": _current_floor, "floor_confirmed": _floor_confirmed,

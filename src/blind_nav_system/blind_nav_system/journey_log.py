@@ -36,6 +36,7 @@
 
 import datetime
 import functools
+import glob
 import hashlib
 import json
 import math
@@ -273,6 +274,10 @@ class _Run:
         self.shown_msg = None
         self.goal = None
         self.confirm_id = None        # 지금 열려 있는 '다음' 자리(C1~C9)
+        # 이 실행의 마지막 /switch_map 결과 — 본문(after_request)과 여정 쪽 호출 반환(시간초과 포함).
+        # 다음 실행의 run_start.prev_run 이 싣는다(원인이 직전 실행에 있는 S3 모양).
+        self.last_switch = None
+        self.last_switch_call = None
         self.first_error = None       # 첫 "오류" 단계
         self.first_abort = None       # 첫 "취소" 단계(사람 취소 없이 난 것 포함)
         self.first_done = None        # 첫 "완료" 단계
@@ -310,6 +315,7 @@ class JourneyRecorder:
         # 폴링 관측 시각이다(폴링 주기만큼 늦다). 씬이 바뀌거나 거짓으로 돌아가면 지운다.
         self._door_true_mono = None
         self._door_scene = None
+        self._last_summary = None       # 이 프로세스에서 끝난 직전 실행 요약(run_start.prev_run)
 
     # ── 내부 ──
     @property
@@ -392,6 +398,12 @@ class JourneyRecorder:
                 self._run = run
             d = dict(deferred or {})
             d.setdefault("git", lambda: self.git)
+            # 직전 실행 요약 — 이 프로세스가 기억하면 그걸, 대시보드를 새로 띄웠으면 디스크의
+            # 마지막 실행 파일 끝줄(run_end)을 writer 가 읽는다. S3(틀린 층 확정이 다음 여정의 ▲▼ 를
+            # 뒤집는다)는 원인이 직전 파일에 있어 이번 파일만 봐서는 안 보인다.
+            prev_mem = self._last_summary
+            d.setdefault("prev_run", (lambda: prev_mem) if prev_mem is not None
+                         else (lambda p=run.path: self._prev_run_from_disk(p)))
             self._put(run, "run_start",
                       dict(fields or {}, dest=dest, dash_src=self.src_id), d)
             if sample_fn is not None:
@@ -414,12 +426,25 @@ class JourneyRecorder:
                 self._run = None
             run.sampler_stop.set()
             cause, outcome = self._exit_cause(run, cause_override)
+            stt = dict(state or {})
+            # 끝난 층 vs 목적층. S3 는 outcome=done 인데 floor 5 / dest 1 이었다 — 결말만 보면 성공이다.
+            fl, dfl = stt.get("floor"), stt.get("dest_floor")
+            floor_check = {"floor": fl, "dest_floor": dfl, "mode": stt.get("mode"),
+                           "match": (str(fl) == str(dfl)) if (fl not in (None, "") and
+                                                             dfl not in (None, "")) else None}
             self._put(run, "run_end",
                       {"exit_cause": cause, "outcome": outcome, "last_step": run.last_step,
                        "dur_s": round(time.monotonic() - run.mono0, 1),
-                       "forced": run.forced or None, "state": dict(state or {}),
+                       "forced": run.forced or None, "state": stt, "floor_check": floor_check,
+                       "switch_map": run.last_switch, "switch_map_call": run.last_switch_call,
                        "elev_last": self._elev_summary()},
                       deferred)
+            self._last_summary = {
+                "run": run.id, "dest": run.dest, "outcome": outcome,
+                "exit_cause": {k: cause.get(k) for k in ("kind", "step", "msg")},
+                "floor_check": floor_check, "floor_confirmed": stt.get("floor_confirmed"),
+                "switch_map": run.last_switch, "switch_map_call": run.last_switch_call,
+                "end_ts": time.time(), "source": "memory"}
         except Exception:
             pass
 
@@ -453,6 +478,70 @@ class JourneyRecorder:
         out["age_s"] = round(time.monotonic() - sm, 1) if sm else None
         return out
 
+    def elev_brief(self):
+        """캐시된 마지막 /status 요약 + odom 누적(scene_acc)·씬 결과. 새 호출 없음.
+        대시보드는 /odom 을 구독하지 않는다 — odom 쪽 근거는 엘베앱이 싣는 scene_acc 뿐이다."""
+        try:
+            out = self._elev_summary() or {}
+            st = self._st_last if isinstance(self._st_last, dict) else {}
+            sr = st.get("scene_result")
+            out["scene_acc"] = st.get("scene_acc")
+            out["scene_result"] = ({k: sr.get(k) for k in SCENE_RESULT_KEYS}
+                                   if isinstance(sr, dict) else None)
+            return out
+        except Exception:
+            return None
+
+    def _prev_run_from_disk(self, exclude_path):
+        """writer 스레드에서 — 가장 최근 실행 파일의 run_end 요약. 파일 끝 64KB 만 읽는다."""
+        try:
+            files = sorted(p for p in glob.glob(os.path.join(self.dir, "*.jsonl"))
+                           if os.path.basename(p) != REJECT_FILE
+                           and os.path.abspath(p) != os.path.abspath(exclude_path))
+            if not files:
+                return None
+            # 가장 최근 실행을 고른다. 이름(run_id = 초 단위 시각 + 임의 4hex)은 같은 초에 시작한
+            # 실행끼리 순서가 뒤집히고, mtime 도 커널 타임스탬프 입도(수 ms)에서 같게 나올 수 있다
+            # → mtime 최신 2초 안의 후보들을 **마지막 기록의 ts** 로 가른다.
+            mt = {q: os.path.getmtime(q) for q in files}
+            newest = max(mt.values())
+            cands = [q for q in files if mt[q] >= newest - 2.0]
+
+            def _tail(path):
+                with open(path, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(0, f.tell() - 65536))
+                    return f.read().decode("utf-8", "replace").splitlines()
+
+            def _last_ts(lines):
+                for ln in reversed(lines):
+                    try:
+                        return float(json.loads(ln).get("ts") or 0.0)
+                    except Exception:
+                        continue
+                return 0.0
+            tails = {q: _tail(q) for q in cands}
+            p = max(cands, key=lambda q: (_last_ts(tails[q]), mt[q]))
+            tail = tails[p]
+            for line in reversed(tail):
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if r.get("ev") == "run_end":
+                    cz = r.get("exit_cause") or {}
+                    return {"run": r.get("run"), "file": os.path.basename(p),
+                            "outcome": r.get("outcome"),
+                            "exit_cause": {k: cz.get(k) for k in ("kind", "step", "msg")},
+                            "floor_check": r.get("floor_check"),
+                            "floor_confirmed": (r.get("state") or {}).get("floor_confirmed"),
+                            "switch_map": r.get("switch_map"),
+                            "switch_map_call": r.get("switch_map_call"),
+                            "end_ts": r.get("ts"), "source": "disk"}
+            return {"file": os.path.basename(p), "no_run_end": True, "source": "disk"}
+        except Exception as e:
+            return {"err": repr(e), "source": "disk"}
+
     def _sampler(self, run, fn, period):
         while not run.sampler_stop.wait(period):
             if self._run is not run:
@@ -475,6 +564,17 @@ class JourneyRecorder:
     def gate(self, name, **fields):
         """게이트 판정 — {name, inputs, result, why, latency_ms, rc, stderr_head, ...}.
         '무엇을 보고 그렇게 판정했나'가 남아야 데몬 staleness·P=None 같은 사고가 한 줄로 보인다."""
+        try:
+            run = self._run
+            if run is not None and name == "switch_map_resp":
+                b = fields.get("body") if isinstance(fields.get("body"), dict) else {}
+                rq = fields.get("req") if isinstance(fields.get("req"), dict) else {}
+                run.last_switch = {"status": fields.get("status"), "ok": b.get("ok"),
+                                   "floor": b.get("floor"), "switched": b.get("switched"),
+                                   "error": b.get("error"), "req_floor": rq.get("floor"),
+                                   "ts": time.time()}
+        except Exception:
+            pass
         self.ev("gate", name=name, **fields)
 
     def step(self, step, msg, wait=False, phase=None):
@@ -701,7 +801,7 @@ class JourneyRecorder:
         except Exception:
             pass
 
-    def traced(self, name, post=None, ev="call"):
+    def traced(self, name, post=None, ev="call", cap=None):
         """호출 기록 데코레이터. {name, args, kwargs, ret | raised, latency_ms, **post(ret)}
 
         원 함수의 인자·반환·예외를 **그대로** 통과시킨다(행동 불변). 실행이 없으면 원 함수를
@@ -716,18 +816,23 @@ class JourneyRecorder:
                 try:
                     ret = fn(*args, **kwargs)
                 except BaseException as e:
-                    self._traced_rec(ev, name, args, kwargs, None, e, t0, post)
+                    self._traced_rec(ev, name, args, kwargs, None, e, t0, post, cap)
                     raise
-                self._traced_rec(ev, name, args, kwargs, ret, None, t0, post)
+                self._traced_rec(ev, name, args, kwargs, ret, None, t0, post, cap)
                 return ret
             return wrapper
         return deco
 
-    def _traced_rec(self, ev, name, args, kwargs, ret, exc, t0, post):
+    def _traced_rec(self, ev, name, args, kwargs, ret, exc, t0, post, cap=None):
         try:
             run = self._run
             if run is None:
                 return
+            if name == "http_self_json" and args and args[0] == "/switch_map":
+                # 시간초과는 after_request 본문이 없거나 늦게 온다 — 여정 쪽 반환도 따로 쥔다
+                run.last_switch_call = {"ret": ret, "raised": repr(exc) if exc else None,
+                                        "latency_ms": round((time.monotonic() - t0) * 1000),
+                                        "ts": time.time()}
             rec = {"name": name, "args": list(args), "kwargs": kwargs or None,
                    "latency_ms": round((time.monotonic() - t0) * 1000, 1)}
             if exc is None:
@@ -739,6 +844,8 @@ class JourneyRecorder:
                     rec.update(post(ret) or {})
                 except Exception as pe:
                     rec["post_err"] = repr(pe)
+            if cap:
+                rec["_cap"] = cap         # 크기 제한은 writer 가 건다(직렬화는 여정 스레드에서 안 한다)
             self._put(run, ev, rec)
         except Exception:
             pass
@@ -760,6 +867,14 @@ class JourneyRecorder:
                         except Exception as e:
                             rec[k] = {"deferred_err": repr(e)}
                 rec["t"] = _iso(rec.get("ts"))
+                cap = rec.pop("_cap", None)
+                if cap and "ret" in rec:
+                    try:
+                        s = json.dumps(rec["ret"], ensure_ascii=False, default=_json_default)
+                        if len(s) > cap:
+                            rec["ret"] = {"truncated_chars": len(s), "head": s[:cap]}
+                    except Exception:
+                        pass
                 if run is None:
                     self._append_reject(rec)
                     continue
