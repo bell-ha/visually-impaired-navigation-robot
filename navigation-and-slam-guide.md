@@ -206,9 +206,11 @@ ros2 run tf2_ros tf2_echo map base_link
 
 | 항목 | 값 | 설명 |
 |------|----|------|
-| footprint | 5각형, 뒤 -0.85m | 뒤에 서 있는 사람을 footprint 안으로 포함 |
-| inflation_radius | 0.45m | 벽에서 45cm 이상 거리 유지 |
-| cost_scaling_factor | 2.5 | 복도 중앙으로 경로 유도 |
+| footprint | 사각형 `[[0.175,-0.175],[0.175,0.475],[-0.9,0.475],[-0.9,-0.175]]` (1.075 × 0.65m, 뒤 -0.9m) | 뒤에 서 있는 사람을 footprint 안으로 포함 |
+| footprint_padding | 0.08 (local costmap에만) | 여유. 실효 폭 0.81m — 엘베 문 0.80m 통과 불가 (결함 #97) |
+| inflation_radius | local 0.35m / global 0.55m | global을 넓게 잡아 전역 경로를 복도 중앙으로 유도 |
+| cost_scaling_factor | 1.5 | 완만한 그라디언트 |
+| PreferForward.penalty | 20.0 | 후진 궤적 감점 (5.0은 약했음) |
 | max_vel_theta | 0.5 rad/s | 부드러운 회전 |
 | min_vel_x | 0.0 | 후진 완전 차단 |
 | use_astar | true | A* 경로 계획 |
