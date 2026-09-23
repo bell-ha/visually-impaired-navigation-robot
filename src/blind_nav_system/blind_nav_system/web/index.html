@@ -53,6 +53,65 @@
   /* 엘리베이터 화면 뷰 (iframe) — 뷰 이탈 시 src 제거로 자원 회수(연결예산·과부하 방지) */
   #elev-screen-container { display: none; flex: 1; overflow: hidden; }
   #elev-screen-frame { width: 100%; height: 100%; border: none; background: var(--bg); }
+
+  /* 여정 뷰(U4) — 시안 wip mock/proto.html 의 CSS 를 그대로 옮김(새 색·새 폰트 0).
+     대시보드는 .log-container 가 flex 세로라 #journey-view 만 flex:1·min-height:0 로 맞췄다. */
+  #journey-view { display: none; flex-direction: column; flex: 1; min-height: 0;
+                  overflow-y: auto; padding: 16px 20px; gap: 14px; }
+  .jv-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+             padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+  .jv-dest { font-size: 1.3rem; font-weight: 700; }
+  .jv-route { font-size: 0.95rem; color: var(--text-dim); }
+  .jv-route b { color: var(--text); font-weight: 600; }
+  .jv-elapsed { margin-left: auto; font-family: var(--font-mono); font-size: 0.9rem;
+                color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .jv-now { display: grid; grid-template-columns: 76px 1fr; gap: 20px;
+            background: var(--panel); border: 1px solid var(--border);
+            border-left: 5px solid var(--border-strong); border-radius: 10px; padding: 20px 22px; }
+  .jv-now.wait { border-left-color: var(--warn); background: var(--warn-bg); }
+  .jv-now.busy { border-left-color: var(--accent); }
+  .jv-now.stop { border-left-color: var(--bad); background: var(--bad-bg); }
+  .jv-badge { width: 72px; height: 72px; border-radius: 50%; display: grid; place-items: center;
+              font-size: 2.1rem; font-weight: 700; background: var(--bg);
+              border: 2px solid var(--border-strong); color: var(--text-dim); }
+  .jv-now.wait .jv-badge { border-color: var(--warn); color: var(--warn); }
+  .jv-now.busy .jv-badge { border-color: var(--accent); color: var(--accent); }
+  .jv-body { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+  .jv-name { font-size: 1.45rem; font-weight: 700; line-height: 1.2; }
+  .jv-msg { font-family: var(--font-mono); font-size: 0.94rem; color: var(--text-dim);
+            background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+            padding: 8px 11px; word-break: break-word; }
+  .jv-todo { font-size: 1.15rem; font-weight: 700; display: flex; align-items: center; gap: 8px;
+             flex-wrap: wrap; }
+  .jv-now.wait .jv-todo { color: var(--warn); }
+  .jv-now.busy .jv-todo { color: var(--accent); }
+  .jv-sub { font-size: 0.88rem; color: var(--bad); font-weight: 600; }
+  .jv-acts { display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
+  .jv-btn { border: none; border-radius: 8px; font-family: inherit; font-weight: 700;
+            cursor: pointer; padding: 14px 26px; font-size: 1.05rem; }
+  .jv-confirm { background: var(--ok); color: #fff; flex: 1; min-width: 220px; }
+  .jv-confirm[disabled] { background: var(--neutral-bg); color: var(--text-faint); cursor: default; }
+  .jv-cancel { background: var(--bad); color: #fff; }
+  .jv-stopbtn { background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad-border); }
+  .jv-rail { display: flex; flex-direction: column; gap: 0;
+             border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .jv-step { display: grid; grid-template-columns: 40px 150px 1fr; gap: 14px; align-items: center;
+             padding: 9px 14px; font-size: 0.9rem; background: var(--bg); }
+  .jv-step + .jv-step { border-top: 1px solid var(--border); }
+  .jv-step.done { background: var(--ok-bg); }
+  .jv-step.cur { background: var(--warn-bg); }
+  .jv-m { font-weight: 700; text-align: center; color: var(--text-faint); }
+  .jv-step.done .jv-m { color: var(--ok); }
+  .jv-step.cur .jv-m { color: var(--warn); }
+  .jv-t { font-weight: 600; color: var(--text-dim); }
+  .jv-step.cur .jv-t { color: var(--warn); }
+  .jv-step.done .jv-t { color: var(--ok); }
+  .jv-d { color: var(--text-dim); font-size: 0.86rem; }
+  .jv-you { display: inline-block; font-size: 0.68rem; font-weight: 700; letter-spacing: .04em;
+            color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn-border);
+            border-radius: 20px; padding: 1px 7px; margin-left: 7px; vertical-align: 1px; }
+  .jv-step.cur .jv-you { background: #fff; }
+  .jv-foot { font-size: 0.8rem; color: var(--text-faint); }
   .log-entry { padding: 2px 0; border-bottom: 1px solid var(--border); white-space: pre-wrap; word-break: break-all; }
   .src-IFACE    { color: #0369a1; }
   .src-VISION   { color: #15803d; }
@@ -199,6 +258,7 @@
     <div class="view-switch">
       <button class="view-btn active" id="view-log"  onclick="setView('log')">관제 로그</button>
       <button class="view-btn"        id="view-elev" onclick="setView('elev')">엘리베이터 화면</button>
+      <button class="view-btn"        id="view-journey" onclick="setView('journey')">여정</button>
     </div>
     <div id="log-view">
       <div class="tab-bar">
@@ -232,6 +292,32 @@
       <div id="log-panel"></div>
     </div>
     <div id="elev-screen-container"><iframe id="elev-screen-frame" title="엘리베이터 화면"></iframe></div>
+    <!-- 여정 뷰(U4) — 여정 중에는 로그 대신 이쪽을 본다. 오른쪽 패널(U3)은 그대로 둔다.
+         값은 전부 기존 /auto_status 폴링에서 온다(새 호출 0). 버튼은 기존 핸들러를 그대로 부른다. -->
+    <div id="journey-view">
+      <div class="jv-head">
+        <span class="jv-dest" id="jv-dest">대기 중 — 목적지를 고르고 출발하세요</span>
+        <span class="jv-route" id="jv-route"></span>
+        <!-- 경과 시간: /auto_status 에 시작시각이 없어 비워 둔다(U4-3, main.py 무변경) -->
+        <span class="jv-elapsed" id="jv-elapsed"></span>
+      </div>
+      <div class="jv-now" id="jv-now" style="display:none">
+        <div class="jv-badge" id="jv-badge"></div>
+        <div class="jv-body">
+          <div class="jv-name" id="jv-name"></div>
+          <div class="jv-msg" id="jv-msg"></div>
+          <div class="jv-todo" id="jv-todo"></div>
+          <div class="jv-sub" id="jv-sub" style="display:none"></div>
+          <div class="jv-acts">
+            <button class="jv-btn jv-confirm" id="jv-confirm" onclick="autoConfirm()" disabled>✅ 다음 확인</button>
+            <button class="jv-btn jv-stopbtn" onclick="emergencyStop()">■ 정지</button>
+            <button class="jv-btn jv-cancel" onclick="autoCancel()">✖ 취소</button>
+          </div>
+        </div>
+      </div>
+      <div class="jv-rail" id="jv-rail"></div>
+      <div class="jv-foot">■ 정지: 버튼 누르는 중엔 팔이 멈추지 않습니다(런스톱만) · 엘리베이터 안에서 누르면 여정이 끝납니다</div>
+    </div>
   </div>
   <div class="ctrl-panel">
    <div class="ctrl-col">
@@ -414,6 +500,10 @@
           <select id="auto-dest" style="flex:1;background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:0.82rem;"></select>
           <button id="auto-go-btn" onclick="autoGoto()" style="background:var(--ok);color:#fff;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:700;font-size:0.82rem;white-space:nowrap;">🚀 출발</button>
         </div>
+        <!-- 👉 행동 지시줄 — 칩 줄이 "어디까지 왔나"를 말하고, 이 줄이 "지금 뭘 해야 하나"를 말한다(U3).
+             2026-09-23 14:50 사고: ① 정렬 완료로 '다음'을 기다리는 동안 사용자가 엘베앱 화면에서
+             직접 누르기를 실행해 여정이 그 사실을 모른 채 4분 22초를 버렸다. -->
+        <div id="auto-todo" style="display:none;padding:6px 2px"></div>
         <div id="auto-status" style="font-size:0.78rem;color:var(--text-dim);min-height:1.3em;padding:5px 6px;background:var(--panel);border:1px solid var(--border);border-radius:5px;">대기 중 — 목적지 선택 후 출발</div>
         <div id="auto-track" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>
         <div style="display:flex;gap:6px;margin-top:5px">
@@ -970,13 +1060,28 @@ function autoCancel() {
 }
 
 // 전체 흐름 트래커 — 엘베 포함 여정 vs 같은 층. 현재 단계만 하이라이트.
+// 3번째 원소 = 사람이 '다음 확인'을 눌러야 넘어가는 단계(U3). 근거는 main.py 의
+// _auto_set(..., wait=True, phase=...) 자리 전수: call(2974·2976, phase 유지)·
+// front(2505·2528)·door·ride(_auto_scene_step 2014)·floor(3026·3028, phase 유지)·
+// moving(3042). exit 는 하차 안무라 자동이고 board·app·drive·done 도 자동이다.
+// 4번째 원소 = 여정 뷰 레일의 '내가 할 일' 설명(U4). {floor}=목적층 {dest}=목적지.
 const AUTO_FLOW_ELEV = [
-  ['board','🚶 승차지점'], ['app','🛗 엘베 시작'],
-  ['call','① 호출'], ['front','② 문앞 정렬'], ['door','③ 문 열림'],
-  ['ride','④ 탑승'], ['floor','⑤ 층 선택'], ['moving','🔼 이동중'],
-  ['exit','⑥ 하차·지도'], ['drive','🎯 목적지'], ['done','✅ 완료']
+  ['board','🚶 승차지점',false,'엘리베이터 앞까지 자율주행 — 따라 걷기'],
+  ['app','🛗 엘베 시작',false,'앱 기동 + 제어권 부여 (최대 20초)'],
+  ['call','① 호출',true,"정렬이 끝나면 '다음' → 팔이 호출 버튼을 누른다"],
+  ['front','② 문앞 정렬',true,"Nav2로 문 앞 이동 — 로봇이 멈추면 '다음'"],
+  ['door','③ 문 열림',true,"문 열린 것을 눈으로 보고 '다음'"],
+  ['ride','④ 탑승',true,"전진 185cm — 같이 타고 '다음'"],
+  ['floor','⑤ 층 선택',true,"정렬이 끝나면 '다음' → 팔이 {floor}층 버튼을 누른다"],
+  ['moving','🔼 이동중',true,"{floor}층 도착 소리를 듣고 '다음' → 하차 시작"],
+  ['exit','⑥ 하차·지도',false,'후진 186cm · 제어권 반납 · {floor}층 지도 전환'],
+  ['drive','🎯 목적지',false,'{floor}층 복도를 Nav2로 — 따라 걷기'],
+  ['done','✅ 완료',false,'{dest} 도착']
 ];
-const AUTO_FLOW_SAME = [ ['drive','🎯 목적지 주행'], ['done','✅ 완료'] ];
+const AUTO_FLOW_SAME = [
+  ['drive','🎯 목적지 주행',false,'같은 층 복도를 Nav2로 — 따라 걷기'],
+  ['done','✅ 완료',false,'{dest} 도착']
+];
 function renderAutoTrack(d) {
   const box = document.getElementById('auto-track');
   if (!box) return;
@@ -990,22 +1095,92 @@ function renderAutoTrack(d) {
   let chips = '';
   flow.forEach((p, i) => {
     let bg='var(--neutral-bg)', fg='var(--text-faint)', bd='var(--border)', mark='', bold='';
+    let fs='0.78rem', bs='solid';
     if (active >= 0) {
       if (i < active) { bg='var(--ok-bg)'; fg='var(--ok)'; bd='var(--ok-border)'; mark='✓ '; }
       else if (i === active) {
-        bold='font-weight:700;';
+        bold='font-weight:700;'; fs='0.82rem';
         if (d.waiting) { bg='var(--warn-bg)'; fg='var(--warn)'; bd='var(--warn-border)'; mark='▶ '; } // 확인 대기
         else           { bg='var(--accent-bg)'; fg='var(--accent)'; bd='var(--accent-border)'; mark='● '; } // 진행 중
       }
     }
-    chips += `<span style="font-size:0.72rem;padding:3px 7px;border-radius:10px;`
-           + `background:${bg};color:${fg};border:1px solid ${bd};${bold}white-space:nowrap;">`
+    // 아직 안 지난 '사람 확인' 단계는 점선 테두리 — 앞으로 내가 눌러야 할 자리가 미리 보인다(U3).
+    // 배경·글자색은 그대로 중립이다.
+    if (i > active && p[2]) { bs='dashed'; bd='var(--warn-border)'; }
+    chips += `<span style="font-size:${fs};padding:4px 8px;border-radius:10px;`
+           + `background:${bg};color:${fg};border:1px ${bs} ${bd};${bold}white-space:nowrap;">`
            + `${mark}${p[1]}</span>`;
   });
   box.innerHTML = header + chips;
 }
 
+// 지시 문구는 여기서만 만든다 — 오른쪽 패널(U3)과 여정 뷰(U4)가 같이 쓴다.
+// 멈춤 > 확인 대기 > 작업 중 순으로 앞의 것이 이긴다.
+const JV_APP_WARN = '⚠ 엘리베이터 앱 화면에서 직접 누르지 마세요 — 여정이 그 사실을 모릅니다';
+function journeyTodo(d) {
+  let txt, col;
+  if (d.paused)       { txt = '⏸ 멈춤 — ▶ 재개를 누르면 이어서 진행합니다'; col = 'var(--bad)'; }
+  else if (d.waiting) { txt = "👉 지금 '✅ 다음 확인'을 누르세요";           col = 'var(--warn)'; }
+  else                { txt = '⏳ 로봇이 작업 중 — 기다리세요';              col = 'var(--accent)'; }
+  // 경고는 누르기 단계(① 호출 · ⑤ 층선택)의 확인 대기에서만 — 2026-09-23 14:50 사고.
+  return {txt: txt, col: col, warn: !!(d.waiting && !d.paused && (d.phase === 'call' || d.phase === 'floor'))};
+}
+
+// ── 여정 뷰(U4) 그리기 — 값은 전부 폴링이 이미 받아온 d 에서 온다(새 호출 0) ──
+let _jvSig = '';            // 레일을 다시 만들 조건(모드·목적지·층)
+function jvSym(label)   { return label.split(' ')[0]; }                 // 라벨 앞 기호만
+function jvTitle(label) { const i = label.indexOf(' '); return i < 0 ? label : label.slice(i + 1); }
+function jvText(t, d)   { return t.replace('{floor}', d.dest_floor || '목적').replace('{dest}', d.dest || '목적지'); }
+function renderJourneyView(d) {
+  const rail = document.getElementById('jv-rail');
+  if (!rail) return;
+  const flow = (d.mode === 'same') ? AUTO_FLOW_SAME : AUTO_FLOW_ELEV;
+  const active = flow.findIndex(p => p[0] === d.phase);
+  // 1초마다 행·버튼을 새로 만들면 누르는 순간 클릭이 샌다 — 내용이 바뀔 때만 다시 만든다.
+  const sig = `${d.mode}|${d.dest}|${d.dest_floor}|${flow.length}`;
+  if (sig !== _jvSig) {
+    _jvSig = sig;
+    rail.innerHTML = flow.map(p => '<div class="jv-step"><span class="jv-m"></span>'
+      + '<span class="jv-t"></span><span class="jv-d">' + jvText(p[3], d) + '</span></div>').join('');
+  }
+  Array.from(rail.children).forEach((row, i) => {
+    const p = flow[i], done = (active >= 0 && i < active), cur = (i === active);
+    row.className = 'jv-step' + (done ? ' done' : cur ? ' cur' : '');
+    row.children[0].textContent = done ? '✓' : cur ? '●' : jvSym(p[1]);
+    row.children[1].innerHTML = (done || cur ? p[1] : jvTitle(p[1]))
+                              + (p[2] ? '<span class="jv-you">확인</span>' : '');
+  });
+  const now = document.getElementById('jv-now');
+  const dest = document.getElementById('jv-dest');
+  const route = document.getElementById('jv-route');
+  if (!d.active) {
+    dest.textContent = '대기 중 — 목적지를 고르고 출발하세요';
+    route.innerHTML = '';
+    now.style.display = 'none';
+    return;
+  }
+  dest.textContent = `🎯 ${d.dest || ''}`;
+  // 출발층은 이미 폴링 중인 /switch_map 값(_loadedFloor)을 쓴다 — 새 호출 없음. 미확정이면 안 적는다.
+  const dep = (d.dest_floor && _floorConfirmed && _loadedFloor != null)
+            ? `<b>${_loadedFloor}층</b> ${(+d.dest_floor < +_loadedFloor) ? '▼' : '▲'} ` : '';
+  route.innerHTML = (d.mode === 'same') ? '같은 층 이동'
+    : `${dep}<b>${d.dest_floor}층</b> · 엘리베이터 경유 · 확인 <b>${flow.filter(p => p[2]).length}번</b>`;
+  now.style.display = 'grid';
+  now.className = 'jv-now ' + (d.paused ? 'stop' : d.waiting ? 'wait' : 'busy');
+  document.getElementById('jv-badge').textContent = active >= 0 ? jvSym(flow[active][1]) : '·';
+  document.getElementById('jv-name').textContent = d.step || '';
+  document.getElementById('jv-msg').textContent = d.msg || '';
+  const t = journeyTodo(d);
+  document.getElementById('jv-todo').textContent = t.txt;
+  const sub = document.getElementById('jv-sub');
+  sub.textContent = t.warn ? JV_APP_WARN : '';
+  sub.style.display = t.warn ? 'block' : 'none';
+  // '다음 확인' 은 오른쪽 패널 버튼과 같은 조건이다.
+  document.getElementById('jv-confirm').disabled = !d.waiting;
+}
+
 // 상태 폴링 (1초) — 단계/메시지 표시 + '다음 확인' 버튼 활성/강조
+let _autoWasActive = false;   // 여정 시작 순간(false→true)을 잡으려고 직전 값을 들고 있는다
 setInterval(() => {
   fetch('/auto_status').then(r => r.json()).then(d => {
     autoJourneyActive = !!d.active;
@@ -1041,7 +1216,24 @@ setInterval(() => {
       gb.disabled = false; gb.style.opacity = '1';
       cb.disabled = true; cb.style.background = 'var(--neutral-bg)'; cb.style.color = 'var(--text-faint)';
     }
+    // 행동 지시줄(U3) — 지시는 하나만 낸다. 멈춤 > 확인 대기 > 작업 중 순으로 앞의 것이 이긴다.
+    const td = document.getElementById('auto-todo');
+    if (td) {
+      if (!d.active) { td.style.display = 'none'; }
+      else {
+        const t = journeyTodo(d);   // 문구·색·경고 여부는 공통 함수가 정한다(U4 여정 뷰와 같은 것)
+        const warn = t.warn
+          ? `<div style="font-size:0.74rem;color:var(--warn);margin-top:2px">${JV_APP_WARN}</div>` : '';
+        td.style.display = 'block';
+        td.innerHTML = `<div style="font-size:0.86rem;font-weight:700;color:${t.col}">${t.txt}</div>` + warn;
+      }
+    }
     renderAutoTrack(d);   // 전체 흐름 트래커 갱신 (현재 단계 하이라이트)
+    renderJourneyView(d); // 여정 뷰(U4) — 보이든 안 보이든 값은 맞춰 둔다
+    // 여정이 시작되는 순간에만 여정 뷰로 넘어간다(U4-2). 매 틱 강제하면 로그를 볼 수 없고,
+    // 끝날 때 되돌리지도 않는다 — 결과를 봐야 한다.
+    if (d.active && !_autoWasActive) setView('journey');
+    _autoWasActive = !!d.active;
   }).catch(() => {});
 }, 1000);
 
@@ -1056,17 +1248,26 @@ const ALWAYS_TABS = ['NAV2', 'ELEV', 'MAIN', 'IFACE'];   // 상시 노출 5개(A
 function setView(view) {
   document.getElementById('view-log').classList.toggle('active', view === 'log');
   document.getElementById('view-elev').classList.toggle('active', view === 'elev');
+  document.getElementById('view-journey').classList.toggle('active', view === 'journey');
   const logView      = document.getElementById('log-view');
   const elevContainer = document.getElementById('elev-screen-container');
   const elevFrame      = document.getElementById('elev-screen-frame');
+  const journeyView    = document.getElementById('journey-view');
   if (view === 'elev') {
     // 뷰 진입 시에만 src 부여 — 이탈 시 제거(아래 else)해 MJPEG 스트림이 배경에서 계속 흐르지 않게
     logView.style.display = 'none';
+    journeyView.style.display = 'none';
     elevContainer.style.display = 'flex';
     elevFrame.src = `http://${location.hostname}:5000/`;
+  } else if (view === 'journey') {
+    logView.style.display = 'none';
+    elevContainer.style.display = 'none';
+    elevFrame.src = '';
+    journeyView.style.display = 'flex';
   } else {
     elevContainer.style.display = 'none';
     elevFrame.src = '';
+    journeyView.style.display = 'none';
     logView.style.display = 'flex';
   }
 }
