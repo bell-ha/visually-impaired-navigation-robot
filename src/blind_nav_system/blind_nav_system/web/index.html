@@ -233,6 +233,35 @@
     .ctrl-panel { width: 320px; display: block; }
     .ctrl-col + .ctrl-col { border-left: none; padding-left: 0; margin-left: 0; }
   }
+  /* 폰 폭(U6) — 여정 중 사용자는 로봇을 따라 걷는다. 엘리베이터 안에서 노트북을 들고
+     '다음'을 누를 수 없으니 실제 조작 형태는 폰이다. 여기까지 분기가 없어서 420px 에서는
+     왼쪽 칼럼이 ~90px 로 짜부라졌다(1fr auto 의 auto = 고정 320px 이 먼저 먹는다).
+     그 폭에서는 한 컬럼으로 쌓고, '화면에 꽉 맞추고 안에서 스크롤'을 페이지 스크롤로 바꾼다. */
+  @media (max-width: 760px) {
+    body { height: auto; min-height: 100vh; }
+    .layout { grid-template-columns: 1fr; overflow: visible; }
+    .log-container { overflow: visible; }            /* 왼쪽(로그·여정)이 위 */
+    .ctrl-panel { width: auto; border-left: none; border-top: 1px solid var(--border);
+                  overflow-y: visible; padding: 14px; }   /* 오른쪽 패널이 아래 */
+    #log-view, #journey-view { overflow: visible; }
+    /* 페이지가 세로로 스크롤되면 로그 패널은 높이 제한이 사라진다 — 2000줄이 그대로 길어진다.
+       패널 자신만 화면의 45% 안에서 스크롤하게 묶는다(overflow-y 는 이미 auto). */
+    #log-panel { max-height: 45vh; }
+    #elev-screen-container { height: 60vh; }
+    header { padding: 10px 14px; flex-wrap: wrap; gap: 8px; }
+    header h1 { font-size: 1rem; flex: 1 1 100%; }
+    .readiness-bar { padding: 6px 14px; }
+    .view-switch { flex-wrap: wrap; }
+    /* 여정 뷰 — 레일 설명은 제목 아래 줄로(150px 칸이 죽는다), 카드·배지·버튼은 한 단 작게 */
+    #journey-view { padding: 12px 14px; }
+    .jv-now { grid-template-columns: 56px 1fr; gap: 12px; padding: 14px; }
+    .jv-badge { width: 52px; height: 52px; font-size: 1.5rem; }
+    .jv-step { grid-template-columns: 40px 1fr; row-gap: 2px; }
+    .jv-d { grid-column: 2; }
+    .jv-btn { padding: 14px 12px; }
+    .jv-confirm { flex: 1 0 100%; min-width: 0; }       /* '다음 확인' 은 한 줄 전체 */
+    .jv-stopbtn, .jv-cancel { flex: 1 1 0; min-width: 0; }   /* 정지·취소는 그 아래 반반 */
+  }
 </style>
 </head>
 <body>
