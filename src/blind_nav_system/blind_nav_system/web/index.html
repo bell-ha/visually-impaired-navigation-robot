@@ -65,19 +65,21 @@
   .jv-route b { color: var(--text); font-weight: 600; }
   .jv-elapsed { margin-left: auto; font-family: var(--font-mono); font-size: 0.9rem;
                 color: var(--text-dim); font-variant-numeric: tabular-nums; }
-  .jv-now { display: grid; grid-template-columns: 76px 1fr; gap: 20px;
+  /* 가로 화면에서 여정 뷰가 세로로 너무 길다는 지적(U13) — 카드는 한 단씩 줄였다.
+     글자 크기는 읽기용이라 지키고 여백·배지만 줄인다. */
+  .jv-now { display: grid; grid-template-columns: 64px 1fr; gap: 16px;
             background: var(--panel); border: 1px solid var(--border);
-            border-left: 5px solid var(--border-strong); border-radius: 10px; padding: 20px 22px; }
+            border-left: 5px solid var(--border-strong); border-radius: 10px; padding: 16px 18px; }
   .jv-now.wait { border-left-color: var(--warn); background: var(--warn-bg); }
   .jv-now.busy { border-left-color: var(--accent); }
   .jv-now.stop { border-left-color: var(--bad); background: var(--bad-bg); }
-  .jv-badge { width: 72px; height: 72px; border-radius: 50%; display: grid; place-items: center;
-              font-size: 2.1rem; font-weight: 700; background: var(--bg);
+  .jv-badge { width: 60px; height: 60px; border-radius: 50%; display: grid; place-items: center;
+              font-size: 1.8rem; font-weight: 700; background: var(--bg);
               border: 2px solid var(--border-strong); color: var(--text-dim); }
   .jv-now.wait .jv-badge { border-color: var(--warn); color: var(--warn); }
   .jv-now.busy .jv-badge { border-color: var(--accent); color: var(--accent); }
   .jv-body { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
-  .jv-name { font-size: 1.45rem; font-weight: 700; line-height: 1.2; }
+  .jv-name { font-size: 1.3rem; font-weight: 700; line-height: 1.2; }
   .jv-msg { font-family: var(--font-mono); font-size: 0.94rem; color: var(--text-dim);
             background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
             padding: 8px 11px; word-break: break-word; }
@@ -89,7 +91,8 @@
   .jv-acts { display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
   .jv-btn { border: none; border-radius: 8px; font-family: inherit; font-weight: 700;
             cursor: pointer; padding: 14px 26px; font-size: 1.05rem; }
-  .jv-confirm { background: var(--ok); color: #fff; flex: 1; min-width: 220px; }
+  /* 누르기 쉬운 크기는 지키고 **폭만** 막는다 — 1920 에서 이 버튼 하나가 960px 였다(U13). */
+  .jv-confirm { background: var(--ok); color: #fff; flex: 1; min-width: 220px; max-width: 420px; }
   .jv-confirm[disabled] { background: var(--neutral-bg); color: var(--text-faint); cursor: default; }
   .jv-cancel { background: var(--bad); color: #fff; }
   .jv-force { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); }
@@ -229,6 +232,25 @@
     .toggle-switch input:checked + .toggle-slider::before { transform: translateX(18px); }
     #speed-settings { gap: 4px !important; margin-top: 0 !important; }
   }
+  /* 넓은 화면에서 레일을 2열로(U13) — 11줄 × 40px = 400px 가 절반이 된다.
+     분기점 1700px 의 근거(2026-09-23 실측): 오른쪽 제어 패널이 **두 칼럼 ~660px** 이라
+     여정 뷰 폭 = 창폭 − 660 이다. 칸 하나가 500px 는 돼야 설명이 한 줄에 들어가는데
+     (1366 에서 칸 345px → 설명이 3줄로 접혀 행이 오히려 커졌다 = 압축하려다 늘린 꼴),
+     그러려면 여정 뷰 ≥ 1000 → 창 ≥ 1660. 여유를 둬 1700 으로 한다. 사용자 화면은 1920 이다.
+     순서는 grid 기본대로 **가로 우선**(①②가 첫 줄). 경계선은 인접형제(+) 규칙으로는 2열에서
+     어긋나므로(2번 칸이 첫 줄인데 위 선이 생긴다) 칸마다 아래선을 주고 **마지막 줄만** 지운다.
+     마지막 줄 = 마지막 칸 + (칸 수가 홀수면) 그 왼쪽이 아니라 그 자신뿐, 짝수면 앞 칸까지. */
+  @media (min-width: 1700px) {
+    .jv-rail { display: grid; grid-template-columns: 1fr 1fr; }
+    .jv-step + .jv-step { border-top: none; }
+    .jv-step { border-bottom: 1px solid var(--border); }
+    .jv-step:nth-child(odd) { border-right: 1px solid var(--border); }   /* 열 사이 */
+    /* 칸 수가 홀수면 마지막 칸은 혼자 왼쪽에 선다 — 그 오른쪽 선은 빈 칸을 가리키는 꼴이라 지운다 */
+    .jv-step:last-child:nth-child(odd) { border-right: none; }
+    .jv-step:last-child,
+    .jv-step:nth-last-child(2):nth-child(odd) { border-bottom: none; }
+    .jv-step { grid-template-columns: 34px 130px 1fr; gap: 10px; }       /* 칸이 좁아진 만큼 */
+  }
   /* 좁은 화면에서는 1열로 복귀 (로그 영역 확보) */
   @media (max-width: 1099px) {
     .ctrl-panel { width: 320px; display: block; }
@@ -267,7 +289,7 @@
     .jv-step { grid-template-columns: 40px 1fr; row-gap: 2px; }
     .jv-d { grid-column: 2; }
     .jv-btn { padding: 14px 12px; }
-    .jv-confirm { flex: 1 0 100%; min-width: 0; }       /* '다음 확인' 은 한 줄 전체 */
+    .jv-confirm { flex: 1 0 100%; min-width: 0; max-width: none; }   /* '다음 확인' 은 한 줄 전체 */
     .jv-force, .jv-resume, .jv-cancel { flex: 1 1 0; min-width: 0; }  /* 나머지는 그 아래 나눠 선다 */
   }
 </style>
