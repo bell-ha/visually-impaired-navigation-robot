@@ -1760,15 +1760,41 @@ def _auto_hold(label):
 _ARRIVE_YAW_STILL_DEG = 1.0
 
 
-def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
+# 도착 대기 상한을 거리로 만든다(2026-09-23). 예전엔 200초 고정이었고, 짧은 다리(승차지점
+# 8.6m·문앞)만 돌려 봐서 안 드러났다. 하차지점(−48.232, 4.932) → 123호(0.497, −30.454)는
+# 직선 **60.2m** 이고, 오늘 실측 속도(8.6m / 31.9s ≈ 0.27m/s)로도 223초다 — 복도 경로는 직선보다
+# 길다. **정상 주행이 시간초과로 '도착 실패'가 된다.** 느슨하게 푸는 방향이라 물리 위험은 없다.
+_ARRIVE_MIN_SEC  = 200      # 지금까지의 고정값 — 하한으로 남긴다(짧은 다리는 그대로다)
+_ARRIVE_SLOW_MPS = 0.15     # 실측 0.27 의 절반. 복도 우회·감속·회전 여유를 이 반값으로 흡수한다
+_ARRIVE_PAD_SEC  = 60       # 출발 전 준비·마지막 정렬 몫
+
+
+def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None):
     """name 지점 '정밀 도착'까지 대기. nav이 5cm로 서므로, 여기선 목표 tol(기본 10cm)
     이내에서 로봇이 settle초간 '멈춰있으면'(=nav 완료 = 정밀 도착) True.
     - 단순히 tol 이내를 지나가는 중인 것과 구분하려고 '정지'까지 확인 (jitter 여유로 10cm).
     - nav 정밀도(5cm)와 일관: 로봇은 ≤5cm에 서고, 오케스트레이터는 그 정지를 감지해 진행.
-    cancel/timeout이면 False."""
+    cancel/timeout이면 False.
+
+    timeout=None(호출부가 안 넘긴 경우)이면 **지금 위치에서 목표까지의 직선 거리**로 만든다.
+    명시된 호출부(② 문앞의 _FRONT_ARRIVE_SEC)는 그대로 그 값을 쓴다."""
     p = _loc(name)
+    d_line = None
+    if p is not None and timeout is None:
+        _rx, _ry = _robot_pose["x"], _robot_pose["y"]
+        if _rx is not None and _ry is not None:
+            try:
+                d_line = round(_math_auto.hypot(float(p["x"]) - float(_rx),
+                                                float(p["y"]) - float(_ry)), 2)
+                timeout = max(_ARRIVE_MIN_SEC,
+                              int(d_line / _ARRIVE_SLOW_MPS) + _ARRIVE_PAD_SEC)
+            except Exception:
+                d_line = None
+    if timeout is None:
+        timeout = _ARRIVE_MIN_SEC      # 측위를 못 읽었다 — 예전과 같은 값으로 간다
     if not p:
-        _jr_gate_arrival(name, None, None, None, None, tol, timeout, "no_loc", False)
+        _jr_gate_arrival(name, None, None, None, None, tol, timeout, "no_loc", False,
+                         d_line=d_line)
         return False
     tx, ty = p.get("x"), p.get("y")
     _jr("set_goal", name, p)
@@ -1779,7 +1805,7 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
     while time.monotonic() - t0 < timeout:
         if _AUTO["cancel"]:
             _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "cancel", False,
-                             yaw_still=yaw_still)
+                             yaw_still=yaw_still, d_line=d_line)
             return False
         if _AUTO.get("paused"):
             # 멈춤(S1): 멈춘 시간은 시간초과에서 뺀다. 정지가 Nav2 목표를 취소했으므로 풀리면
@@ -1794,7 +1820,7 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
                 _log("AUTO", f"🚨 재개 — Nav2 파라미터를 평소값으로 되돌리지 못해 '{name}' 목표를 "
                              "다시 내지 않는다")
                 _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout,
-                                 "resume_params_fail", False, yaw_still=yaw_still)
+                                 "resume_params_fail", False, yaw_still=yaw_still, d_line=d_line)
                 return False
             _write("iface", f"/goto {name}")
             _log("AUTO", f"▶ 재개 — '{name}' 주행 목표를 다시 냈다")
@@ -1818,7 +1844,7 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
                 stable_since = time.monotonic()
             elif time.monotonic() - stable_since >= settle:
                 _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "arrived", True,
-                                 yaw_still=yaw_still)
+                                 yaw_still=yaw_still, d_line=d_line)
                 return True      # 목표 이내 + settle초 정지 = 정밀 도착 확정
         else:
             stable_since = None
@@ -1826,7 +1852,7 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
             last = (rx, ry, ryaw)
         time.sleep(0.3)
     _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "timeout", False,
-                     yaw_still=yaw_still)
+                     yaw_still=yaw_still, d_line=d_line)
     return False
 
 # 자동정렬 실패 뒤 확인 대기에서 "사람이 뭘 해야 하는지 모른 채" 서 있는 시간의 상한.
@@ -3414,7 +3440,7 @@ def _jr_end():
 
 
 def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result,
-                     yaw_still=None):
+                     yaw_still=None, d_line=None):
     """_auto_wait_arrival 의 판정 — 마지막 거리·정지 지속·경과·pose 신선도·yaw 정지량.
 
     yaw_still_deg: 마지막 폴링 간 yaw 변화(°). 도착 '정지' 판정의 두 축 중 하나인데(다른 하나는
@@ -3432,7 +3458,9 @@ def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result,
                  settled_s=(round(now - stable_since, 2) if stable_since else None),
                  elapsed_s=(round(now - t0, 1) if t0 else None), pose=_jr_pose(),
                  yaw_still_deg=(round(yaw_still, 2) if isinstance(yaw_still, (int, float)) else None),
-                 yaw_still_thr_deg=_ARRIVE_YAW_STILL_DEG)
+                 yaw_still_thr_deg=_ARRIVE_YAW_STILL_DEG,
+                 # 상한이 왜 그 값이었나 — 거리로 만든 경우 직선거리도 같이 남긴다.
+                 timeout_s=timeout, d_line_m=d_line)
     except Exception:
         pass
 
