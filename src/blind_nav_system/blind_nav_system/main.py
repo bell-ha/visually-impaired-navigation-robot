@@ -1077,6 +1077,47 @@ def _map_loaded_floor():
     return None, f"기록({r_floor}층)과 파라미터({p_floor}층) 불일치"
 
 
+# ── 층 표시 전용 캐시(U7) ────────────────────────────────────────────────────────
+# 🔴 표시 전용이다. **층을 판정하는 경로는 이걸 쓰지 않는다** — POST /switch_map 의
+#    "이미 그 층이면 load_map 생략 + 확정" 분기는 아래 캐시를 지나치고 _map_loaded_floor()
+#    를 직접 부른다. 이 프로젝트에서 층은 가장 비싼 오판이고, 30초 묵은 값으로 '확정'을
+#    내리는 것은 층을 모르는 것보다 나쁘다(_map_loaded_floor 독스트링과 같은 이유).
+# 왜 캐시가 필요한가: 웹의 층 버튼 폴러가 3초마다 GET /switch_map 을 부르고, 그 GET 이
+#    _map_server_yaml() 안에서 `ros2 param get` **서브프로세스**를 띄운다. 2026-09-23 첫
+#    실기에서 여정 260초 중 147.6초(57%)가 이 호출이었다(지연 평균 1.9s·최대 3.4s).
+#    U1(92b8ff7)이 /robot_speed 에 대해 적어 둔 규칙("주기 폴링 안 한다 — ros2 CLI 반복 =
+#    DDS 참가자 churn #22")을 층 폴러만 어기고 있었다. 탭이 여러 개면 그만큼 배가 된다.
+# 잠금을 호출 **동안에도** 쥔다: 탭이 둘이면 둘 다 miss 하는 순간 서브프로세스가 두 개
+#    뜬다. 늦게 온 쪽은 앞사람 결과를 그대로 받는다(최대 대기 = param get 타임아웃 5s).
+_MAP_FLOOR_TTL = 30.0
+_map_floor_cache = {"ts": 0.0, "val": None}        # val = (층|None, 근거)
+_map_floor_lock = threading.Lock()
+
+
+def _map_loaded_floor_cached():
+    """표시 전용 — (결과, 캐시나이초). 판정에는 쓰지 마라(위 주석)."""
+    with _map_floor_lock:
+        c = _map_floor_cache
+        age = time.monotonic() - c["ts"]
+        if c["val"] is not None and age < _MAP_FLOOR_TTL:
+            return c["val"], round(age, 1)
+        val = _map_loaded_floor()
+        c["val"], c["ts"] = val, time.monotonic()
+        return val, 0.0
+
+
+def _map_floor_cache_put(val):
+    """방금 직접 읽은 값을 표시 캐시에 넣는다(POST 경로가 이미 신선한 값을 갖고 있을 때)."""
+    with _map_floor_lock:
+        _map_floor_cache["val"], _map_floor_cache["ts"] = val, time.monotonic()
+
+
+def _map_floor_cache_clear():
+    """지도가 실제로 바뀌었다 — 다음 표시는 반드시 다시 읽는다(옛 층을 보여주지 않는다)."""
+    with _map_floor_lock:
+        _map_floor_cache["val"], _map_floor_cache["ts"] = None, 0.0
+
+
 def _amcl_init_exit():
     """AMCL 초기 위치를 '엘리베이터 하차지점'으로. switch_map 의 두 경로가 같이 쓴다."""
     p = _load_exit_point()
@@ -1108,9 +1149,10 @@ def switch_map():
         # 추측할지 말지를 스스로 정할 수 있다(엘베앱 보조 폴링이 이걸 본다).
         # loaded_floor 는 **실제로 올라가 있는 지도**다(웹 버튼이 "이 층 확인" /
         # "지도 전환" 중 무엇을 할지 라벨에 미리 써 주는 데 쓴다).
-        _lf, _why = _map_loaded_floor()
+        # 표시 전용 캐시(30s). 값이 몇 초 된 것인지 같이 준다 — 받는 쪽이 신선도를 알 수 있게.
+        (_lf, _why), _age = _map_loaded_floor_cached()
         return jsonify(floor=_current_floor, confirmed=_floor_confirmed,
-                       loaded_floor=_lf, loaded_why=_why)
+                       loaded_floor=_lf, loaded_why=_why, loaded_age_s=_age)
     data  = request.json or {}
     floor = str(data.get("floor", ""))
     path  = _FLOOR_MAPS.get(floor)
@@ -1122,7 +1164,10 @@ def switch_map():
     # init_exit 를 켠 채 누르는 사고 위험만 생긴다.
     # 모르면(둘이 어긋나면) 건너뛰지 않는다 — 틀린 층을 '확정'으로 만드는 것이
     # 층을 모르는 것보다 나쁘다.
+    # 🔴 여기는 **판정**이다 — 캐시를 타지 않는다. 이 값으로 load_map 을 생략하고 층을
+    #    '확정'으로 만들기 때문이다(여정의 ⑥ 하차 뒤 지도 전환도 이 경로로 들어온다).
     _lf, _why = _map_loaded_floor()
+    _map_floor_cache_put((_lf, _why))      # 방금 직접 읽었으니 표시 캐시도 이걸로 맞춘다
     if _lf is not None and _lf == floor:
         _current_floor   = floor
         _floor_confirmed = True
@@ -1153,6 +1198,7 @@ def switch_map():
     _current_floor   = floor
     _floor_confirmed = True      # 사람(또는 여정)이 실제로 고른 값이 됐다
     _loaded_map_path = path      # 실제로 올라간 지도 — 다음 "같은 층 확정"의 근거
+    _map_floor_cache_clear()     # 지도가 바뀌었다 — 표시 캐시의 옛 층을 즉시 버린다(U7)
     _log("MAP", f"🗺 지도 전환 완료 → {floor}층 ({os.path.basename(path)})")
     # 엘베앱에 층을 **밀어 넣는다**(폴링 아님). 사용자 모델이 "내가 4층이라 설정하면
     # 지도도 바뀌고 엘리베이터도 바뀐다" 이므로, 고르는 순간에 흘러야 한다. 다음 씬
@@ -1694,9 +1740,11 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
     t0 = time.monotonic()
     stable_since = None
     last = None
+    yaw_still = None      # 기록 전용(C4 증명). 판정에는 쓰지 않는다 — 아래 stopped 식은 그대로다.
     while time.monotonic() - t0 < timeout:
         if _AUTO["cancel"]:
-            _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "cancel", False)
+            _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "cancel", False,
+                             yaw_still=yaw_still)
             return False
         if _AUTO.get("paused"):
             # 멈춤(S1): 멈춘 시간은 시간초과에서 뺀다. 정지가 Nav2 목표를 취소했으므로 풀리면
@@ -1704,19 +1752,26 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
             # 정지 판정(stable_since·last)은 처음부터 다시 잰다.
             t0 += _auto_pause_wait()
             stable_since, last = None, None
+            yaw_still = None                      # 기준이 사라졌으니 기록값도 비운다
             if _AUTO["cancel"]:
                 continue                  # 위 취소 분기가 기록하고 끝낸다
             if not _nav_params_restore_normal(f"재개 /goto {name}"):
                 _log("AUTO", f"🚨 재개 — Nav2 파라미터를 평소값으로 되돌리지 못해 '{name}' 목표를 "
                              "다시 내지 않는다")
                 _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout,
-                                 "resume_params_fail", False)
+                                 "resume_params_fail", False, yaw_still=yaw_still)
                 return False
             _write("iface", f"/goto {name}")
             _log("AUTO", f"▶ 재개 — '{name}' 주행 목표를 다시 냈다")
             continue
         rx, ry, ryaw = _robot_pose["x"], _robot_pose["y"], _robot_pose["yaw_deg"]
         d = _dist_to(tx, ty)
+        # 🔵 기록 전용(U8) — 아래 stopped 가 쓰는 것과 **같은 값**을 따로 담기만 한다. 판정에는
+        #    쓰지 않는다(stopped 식은 그대로 둔다 — 도착 판정은 f2973cb 이후 한 줄도 바뀌지 않았다).
+        #    이게 없으면 C4(도착에 yaw 도 본다)를 블랙박스로 증명할 수 없다: 게이트에 남는 건
+        #    d_last·settled_s·elapsed_s 뿐이라 "yaw 가 멎어서 통과했다"가 기록에 없었다.
+        yaw_still = (abs((ryaw - last[2] + 180.0) % 360.0 - 180.0)
+                     if (last is not None and ryaw is not None and last[2] is not None) else None)
         near    = (d is not None and d <= tol)
         # 정지 = 폴링 간 xy 2cm 미만 **그리고** yaw _ARRIVE_YAW_STILL_DEG 미만(A2 — 위 상수 주석)
         stopped = (last is not None and rx is not None
@@ -1727,14 +1782,16 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
             if stable_since is None:
                 stable_since = time.monotonic()
             elif time.monotonic() - stable_since >= settle:
-                _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "arrived", True)
+                _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "arrived", True,
+                                 yaw_still=yaw_still)
                 return True      # 목표 이내 + settle초 정지 = 정밀 도착 확정
         else:
             stable_since = None
         if rx is not None:
             last = (rx, ry, ryaw)
         time.sleep(0.3)
-    _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "timeout", False)
+    _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "timeout", False,
+                     yaw_still=yaw_still)
     return False
 
 @_jr_traced("auto_wait_confirm", post=_jr_cancel_post)
@@ -3297,8 +3354,14 @@ def _jr_end():
         pass
 
 
-def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result):
-    """_auto_wait_arrival 의 판정 — 마지막 거리·정지 지속·경과·pose 신선도."""
+def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result,
+                     yaw_still=None):
+    """_auto_wait_arrival 의 판정 — 마지막 거리·정지 지속·경과·pose 신선도·yaw 정지량.
+
+    yaw_still_deg: 마지막 폴링 간 yaw 변화(°). 도착 '정지' 판정의 두 축 중 하나인데(다른 하나는
+    xy 2cm) 여기 없어서 C4(f2973cb, 제자리 회전 중 도착 선언 A2 수정)를 기록으로 증명할 수
+    없었다. 임계는 _ARRIVE_YAW_STILL_DEG(1.0°) — 값이 그보다 작으면 yaw 축은 통과였다는 뜻이다.
+    None = 비교할 직전 표본이 없었다(첫 폴링·멈춤 직후)."""
     if _JR is None:
         return
     try:
@@ -3308,7 +3371,9 @@ def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result):
                  result=result, why=why,
                  d_last=(_dist_to(tx, ty) if tx is not None else None),
                  settled_s=(round(now - stable_since, 2) if stable_since else None),
-                 elapsed_s=(round(now - t0, 1) if t0 else None), pose=_jr_pose())
+                 elapsed_s=(round(now - t0, 1) if t0 else None), pose=_jr_pose(),
+                 yaw_still_deg=(round(yaw_still, 2) if isinstance(yaw_still, (int, float)) else None),
+                 yaw_still_thr_deg=_ARRIVE_YAW_STILL_DEG)
     except Exception:
         pass
 
