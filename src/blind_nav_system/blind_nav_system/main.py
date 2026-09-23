@@ -3469,16 +3469,27 @@ def auto_confirm():
 
     안무가 도는 동안(waiting=False)에는 아무 일도 하지 않는다. UI가 버튼을 비활성으로
     두지만 그건 화면일 뿐이고, 여기서도 막아야 잠금이 진짜 잠금이 된다.
-    그때 진행하려면 /auto_force 를 써야 한다 — 그쪽은 로봇을 먼저 멈춘다."""
+    그때 진행하려면 /auto_force 를 써야 한다 — 그쪽은 로봇을 먼저 멈춘다.
+
+    🔴 멈춤(paused) 중에도 막는다. 예전에는 여기서 waiting=False 로 **접수**됐고,
+    _auto_wait_confirm 은 멈춤 동안 _auto_pause_wait 에 막혀 있다가 ▶ 재개 순간 그 값을
+    보고 즉시 다음으로 넘어갔다. 사고 모양: ① 정렬 완료 → ■ 정지 → 사람이 로봇 앞으로 감
+    → 습관적으로 '다음'(화면은 무반응처럼 보인다) → ▶ 재개 → **팔이 즉시 버튼으로 뻗는다.**
+    화면만 막으면 옛 탭·폰이 샌다 — 그래서 서버가 본체다."""
     with _auto_lock:
-        if _AUTO.get("active") and not _AUTO.get("waiting"):
-            step = _AUTO.get("step", "")
-            locked = True
+        step = _AUTO.get("step", "")          # 블랙박스·로그용 — 판정에 안 쓴다
+        if _AUTO.get("active") and _AUTO.get("paused"):
+            locked = "paused"
+        elif _AUTO.get("active") and not _AUTO.get("waiting"):
+            locked = "busy"
         else:
-            step = _AUTO.get("step", "")      # 블랙박스·로그용 — 판정에 안 쓴다
             _AUTO["waiting"] = False
-            locked = False
-    if locked:
+            locked = None
+    if locked == "paused":
+        _log("AUTO", f"'다음 확인' 무시 — [{step}] 멈춤 중이다 (▶ 재개 후 다시)")
+        _jr("human", "confirm_paused", step=step, remote_addr=request.remote_addr)
+        return jsonify(ok=False, error="멈춤 중 — ▶ 재개 후 다시"), 409
+    if locked == "busy":
         _log("AUTO", f"'다음 확인' 무시 — [{step}] 동작 중이라 잠겨 있다 "
                      "(그래도 넘어가려면 '강제로 넘어가기')")
         _jr("human", "confirm_locked", step=step, remote_addr=request.remote_addr)
@@ -3503,6 +3514,13 @@ def auto_force():
         if not _AUTO.get("active"):
             return jsonify(ok=False, error="자동 여정이 진행 중이 아닙니다"), 409
         step = _AUTO.get("step", "")
+        paused = bool(_AUTO.get("paused"))
+    if paused:
+        # 멈춤 중 강제는 '다음 확인'보다 나쁘다 — 대기를 건너뛰는 신호(force)를 세워 두면
+        # ▶ 재개 순간 확인 절차 **없이** 다음 단계가 시작된다. 멈춤을 먼저 풀게 한다.
+        _log("AUTO", f"'⏭ 강제' 무시 — [{step}] 멈춤 중이다 (▶ 재개 후 다시)")
+        _jr("human", "force_paused", step=step, remote_addr=request.remote_addr)
+        return jsonify(ok=False, error="멈춤 중 — ▶ 재개 후 다시"), 409
     # 1) 정지가 먼저 (_step_abort → 안무 스레드와 현재 스텝 중단)
     stopped = _elev_post("/step_stop", {}, timeout=3) is not None
     # 2) 무엇을 어떤 상태에서 강제했는지 남긴다 — 다음 로그 판독에 이게 필요하다
