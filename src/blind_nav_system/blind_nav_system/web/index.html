@@ -1058,6 +1058,10 @@ function setView(view) {
 // 로그 SSE + 탭 필터
 const logPanel = document.getElementById('log-panel');
 let allLogs = [];
+// 로그 상한 — 배열과 화면의 div 가 '같은' 값을 써야 한다. 예전엔 배열만 잘라서
+// div 는 무한히 쌓였고, 그 큰 패널의 scrollHeight 를 줄마다 읽느라 레이아웃이
+// 매번 전부 다시 계산됐다(초당 5줄 · 25분에 6천 줄 → 탭 CPU 124%).
+const LOG_MAX = 2000;
 let currentTab = 'ALL';
 const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM','ELEV','NAV2','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD','MAP','POSE','OBSTACLE'];
 const SOURCE_LABELS = {ALL:'전체', IFACE:'인터페이스', VISION:'비전', HW:'하드웨어', MAIN:'메인', WEB:'웹',
@@ -1092,6 +1096,13 @@ function appendLogEntry(d) {
   div.className = 'log-entry';
   div.innerHTML = `<span class="ts">${d.t}</span><span class="src-${d.src}">[${d.src}]</span> ${escHtml(d.msg)}`;
   logPanel.appendChild(div);
+  // allLogs 와 같은 상한으로 화면도 잘라낸다 — 이게 없으면 div 가 무한히 쌓인다.
+  while (logPanel.childElementCount > LOG_MAX) {
+    const first = logPanel.firstElementChild;
+    const h = first.offsetHeight;
+    logPanel.removeChild(first);
+    logPanel.scrollTop -= h;   // 지운 만큼 내려 잡아 읽던 위치를 고정한다
+  }
 }
 
 function updateBadges() {
@@ -1113,10 +1124,12 @@ const es = new EventSource('/logs');
 es.onmessage = e => {
   const d = JSON.parse(e.data);
   allLogs.push(d);
-  if (allLogs.length > 2000) allLogs.splice(0, allLogs.length - 2000);
+  if (allLogs.length > LOG_MAX) allLogs.splice(0, allLogs.length - LOG_MAX);
   if (currentTab === 'ALL' || d.src === currentTab) {
+    // 판정은 '추가 전'에 해야 한다 — 추가한 뒤엔 언제나 바닥에서 멀어져 있다.
+    const atBottom = logPanel.scrollHeight - logPanel.scrollTop - logPanel.clientHeight < 40;
     appendLogEntry(d);
-    logPanel.scrollTop = logPanel.scrollHeight;
+    if (atBottom) logPanel.scrollTop = logPanel.scrollHeight;
   } else {
     unread[d.src] = (unread[d.src] || 0) + 1;
     updateBadges();
