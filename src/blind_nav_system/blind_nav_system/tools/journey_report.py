@@ -20,10 +20,11 @@
   4. 멈춘 구간 — 엘베앱이 ready 아닌 채 lift·arm_ext 가 오래 안 변한 구간(9/10 링 흡수 33초 모양),
      명령은 나가는데 pose 가 안 오는 구간(측위 사망 시그니처).
   5. 사람 확인 — 누른 순간의 자동판정 그림자(캐시 기준). 여정 중 조작 거부(C5).
-  6. 측위(AMCL) 스냅샷 — ⑥ 하차 직후·목적지 출발 직전의 pose·공분산(σ).
-  7. 코드 정체 — HEAD·src_dirty·프로세스별 stale.
-  8. 마지막 엘베 상태 — 종결 직전 /status 핵심 필드.
-  9. 실패 구간 로그 발췌 — elevator/*.log 핵심 태그 + 대시보드 자신의 system 줄.
+  6. 사용자에게 말한 것 — notify(text·voice). 실패가 시각장애인에게 전달됐나(실패 유형 B).
+  7. 측위(AMCL) 스냅샷 — ⑥ 하차 직후·목적지 출발 직전의 pose·공분산(σ).
+  8. 코드 정체 — HEAD·src_dirty·프로세스별 stale.
+  9. 마지막 엘베 상태 — 종결 직전 /status 핵심 필드.
+ 10. 실패 구간 로그 발췌 — elevator/*.log 핵심 태그 + 대시보드 자신의 system 줄.
 
 왜 이렇게 읽나 (기록 쪽 설계와 짝이다 — journey_log.py 머리말)
   · 종결 원인은 run_end.exit_cause(첫 종결 원인)를 쓴다. 마지막 step 은 "취소"로 덮여 있을 수 있다.
@@ -270,10 +271,19 @@ def stuck_spans(elevs, t0, t1, min_s=15.0):
 
 
 def pose_dead(samples, t0, t1):
-    """명령은 나가는데(cmd_age<1s) pose 가 5초 넘게 안 온 샘플 수."""
+    """명령은 나가는데(cmd_age<1s) pose 가 5초 넘게 안 온 샘플 수.
+
+    🔴 엘베앱이 바퀴를 쥔 구간(lease_held=True)은 뺀다. 거기서는 엘베앱이 /stretch/cmd_vel 로
+    **수 cm 씩** 움직이는데 AMCL 은 update_min_d 0.15m 를 넘어야 pose 를 내므로 "명령은 있는데
+    pose 가 없다"가 **정상**이다. 2026-09-23 첫 실기에서 ① 정렬 14 샘플이 이 규칙 때문에
+    '측위 사망 시그니처'로 찍혔다 — 거짓이었다. (샘플에 authority 필드는 없다. 같은 것을 재는
+    필드가 lease_held 다 — 리스 부여가 곧 authority·guard_off 부여다.)
+    """
     n = 0
     for s in samples:
         p = s.get("pose") or {}
+        if s.get("lease_held"):
+            continue
         if t0 <= s.get("ts", 0) <= t1 and isinstance(p.get("pose_age_s"), (int, float)) \
                 and p["pose_age_s"] > 5 and isinstance(p.get("cmd_age_s"), (int, float)) \
                 and p["cmd_age_s"] < 1:
@@ -382,10 +392,13 @@ def report_one(path, args):
         cz = a["cause"]
         P(f"■ 결말: {end.get('outcome')}  소요 {dur(end.get('dur_s'))}  "
           f"첫 종결 원인 [{cz.get('kind')}] {cz.get('step') or ''} {short(cz.get('msg') or cz.get('repr') or '', 100)}")
-        wr = end.get("writer") or {}
-        if wr.get("dropped") or wr.get("write_errors") or a["gaps"] or bad:
-            P(f"   ⚠ 기록 손실: dropped {wr.get('dropped')} · write_errors {wr.get('write_errors')} · "
-              f"seq 구멍 {a['gaps']} · 깨진 줄 {bad}")
+    # 기록 손실은 run_end 가 **없을 때도** 찍는다. 도중에 죽은 파일이 가장 중요한 실패인데
+    # 예전엔 else 안에만 있어서 거기서만 침묵했다(2026-09-23 verifier 실측).
+    wr = (end or {}).get("writer") or {}
+    if wr.get("dropped") or wr.get("write_errors") or a["gaps"] or bad:
+        P(f"   ⚠ 기록 손실: dropped {wr.get('dropped')} · write_errors {wr.get('write_errors')} · "
+          f"seq 구멍 {a['gaps']} · 깨진 줄 {bad}")
+    if end is not None:
         if end.get("forced"):
             P(f"   ⏭ 강제 넘어가기 {len(end['forced'])}회: " + ", ".join(
                 f"{hms(x.get('ts'))} [{x.get('step')}]" for x in end["forced"]))
@@ -396,7 +409,13 @@ def report_one(path, args):
           f"guard_off={(end.get('elev_last') or {}).get('guard_off')}")
         fc = end.get("floor_check") or {}
         if fc:
-            mark = {True: "✅ 일치", False: "🔴 불일치"}.get(fc.get("match"), "⚪ 판정 안 함(미확정·정보 없음)")
+            # 여정이 완료되지 않았으면 '끝 층 ≠ 목적층'이 정상이다 — 엘리베이터를 타지도 않았다.
+            # 2026-09-23 ① 에서 취소한 기록에 '끝 5 / 목적 1 — 🔴 불일치'가 찍혔다. 거짓이었다.
+            if end.get("outcome") != "done":
+                mark = f"— 여정이 완료되지 않아 층 판정 보류({end.get('outcome')})"
+            else:
+                mark = {True: "✅ 일치", False: "🔴 불일치"}.get(fc.get("match"),
+                                                              "⚪ 판정 안 함(미확정·정보 없음)")
             P(f"   층 대조: 끝 {fc.get('floor')} / 목적 {fc.get('dest_floor')} ({fc.get('mode')}) — {mark}")
         sm, smc = end.get("switch_map") or {}, end.get("switch_map_call") or {}
         if sm or smc:
@@ -451,7 +470,8 @@ def report_one(path, args):
               f"arm_ext {s.get('arm_ext')} 불변, ready=False phase={s.get('phase')} "
               f"centered={s.get('centered')} ex/ey={s.get('ex')}/{s.get('ey')} dz={s.get('dz')}")
         if dead:
-            P(f"   🚨 명령은 나가는데 pose 가 5초 넘게 안 온 샘플 {dead}개 — 측위 사망 시그니처")
+            P(f"   🚨 명령은 나가는데 pose 가 5초 넘게 안 온 샘플 {dead}개 — 측위 사망 시그니처"
+              " (엘베가 바퀴를 쥔 구간은 뺀 수다)")
     # 5. 사람 확인
     if by["human"]:
         P("■ 사람 확인 (누른 순간 캐시된 자동판정)")
@@ -464,6 +484,13 @@ def report_one(path, args):
               f"점프 {unit(sh.get('clear_jump_m'), 'm')}) "
               f"씬결과={sr.get('ok')}/{sr.get('reason')} d={unit(sh.get('d_m'), 'm')} "
               f"dyaw={unit(sh.get('dyaw_deg'), '°')} elev_age={unit(sh.get('elev_age_s'), 's')}")
+    # 6. 사용자에게 말한 것 — 실패 유형 B("실패가 시각장애인에게 전달됐나")를 보는 자리다.
+    if by["notify"]:
+        P("■ 사용자에게 말한 것")
+        for nt in by["notify"]:
+            P(f"   {hms(nt.get('ts'))} {'🔊 음성' if nt.get('voice') else '화면만'} "
+              + ("· 팔 수납 안내 " if nt.get("stow_hint") else "")
+              + short(nt.get("text") or "", 110))
     if by["blocked"]:
         P("■ 여정 중 조작 거부")
         for b in by["blocked"]:
@@ -560,7 +587,9 @@ def report_all(args):
                    else (real[-1]["step"] if real else "-"))
         outcome = end.get("outcome") if end else "no_end"   # 열 폭 안에 들게 ASCII — run_end 가 없다
         fc = (end or {}).get("floor_check") or {}
-        fcm = {True: "✅", False: "🔴"}.get(fc.get("match"), "⚪") if fc else "-"
+        # 완료가 아니면 층 판정 보류 — report_one 의 '층 대조'와 같은 규칙이다.
+        fcm = ("—" if (fc and outcome != "done")
+               else ({True: "✅", False: "🔴"}.get(fc.get("match"), "⚪") if fc else "-"))
         cz = a["cause"]
         hs = [h for h in a["by"]["human"] if isinstance(h.get("waited_s"), (int, float))]
         loss = (end or {}).get("writer", {}).get("dropped") or a["gaps"] or bad
@@ -594,16 +623,27 @@ def report_all(args):
             P(f"   {wpad(cid, 24)} {len(hs):3}회  대기 중앙값 {dur(med)}{agree}")
     rj = os.path.join(args.dir, REJECT_FILE)
     if os.path.exists(rj):
-        c = collections.Counter()
+        # 두 종류가 한 파일에 섞여 있다. what 키가 있으면 **여정 중** 조작 거부(_journey_gate),
+        # 없으면 여정을 **시작**하려다 거부된 것(/auto_goto). 섞어 세면 둘 다 뜻이 흐려진다.
+        c, cj = collections.Counter(), collections.Counter()
         with open(rj, encoding="utf-8") as f:
             for line in f:
                 try:
-                    c[json.loads(line).get("error")] += 1
+                    r = json.loads(line)
                 except Exception:
-                    pass
-        P("■ 시작 거부 (/auto_goto)")
-        for k, n in c.most_common():
-            P(f"   {n:3}회  {k}")
+                    continue
+                if r.get("what"):
+                    cj[(r.get("what"), r.get("error"))] += 1
+                else:
+                    c[r.get("error")] += 1
+        if c:
+            P("■ 시작 거부 (/auto_goto)")
+            for k, n in c.most_common():
+                P(f"   {n:3}회  {k}")
+        if cj:
+            P("■ 여정 중 조작 거부 (_journey_gate)")
+            for (what, err), n in cj.most_common():
+                P(f"   {n:3}회  {what} — {err}")
     return 0
 
 
