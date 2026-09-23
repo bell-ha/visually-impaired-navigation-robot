@@ -2186,7 +2186,7 @@ def _elev_wait_ready(timeout=45, tok=None):
 def _elev_wait_press_done(timeout=30):
     """누르기 완료 대기 — press 씬(0/4)의 scene_next_ok(press_ok_ts>scene_ts) True까지.
     이게 True면 '버튼 눌림 + 팔 복귀 + 그리퍼 열기'까지 끝난 상태라 이동해도 안전.
-    취소 존중. 완료 True / 타임아웃·취소 False.
+    취소 존중. 완료 True / 타임아웃·취소·**접촉 판정 실패** False.
     ※ False면 _auto_run은 흐름을 계속하지 않고 여정을 중단한다(S1) — 팔이
     복귀했는지 확인할 다른 수단이 없어서, 모르면 베이스를 안 움직인다."""
     t0 = time.time()
@@ -2202,6 +2202,12 @@ def _elev_wait_press_done(timeout=30):
         st = _elev_status()
         if st and st.get("scene_next_ok"):
             return True
+        # 엘베앱이 **접촉 판정 실패**(허공·판정 불가)를 보고하면 즉시 끊는다. 예전에는 그 판정을
+        # 아무도 쓰지 않아 '✅ 누르기 완료'가 났고(2026-09-23 P1), 쓰기 시작한 지금도 이 신호가
+        # 없으면 타임아웃(30s)까지 서 있게 된다. 결말은 기존 실패 경로 그대로다(새 문구·음성 0).
+        if st and st.get("scene_press_failed"):
+            _log("AUTO", "🚨 누르기 실패 — 엘베앱 접촉 판정(허공 또는 판정 불가). 여정 중단")
+            return False
         time.sleep(0.3)
     return False
 

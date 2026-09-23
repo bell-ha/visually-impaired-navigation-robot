@@ -1053,6 +1053,8 @@ state = {
                             #   대시보드가 /status로 이걸 읽어 성공/실패를 판단한다.
     "scene_ts":     0.0,    # 현재 단계 시작 시각 — press 완료가 이 이후여야 다음 단계 해제
     "press_ok_ts":  0.0,    # 마지막 press ✅ 완료 시각
+    "press_fail_ts": 0.0,   # 마지막 press ❌ 실패 시각(접촉 판정 허공·판정 불가).
+                            # 있어야 대시보드가 타임아웃(30s)까지 기다리지 않고 즉시 끊는다.
     "door_base":    None,   # ③ 문대기 진입 시점 전방 여유 (닫힌 문 기준선)
     "door_open":    False,  # ③에서 여유 점프(+0.5m, 2연속) 감지 → ④ 엘리베이터 안 해제
     "door_streak":  0,      # 문 열림 판정 연속 관측 수 (노이즈 방지)
@@ -2024,6 +2026,10 @@ def status():
         next_ok = (s.get("press_ok_ts") or 0) > (s.get("scene_ts") or 0)
     elif sc == 2:
         next_ok = bool(s.get("door_open"))
+    # 누르기 실패(접촉 판정 허공·판정 불가) — next_ok 와 같은 모양으로 내보낸다.
+    # 이번 단계의 실패여야 하고(> scene_ts), 재시도가 성공했으면 실패가 아니다(> press_ok_ts).
+    _pf, _pk = (s.get("press_fail_ts") or 0), (s.get("press_ok_ts") or 0)
+    press_failed = bool(sc in (0, 4) and _pf > (s.get("scene_ts") or 0) and _pf > _pk)
     # ▶ 다음 준비 알림: 게이트 있는 단계(①⑤ press·③ 문열림)에서 조건이
     # 충족되는 순간 1회만 로그 — ②④⑥은 항상 진행 가능이라 알림 생략
     if _n is not None and sc in (0, 2, 4):
@@ -2069,6 +2075,7 @@ def status():
                    clearance_stat=s.get("clearance_stat"),
                    clear_f=clear_f, clear_b=clear_b,
                    door_open=bool(s.get("door_open")), scene_next_ok=next_ok,
+                   scene_press_failed=press_failed, press_fail_ts=s.get("press_fail_ts"),
                    # 층과 그 층에서 못 누르는 버튼. **판정은 서버에만 있다** —
                    # UI 는 이 dict 를 보고 흐리게 + 클릭/키 무시만 한다(규칙 복제 금지).
                    ocr_gated=bool(s.get("ocr_gated")),
@@ -6646,6 +6653,32 @@ class ElevatorTracker(Node):
 
             st("6/6 그리퍼 여는 중… (인식 모드 복귀)")
             self._move_joint_wait(GRIPPER_JOINT, GRIPPER_OPEN_M, 2, 8.0)
+
+            # ── 접촉 판정을 **쓴다** (2026-09-23) ────────────────────────────────
+            # 이 판정은 위에서 계산해 화면과 프레임 메타(C_after)에 싣기까지 하면서도
+            # **아무도 보지 않았다.** 실측(누르기 전수 14건): 허공(shortfall 0mm) 4건이
+            # 전부 '✅ 누르기 완료'로 찍혔고, 그게 press_ok_ts 를 세워 여정이 다음 단계로
+            # 갔다. 홀에서 나면 오지 않는 엘리베이터 앞에서 ②③ 으로 가고, 사용자는
+            # "호출했습니다"만 듣는다 — 뿌리 B(실패가 사용자에게 전달되지 않는다) 그 자체다.
+            # 바로 위 D(누르기 이동 실패) 분기가 이미 같은 이유로 "복귀+중단"을 한다.
+            # 같은 방침을 여기 적용한다. 임계(>5mm)는 건드리지 않는다 — 판정 결과를 쓸 뿐이다.
+            #
+            # 왜 여기(6/6 뒤)인가: 판정 직후에 끊으면 그리퍼가 닫힌 채 남고 C/D 프레임도
+            # 안 남는다. 복귀·그리퍼 열기·증거 프레임은 성공이든 실패든 똑같이 필요하다
+            # (실패일수록 더 필요하다). 그래서 **선언만** 갈라진다 — 중복 복귀도 없다.
+            #
+            # contact is None(팔 위치 arm_ext 를 못 읽음)도 성공이 아니다: 모르면 fail-closed.
+            if contact is not True:
+                why = (f"허공 (명령 {push:.3f} vs 실제 {actual:.3f}) — 버튼에 닿지 않았다"
+                       if contact is False else
+                       "접촉 판정 불가 — 팔 위치(arm_ext)를 읽지 못했다")
+                st(f"❌ {why}. 누르기 실패로 처리한다")
+                self._dlog(f"[PRESS] ⛔ 누르기 실패 — {why}")
+                with state_lock:
+                    state["press_fail_ts"] = time.time()   # 대시보드가 즉시 끊는 근거
+                # 타겟은 **지우지 않는다** — 지우면 운영자·여정의 재시도가 버튼을 다시
+                # 골라야 한다. 성공 경로만 타겟을 해제한다(아래).
+                return
             st("✅ 누르기 완료")
             # 수행 완료 → 타겟 자동 해제 (안 하면 추적·자동접근이 같은 버튼에 재시작됨)
             with state_lock:
