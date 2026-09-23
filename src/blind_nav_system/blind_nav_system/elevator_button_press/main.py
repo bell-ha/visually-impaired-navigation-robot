@@ -253,6 +253,12 @@ CENTER_HOLD_PAD = 4
 ARM_JOINT          = "wrist_extension"  # 팔 뻗기 관절 (실측 확인)
 # [실측 보정 2026-07-09] press "허공" 판정 + 손끝이 표면 1cm 앞 정지 실측 → 2.5cm 하향
 FINGER_STANDOFF    = 0.145  # m — 카메라 렌즈에서 닫힌 손가락 끝까지 거리
+# m — 같은 거리의 **기하값**(도면 기준). 0.145 는 실기로 다듬은 **경험 보정값**이라 명령을
+# 만들 때 쓰고, 아래 위생 검사는 "물리적으로 가능한가"를 묻는 것이라 보정하지 않은 값을 쓴다.
+# 재측정 거리가 이보다 작다 = 손끝이 이미 패널 뒤에 있다 = 그런 값은 존재할 수 없다.
+# 2026-09-09 13:54:57 차내 '1': 재측정 0.180 → 그 값으로 만든 명령이 허공(0mm)을 냈다.
+# 광택 스테인리스 패널에서 D405 가 짧게 읽는 정황이다.
+TIP_AHEAD_OF_CAM_M = 0.1715
 PRESS_CLOSE_DIST   = 0.20   # m — 여기까지는 그리퍼 연 채 접근 (열린 손끝이 벽 ~3cm 앞)
 PRESS_READY_DIST   = 0.25   # m — 자동 접근이 "누르기 직전"(PRESS_CLOSE_DIST 0.20)까지 끝난
                             #     상태에서만 누르기 활성 + 로봇 완전 동결 (사용자 최종 결정:
@@ -6496,6 +6502,26 @@ class ElevatorTracker(Node):
                 st(f"재측정 실패 → 계산값 사용 ({d2:.3f}m)")
             else:
                 st(f"재측정: 버튼까지 {d2:.3f}m")
+
+            # 깊이 위생 검사 — 손끝보다 가까운 '버튼'은 존재할 수 없다(TIP_AHEAD_OF_CAM_M 주석).
+            # 한 번은 더 물어본다(깊이 한 프레임이 튄 것일 수 있다). 그래도 같으면 누르지 않는다:
+            # 이 값으로 ext 명령을 만들면 팔이 짧게 나가 허공을 찍고, 예전에는 그게 '✅ 완료'였다.
+            if d2 < TIP_AHEAD_OF_CAM_M:
+                st(f"깊이 이상({d2:.3f}m < {TIP_AHEAD_OF_CAM_M:.4f}m) — 0.3초 뒤 재측정")
+                time.sleep(0.3)
+                with state_lock:
+                    _d3 = state["target_dist"]
+                if _d3 and TIP_AHEAD_OF_CAM_M <= _d3 < 0.35:
+                    d2 = _d3
+                    st(f"재측정 회복: 버튼까지 {d2:.3f}m")
+                else:
+                    st(f"❌ 깊이 이상 (재측정 {d2:.3f}m < 손끝 오프셋 {TIP_AHEAD_OF_CAM_M:.4f}m — "
+                       "물리적으로 불가) — 누르기 실패")
+                    self._dlog(f"[PRESS] ⛔ 깊이 위생 검사 실패 — d2={d2:.3f} 재측정={_d3}")
+                    self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
+                    with state_lock:
+                        state["press_fail_ts"] = time.time()
+                    return
 
             # B-2. 근접 재정렬: 접근 중 처짐/벽 기울기로 생긴 오차를 "가까운 거리"에서
             #      다시 잡는다. 여기서의 1px는 실거리로 훨씬 작아 정밀함.

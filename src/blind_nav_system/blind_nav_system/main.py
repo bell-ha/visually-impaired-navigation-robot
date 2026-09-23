@@ -1829,16 +1829,34 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=200):
                      yaw_still=yaw_still)
     return False
 
+# 자동정렬 실패 뒤 확인 대기에서 "사람이 뭘 해야 하는지 모른 채" 서 있는 시간의 상한.
+# 2026-09-23 실기: ⑤ 에서 elev_wait_ready 가 45.3s 만에 실패한 뒤에도 같은 문구로 **2분 19초**
+# 더 기다렸다(1회차는 2분 40초). 여정을 끊지는 않는다 — 사람이 정렬하는 중일 수 있다. 문구만 바꾼다.
+_ALIGN_NUDGE_SEC = 60.0
+_ALIGN_NUDGE_MSG = ("⚠ 정렬 실패 후 60초 경과 — 엘베앱 화면에서 정렬만 하고(씬 변경 금지) "
+                    "'다음', 안 되면 '✖ 취소'")
+
+
 @_jr_traced("auto_wait_confirm", post=_jr_cancel_post)
 def _auto_wait_confirm(timeout=900):
     """블로커 단계 — 사용자 '다음 확인' 대기. /auto_confirm이 waiting=False로 풀어줌."""
     t0 = time.monotonic()
+    nudged = False
     while time.monotonic() - t0 < timeout:
         if _AUTO["cancel"]:
             return False
         if _AUTO.get("paused"):
             t0 += _auto_pause_wait()        # 멈춤(S1) 동안은 시간초과를 세지 않는다
             continue
+        # 정렬 실패로 열린 대기(①⑤)만 60초 뒤 문구를 바꾼다. 멈춰 있던 시간은 위에서 t0 에
+        # 더해지므로 세지 않는다. 여정은 계속 기다린다(기존 900초 상한 그대로).
+        if not nudged and (time.monotonic() - t0) >= _ALIGN_NUDGE_SEC \
+                and "자동정렬 실패" in (_AUTO.get("msg") or ""):
+            nudged = True
+            with _auto_lock:
+                _AUTO["msg"] = _ALIGN_NUDGE_MSG      # waiting 은 건드리지 않는다
+            _log("AUTO", _ALIGN_NUDGE_MSG)
+            _jr("ev", "notify", text=_ALIGN_NUDGE_MSG, voice=False, stow_hint=False)
         with _auto_lock:
             if _AUTO.get("force"):
                 # 안무가 막 끝난 순간에 강제 버튼이 눌린 경우. 여기서 소비하지 않으면
