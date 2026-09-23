@@ -425,6 +425,8 @@
         <button id="auto-force-btn" onclick="autoForce()" style="display:none;width:100%;margin-top:5px;background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn-border);border-radius:6px;padding:6px;cursor:pointer;font-size:0.76rem;">⏭ 강제로 넘어가기 (로봇을 멈추고 다음 단계로)</button>
         <!-- ▶ 재개 — 여정이 멈춤(■ 정지)일 때만 보인다(STOP S2). -->
         <button id="auto-resume-btn" onclick="autoResume()" style="display:none;width:100%;margin-top:5px;background:var(--ok);color:#fff;border:none;border-radius:6px;padding:7px;cursor:pointer;font-weight:700;font-size:0.86rem;">▶ 재개</button>
+        <!-- ■ 정지가 멈추지 못하는 두 구간 — 재개 버튼이 숨어 있을 때도 항상 보인다(STOP S2). -->
+        <div id="stop-note" style="font-size:0.72rem;color:var(--warn);margin-top:5px">■ 정지: 버튼 누르는 중엔 팔이 멈추지 않습니다(런스톱만) · 엘리베이터 안에서 누르면 여정이 끝납니다</div>
       </div>
     </div>
 
@@ -1025,7 +1027,10 @@ setInterval(() => {
     // 재개 버튼은 멈춤일 때만(STOP S2)
     if (rb) rb.style.display = (d.active && d.paused) ? 'block' : 'none';
     if (d.active) {
-      st.textContent = (d.paused ? '⏸ 멈춤 — ' : '') + `[${d.step}] ${d.msg}`;
+      // 누르기 구간(① 호출 · ⑤ 층선택 · 그 둘에서만 쓰는 '재시도')에서는 멈춤이 팔을 멈추지 못한다.
+      const armMoving = d.paused && (/^[①⑤]/.test(d.step) || d.step === '재시도');
+      st.textContent = (d.paused ? '⏸ 멈춤 — ' : '') + `[${d.step}] ${d.msg}`
+                    + (armMoving ? ' · 팔은 멈추지 않습니다' : '');
       st.style.color = d.paused ? 'var(--bad)' : (d.waiting ? 'var(--warn)' : 'var(--ok)');
       gb.disabled = true; gb.style.opacity = '0.5';
       if (d.waiting) { cb.disabled = false; cb.style.background = 'var(--ok)'; cb.style.color = '#fff'; }
