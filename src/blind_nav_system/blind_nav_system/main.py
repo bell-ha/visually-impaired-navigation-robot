@@ -1094,15 +1094,44 @@ _map_floor_cache = {"ts": 0.0, "val": None}        # val = (층|None, 근거)
 _map_floor_lock = threading.Lock()
 
 
+_map_floor_rec = {"last": None}     # 표시 폴링에서 마지막으로 **기록한** (층, 사유, 캐시여부)
+
+
+def _jr_map_floor(val, cached, age_s, caller):
+    """블랙박스: 이 층 값이 **방금 읽은 것인지 몇 초 묵은 것인지**를 남긴다.
+
+    캐시가 생기고 나서는 "그때 화면이 본 층"과 "그때 실제로 읽은 층"이 다를 수 있다.
+    이걸 안 남기면 사후에 그 차이를 복원할 수 없다(2026-09-23 advisor 제안, 오케 채택).
+    여정이 없으면 레코더가 버린다(journey_log.ev) — 평소에는 아무것도 안 쓴다.
+
+    🔵 표시 폴링(caller="get")은 **값이 바뀔 때만** 적는다. 3초 폴링이라 그대로 두면 여정당
+    ~87줄인데 그중 86줄이 "3초 전과 같은 층·같은 사유"라 아무것도 말하지 않는다 — 판독할 때
+    눈이 미끄러지는 게 실제 비용이다. 판정 경로(caller="switch_map_post")는 **무조건** 적는다.
+    그게 이 기록의 목적이다: "그 확정이 묵은 값으로 내려간 것 아니냐"를 기록으로 배제한다."""
+    v = val or (None, None)
+    if caller == "get":
+        key = (v[0], v[1], bool(cached))
+        if _map_floor_rec["last"] == key:
+            return
+        _map_floor_rec["last"] = key
+    # 🔴 이름이 map_loaded_floor 가 아니다 — 그 이름은 이미 _jr_traced 가 쓰고 있고
+    #    (args·ret·latency_ms·R_path), 같은 이름에 다른 모양의 줄을 섞으면 판독기가 둘을
+    #    가르지 못한다. 캐시 출처는 별도 이름으로 남긴다.
+    _jr("gate", "map_floor_cache", cached=bool(cached), age_s=age_s,
+        floor=v[0], why=v[1], caller=caller)
+
+
 def _map_loaded_floor_cached():
     """표시 전용 — (결과, 캐시나이초). 판정에는 쓰지 마라(위 주석)."""
     with _map_floor_lock:
         c = _map_floor_cache
         age = time.monotonic() - c["ts"]
         if c["val"] is not None and age < _MAP_FLOOR_TTL:
+            _jr_map_floor(c["val"], True, round(age, 1), "get")
             return c["val"], round(age, 1)
         val = _map_loaded_floor()
         c["val"], c["ts"] = val, time.monotonic()
+        _jr_map_floor(val, False, 0.0, "get")
         return val, 0.0
 
 
@@ -1116,6 +1145,9 @@ def _map_floor_cache_clear():
     """지도가 실제로 바뀌었다 — 다음 표시는 반드시 다시 읽는다(옛 층을 보여주지 않는다)."""
     with _map_floor_lock:
         _map_floor_cache["val"], _map_floor_cache["ts"] = None, 0.0
+        # 기록 쪽 '직전 값' 기억도 같이 비운다 — 안 그러면 전환 직후 첫 GET 이
+        # "직전과 같다"로 묻혀서, 층이 바뀐 자리가 기록에서 사라진다.
+        _map_floor_rec["last"] = None
 
 
 def _amcl_init_exit():
@@ -1168,6 +1200,9 @@ def switch_map():
     #    '확정'으로 만들기 때문이다(여정의 ⑥ 하차 뒤 지도 전환도 이 경로로 들어온다).
     _lf, _why = _map_loaded_floor()
     _map_floor_cache_put((_lf, _why))      # 방금 직접 읽었으니 표시 캐시도 이걸로 맞춘다
+    # 기록: 이 판정이 **방금 읽은 값**으로 내려갔다는 증거(cached=False·age 0). 여정의 ⑥ 뒤
+    # 지도 전환도 이 경로라, 블랙박스에서 "묵은 값으로 확정한 것 아니냐"를 바로 배제할 수 있다.
+    _jr_map_floor((_lf, _why), False, 0.0, "switch_map_post")
     if _lf is not None and _lf == floor:
         _current_floor   = floor
         _floor_confirmed = True
