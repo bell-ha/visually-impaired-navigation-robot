@@ -17,14 +17,16 @@
   1. 결말 — outcome · 첫 종결 원인 · 소요. run_end 가 없으면 그 사실을 맨 위에.
   2. 타임라인 — 단계 | 시작 | 소요 | 사람 대기 | 마지막 문구. 실패 단계 🔴.
   3. 판정 이상 — gate(입력·결론)와 call(반환)에서 실패·거부·시간초과만.
-  4. 멈춘 구간 — 엘베앱이 ready 아닌 채 lift·arm_ext 가 오래 안 변한 구간(9/10 링 흡수 33초 모양),
+  4. 판정 근거 — 도착(yaw 정지량·바퀴 놓기)과 층(캐시였나). 성공한 판정도 보여준다:
+     "왜 통과했나"가 안 보이면 그 판정이 실제로 일했는지 사후에 알 수 없다.
+  5. 멈춘 구간 — 엘베앱이 ready 아닌 채 lift·arm_ext 가 오래 안 변한 구간(9/10 링 흡수 33초 모양),
      명령은 나가는데 pose 가 안 오는 구간(측위 사망 시그니처).
-  5. 사람 확인 — 누른 순간의 자동판정 그림자(캐시 기준). 여정 중 조작 거부(C5).
-  6. 사용자에게 말한 것 — notify(text·voice). 실패가 시각장애인에게 전달됐나(실패 유형 B).
-  7. 측위(AMCL) 스냅샷 — ⑥ 하차 직후·목적지 출발 직전의 pose·공분산(σ).
-  8. 코드 정체 — HEAD·src_dirty·프로세스별 stale.
-  9. 마지막 엘베 상태 — 종결 직전 /status 핵심 필드.
- 10. 실패 구간 로그 발췌 — elevator/*.log 핵심 태그 + 대시보드 자신의 system 줄.
+  6. 사람 확인 — 누른 순간의 자동판정 그림자(캐시 기준). 여정 중 조작 거부(C5).
+  7. 사용자에게 말한 것 — notify(text·voice). 실패가 시각장애인에게 전달됐나(실패 유형 B).
+  8. 측위(AMCL) 스냅샷 — ⑥ 하차 직후·목적지 출발 직전의 pose·공분산(σ).
+  9. 코드 정체 — HEAD·src_dirty·프로세스별 stale.
+ 10. 마지막 엘베 상태 — 종결 직전 /status 핵심 필드.
+ 11. 실패 구간 로그 발췌 — elevator/*.log 핵심 태그 + 대시보드 자신의 system 줄.
 
 왜 이렇게 읽나 (기록 쪽 설계와 짝이다 — journey_log.py 머리말)
   · 종결 원인은 run_end.exit_cause(첫 종결 원인)를 쓴다. 마지막 step 은 "취소"로 덮여 있을 수 있다.
@@ -451,7 +453,45 @@ def report_one(path, args):
     P("■ 판정 이상" + ("" if issues else " — 없음"))
     for ts, kind, s in sorted(issues, key=lambda x: x[0] or 0):
         P(f"   {hms(ts)} {kind:4} {s}")
-    # 4. 멈춘 구간
+    # 4. 판정 근거 — 통과한 판정도 보여준다
+    arrivals = [g for g in by["gate"] if g.get("name") == "arrival"]
+    rels = sorted([g for g in by["gate"] if g.get("name") == "nav_release_wheels"],
+                  key=lambda g: g.get("ts") or 0)
+    if arrivals:
+        P("■ 도착 판정")
+        for g in arrivals:
+            inp = g.get("inputs") or {}
+            dl = g.get("d_last")          # 이름을 d 로 두지 않는다(이 파일의 다른 d 와 헷갈린다)
+            yw, thr = g.get("yaw_still_deg"), g.get("yaw_still_thr_deg")
+            # 🔴 바퀴 놓기(_nav_release_wheels)의 지연을 **같은 줄에** 붙인다. 두 값을 떨어뜨려
+            #    놓으면 짝을 못 짓는다: yaw 가 임계 아래인데 바퀴 놓기가 10초 넘게 걸렸다면
+            #    "xy 만 맞고 회전은 남아 있었다"(A2)이고, 1초 남짓이면 회전이 끝난 뒤 도착이다.
+            rel = next((r for r in rels if (r.get("ts") or 0) >= (g.get("ts") or 0)), None)
+            rl = (rel.get("latency_ms") or 0) / 1000.0 if rel else None
+            tail = ""
+            if rl is not None:
+                tail = f"  → 바퀴 놓기 {rl:.1f}s" + ("  ⚠ xy 만 맞고 회전이 남아 있었다(A2)"
+                                                   if rl >= 10.0 else "")
+            P(f"   {hms(g.get('ts'))} {wpad(inp.get('name') or '?', 18)}"
+              f"{'✅' if g.get('result') else '🔴'} {wpad(g.get('why') or '?', 10)}"
+              f"d={'—' if not isinstance(dl, (int, float)) else f'{dl * 100:.1f}cm'} "
+              f"yaw={'—' if not isinstance(yw, (int, float)) else f'{yw:.1f}°'}"
+              f"/임계{unit(thr, '°')} "
+              f"settled={unit(g.get('settled_s'), 's')} elapsed={unit(g.get('elapsed_s'), 's')}{tail}")
+    mfc = [g for g in by["gate"] if g.get("name") == "map_floor_cache"]
+    if mfc:
+        posts = [g for g in mfc if g.get("caller") == "switch_map_post"]
+        gets = [g for g in mfc if g.get("caller") != "switch_map_post"]
+        P("■ 층 판정" + (f"   (표시 폴링 {len(gets)}건 — 본문에 늘어놓지 않는다)" if gets else ""))
+        for g in posts:
+            # 판정 경로가 캐시를 탔다면 설계 위반이다 — 30초 묵은 값으로 층을 '확정'할 수 있다.
+            stale_judge = bool(g.get("cached"))   # bad 는 '깨진 줄 수'라 덮어쓰지 않는다
+            P(f"   {hms(g.get('ts'))} 지도전환 판정  층={g.get('floor')} ({g.get('why')})  "
+              + ("🔴 캐시를 탔다(age " + unit(g.get("age_s"), "s") + ") — 판정은 매번 직접 읽어야 한다"
+                 if stale_judge else f"✅ 직접 읽음(age {unit(g.get('age_s'), 's')})"))
+        if not posts:
+            P("   판정 경로(switch_map_post) 기록 없음 — 이번 실행은 지도 전환 판정까지 못 갔다")
+    # 5. 멈춘 구간
     t_fail = a["fail_ts"] or recs[-1].get("ts")
     fi = a["fail_idx"]
     t_win0 = (a["stages"][fi]["ts0"] if fi is not None else st0.get("ts", t_fail)) - args.before
