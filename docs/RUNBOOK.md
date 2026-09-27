@@ -204,7 +204,7 @@ python3 cabin_render.py
 ## 14. 관련 문서
 
 - [HARDWARE.md](HARDWARE.md) — 하드웨어 사양 · 카메라 시리얼 · 물리 제약
-- [../navigation-and-slam-guide.md](../navigation-and-slam-guide.md) — Navigation & SLAM 가이드
+- [NAVIGATION.md](NAVIGATION.md) — Navigation & SLAM 가이드
 - [../src/blind_nav_system/blind_nav_system/elevator_button_press/readme.md](../src/blind_nav_system/blind_nav_system/elevator_button_press/readme.md)
 - [../src/blind_nav_system/blind_nav_system/people_tracker/README.md](../src/blind_nav_system/blind_nav_system/people_tracker/README.md)
 - [../src/blind_nav_system/blind_nav_system/cabin_mapping/README.md](../src/blind_nav_system/blind_nav_system/cabin_mapping/README.md)
