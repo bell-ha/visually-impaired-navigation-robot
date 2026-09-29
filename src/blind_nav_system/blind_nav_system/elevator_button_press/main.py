@@ -351,8 +351,20 @@ def _lift_hall_for(floor, tok):
 #                3D 계산 vs 오늘 실제 눌린 lift 가 1.2mm (verifier 독립 검증).
 LIFT_ROW_SERVO_MAX_M = 0.015
 LIFT_PANEL_BAND     = (0.80, 1.10)
-# 이 이하 차이면 안 움직인다. 행 간격의 절반(2.8cm)보다 작아야 행 보정이 의미가 있다.
-LIFT_ROW_DEADBAND_M = 0.015
+# 이 이하 차이면 안 움직인다. 행 간격의 절반(2.8cm)은 **상한**일 뿐 근거가 되지 못한다 —
+# 걸러내야 할 것은 "이웃 행까지 가는 이동"이 아니라 "의미 없는 미세 이동"이고, 그 크기를
+# 정하는 것은 행 간격이 아니라 **표 모델의 자기 오차**다.
+# 🔴 2026-09-09 13:55:51 실측 사고 (승강장 15:08:13 과 같은 사고의 차내판):
+#   인식 자세 기본값은 0.940 이고 차내 행 목표는 0.991 / 0.930 / 0.873 이다.
+#   '2'·'5'(0.930)는 기본값과 10mm 차이라 **15mm 데드밴드에 먹혀 복귀가 막혔다** —
+#   13:55:02 에 prior 가 0.877→0.930 을 냈는데 그 뒤 지글·서보가 0.940 으로 올렸고,
+#   재선택 때 "이미 그 높이"로 읽혀 표값으로 돌아가지 않았다. 그 상태로 눌러 허공.
+#   문열림·3(+51mm)과 종·1·4(−67mm)만 움직이고 가운데 행만 안 움직이는 모양이었다.
+# 폭은 표 모델의 자기 오차보다 작아야 의미가 있다 — 표 vs 실제 눌린 lift 1.2mm,
+# 3D 계산 vs 행 모델 최대 2.7mm, 사진 행 클러스터 σ 2.7~3.2mm. 3mm 면 그 오차대 안이라
+# 미세 이동만 걸러내고, 기본값(10mm 떨어진 값)은 걸러내지 않는다.
+# 승강장(LIFT_HALL_DEADBAND_M)이 같은 이유로 먼저 3mm 가 됐다 — 같은 값으로 맞춘다.
+LIFT_ROW_DEADBAND_M = 0.003
 # 승강장은 같은 상수를 쓸 수 없다. 행 모델이 아니라 **층·방향마다 3D 실측 한 값**이고,
 # 피해야 할 "이웃 행" 이 없으므로 2.8cm 기준이 근거가 되지 못한다.
 # 🔴 2026-09-10 15:08:13 실측 사고:
@@ -367,6 +379,17 @@ LIFT_HALL_DEADBAND_M = 0.003
 # 2.0 (=1.24cm) 이면 **버튼 면을 벗어난다**(버튼 지름 2cm 대) — 두 버튼 사이를 누르는
 # 2026-09-09 +27.9mm 사고가 그 모양이었다. 1.5 (=0.93cm) 는 버튼 반경 안이다.
 PRESS_RESID_MAX_MULT = 1.5
+# 누르기 직전 **세로** 게이트(mm). 표값과 실제 조준 높이가 이만큼 어긋나면 누르지 않는다.
+# 근거(승강장 5층 ▼ 누르기 31건 전수 조사):
+#   사진값 0.9334 기준 ±6mm 안 → 13건 중 12건 닿음(92%)
+#                    19mm 이상 낮음 → 13건 중  5건 닿음(38%)
+#   높이가 0.930 으로 고정된 뒤(9/4~) 10건 중 9건(90%), 그 전 0.900~0.964 로 떠돌 때
+#   21건 중 13건(62%). 높이를 표에 못 박는 것만으로 62%→90% 였다.
+# 픽셀(dz)이 아니라 mm 인 이유: 표는 mm 로 적힌 값이고, 기존 결과 게이트
+# 1.5*dz2 는 d=0.20m 에서 9.3mm 라 표 이탈보다 훨씬 좁다 — 세로를 표에 못 박은
+# 뒤의 판정은 "조준이 덜 됐나"가 아니라 **"표대로 왔나"** 여야 한다.
+# 🔴 좌우(ex)에는 쓰지 않는다 — 표에는 높이만 있고 x 는 없다(좌우는 폐루프 유지).
+PRESS_EY_MAX_MM = 19.0
 
 
 def _lift_for_row(ri, nrows):
@@ -417,9 +440,12 @@ def _lift_row_clamp(node, want, where):
        반대로 클램프가 무언가를 **막아 준** 기록은 없다 — 2026-09-09 의 "두 행 사이를
        눌렀다"는 사고는 인식 자세 goal 의 덮어쓰기였고(8807edd 가 뿌리를 쳤다) 서보
        드리프트가 아니었다.
-    ※ press 시퀀스 내부 보정(`접근 중 높이`·`근접 재정렬 높이`)은 **묶은 채 둔다** —
-      물리 접촉 직전이라 이웃 행을 누르는 대가가 실재하고, 그쪽은 5스텝으로 끝나는
-      유한 루프라 교착이 되지 않는다.
+    ※ press 시퀀스 내부 보정(`접근 중 높이`·`근접 재정렬 높이`)에는 **지금 클램프가
+      없다** — 2026-09-10 에 두 자리 다 제거됐다(그 자리 주석 참조). 게다가 표를 아는
+      동안에는 그 두 보정 **자체가 생략된다**(`_lift_pin_skip`, 2026-09-29): 높이는 표가
+      정하고, 이웃 행을 누르지 않는지는 묶기가 아니라 **결과 게이트**(세로 19mm ·
+      좌우 1.5·dz2)가 본다. 이 독스트링이 말하는 클램프가 아직 사는 곳은 탐색
+      스윕(`_scan_step`) 하나뿐이다.
 
     기준값은 측정으로 확정된 것만 쓴다(`_lift_prior_exact`):
       · 차내 — 목표 버튼의 행 높이(행 모델)
@@ -680,6 +706,46 @@ def _lift_prior_exact(place=None):
     return None
 
 
+def _lift_pin(place=None):
+    """**표를 아는 동안의 고정 높이**와 허용폭 → (높이, 폭). 모르면 (None, None).
+
+    사용자 결정(2026-09-29): "OCR-RCNN이 lift를 조정하는 것은 빼. 우리는 지금
+    완벽한 표를 얻었잖아." 버튼을 고르면 높이는 표가 정하고, 그 뒤 ey(세로 잔차)로
+    높이를 고치지 않는다.
+
+    🔴 `_lift_prior_exact` 가 None 이면 여기도 None 을 준다 = **고정 모드 아님**.
+       그때는 기존 동작이 하나도 바뀌지 않는다. 표를 모르는데 고정하면 로봇이
+       아무것도 못 한다 — 이것이 이 변경 전체에서 제일 중요한 조건이다.
+    허용폭은 새 상수를 만들지 않고 이미 쓰던 데드밴드(각 3mm)를 그대로 쓴다:
+      · 승강장 LIFT_HALL_DEADBAND_M · 차내 LIFT_ROW_DEADBAND_M
+    🔴 지켜야 할 것은 **판정 폭 ≥ 명령 데드밴드** 라는 순서 하나다. 반대가 되면
+       "움직이기엔 작고 인정하기엔 먼" 죽은 구간이 생겨 영구 교착이 된다. 같은 값은
+       그 구간이 비어 있는 가장 빡빡한 안전점이다.
+    폭을 넓히지 않는 이유(2026-09-29, 한 번 8mm 로 갈랐다가 되돌림): 근거 실측이
+    **표값 ±6mm 92% / 19mm 이상 38%** 다. 판정 폭을 8~12mm 로 넓히면 그 사이 구간,
+    즉 **닿을 확률이 낮은 자세를 초록불로 승인**하게 된다 — 62%→90% 와 반대 방향이다.
+    (채터링 우려는 근거가 없었다: 지글·스윕은 `if not usable:` 블록 안이고 그 블록은
+     무조건 return 이라 타겟이 보이는 동안 한 번도 돌지 않는다. 실제 순서는
+     못 읽음→지글→읽힘→표값 복귀→도착→CENTERED 이고 대가는 지연 몇 초다.)
+    ⚠ 남는 위험은 하나 — 리프트가 표값 3mm 안에 못 앉으면 CENTERED 가 영영 안 걸린다.
+      파일 내 증거는 1.2~1.9mm 급이라 여유가 얇다. 그 경우 `[LIFT] 표값 복귀` 가 2초마다
+      같은 숫자로 찍히므로 조용한 교착은 아니다 — 그게 보이면 판정 폭만 6mm 로 가른다.
+    """
+    with state_lock:
+        pl = place or state.get("place")
+    h = _lift_prior_exact(pl)
+    if h is None:
+        return None, None
+    return h, (LIFT_HALL_DEADBAND_M if pl == "hall" else LIFT_ROW_DEADBAND_M)
+
+
+def _ey_mm(ey_px, dist):
+    """세로 잔차(px) → 실거리(mm). 1cm = 4.2/d px 의 역 (mm = px * d / 0.42).
+    거리를 모르면 _aim_offsets·_dead_zone_px 와 같은 기본값을 쓴다."""
+    d = dist if (dist and 0.10 < dist < 1.0) else AIM_DIST_DEFAULT
+    return ey_px * d / 0.42
+
+
 def _lift_row_prior(node, place, tok):
     """차내 층버튼: 목표 버튼의 행 높이로 lift 를 맞춘다. 홀(▲▼)은 건드리지 않는다.
 
@@ -709,7 +775,7 @@ def _lift_row_prior(node, place, tok):
             node._dlog(f"[PRIOR] lift 현재값 미수신 — 승강장 높이 보정 생략 "
                        f"(목표였던 값 {h:.3f})")
             return
-        if abs(cur - h) <= LIFT_HALL_DEADBAND_M:   # 차내(행)보다 훨씬 좁다 — 위 주석
+        if abs(cur - h) <= LIFT_HALL_DEADBAND_M:   # 차내(행)와 같은 3mm — 위 주석
             node._dlog(f"[PRIOR] 승강장 {fl}층 '{tok}' 목표 lift {h:.3f} — "
                        f"이미 그 높이 ({cur:.3f}, 차이 {(h - cur) * 1000:+.0f}mm)")
             return
@@ -5767,6 +5833,28 @@ class ElevatorTracker(Node):
             threading.Thread(target=self._base_move, args=(val,),
                              daemon=True).start()
 
+    def _lift_pin_skip(self, where, ey=None):
+        """고정 모드면 True — **이 자리에서는 joint_lift 명령을 내지 않는다.**
+
+        표를 모르면 False = 기존 보정 그대로. 조용히 생략하지 않는다(5초 스로틀로
+        어디를 왜 건너뛰는지 남긴다) — 2026-09-10 의 '조용한 교착'이 그렇게 생겼다.
+        """
+        h, _b = _lift_pin()
+        if h is None:
+            return False
+        _t = getattr(self, "_pin_skip_ts", None)
+        if _t is None:
+            _t = self._pin_skip_ts = {}
+        if time.time() - _t.get(where, 0) > 5.0:
+            _t[where] = time.time()
+            with state_lock:
+                _cur = state["lift"]
+            self._dlog(f"[LIFT] 고정 — {where} 생략 (표값 {h:.3f}"
+                       + (f" · 현재 {float(_cur):.3f}" if _cur is not None else "")
+                       + (f" · y{ey:+.0f}px" if ey is not None else "")
+                       + ") — 높이는 표가 정한다")
+        return True
+
     def _servo_step(self, detections, lift):
         if not _authority_ok():
             return   # 제어권 없음 — 서보·스캔·자동접근 전부 침묵 (관찰만)
@@ -5944,7 +6032,12 @@ class ElevatorTracker(Node):
                     return
                 if not self._may_explore():
                     return
-                if abs(sey_m) >= 45:
+                # 🔴 고정 모드에서 세로를 생략할 때 **여기서 멈추면 안 된다.** 이 블록은
+                #    끝이 무조건 return 이라, 높이를 안 움직이는 순간 아래 좌우 보정이
+                #    평가조차 안 된다. sey 는 lift 로만 줄어드는 값이라 스스로 회복하지
+                #    않으므로 '무동작 + return' 은 탈출구 없는 정지다. 좌우로 흘려보낸다.
+                if abs(sey_m) >= 45 and not self._lift_pin_skip(
+                        "맵 예상 위치 높이 이동", sey_m):
                     self._dlog(f"[SEEK] 맵 예상 위치로 높이 이동 ('{target}', y{sey_m:+.0f}px)")
                     self._send_goal(["joint_lift"],
                                     [max(0.15, min(1.10, float(lift) - KP_LIFT * sey_m))])
@@ -6029,7 +6122,13 @@ class ElevatorTracker(Node):
                 COARSE = 45          # 군집은 대략 중앙이면 충분 (정밀 정렬은 타겟 발견 후)
                 if not self._may_explore():
                     return
-                if abs(sey) >= COARSE:
+                # 🔴 위 맵 유도와 같은 이유로 '무동작 + return' 이 되면 안 된다.
+                #    승강장 ▼ 의 군집 중심은 기하학적으로 sey ≈ -49~-55px (▲▼ 간격 62mm
+                #    + 조준 오프셋)라 **거리 전 구간에서 COARSE(45) 를 넘는다** — 이 분기에
+                #    닿기만 하면 ▼ 는 반드시 정지 쪽이 된다(▲ 는 -5~+31 이라 안 걸린다).
+                #    좌우 보정과 판독 거리 확보 전진은 여전히 유효한 액추에이터다.
+                if abs(sey) >= COARSE and not self._lift_pin_skip(
+                        "군집 중심 높이 이동", sey):
                     self._dlog(f"[SEEK] 군집 중심으로 높이 이동 (y{sey:+.0f}px)")
                     self._send_goal(["joint_lift"],
                                     [max(0.15, min(1.10, float(lift) - KP_LIFT * sey))])
@@ -6096,7 +6195,33 @@ class ElevatorTracker(Node):
         # 아래쪽 큰 추적 보정(KP_LIFT*ey 통째)만 건너뛴다 — 그 건너뛰기가 원래
         # 의도(경계 덜덜거림 방지)였고, `return` 은 그 의도를 넘어 로봇을 통째로
         # 세우는 부작용이었다. CENTER_HOLD_PAD 주석에 실측이 있다.
-        _strict = abs(ex) < dz and abs(ey) < dz
+        # ── 고정 모드의 세로 판정 ────────────────────────────────────────
+        # 표를 아는 동안에는 lift 를 안 움직인다(아래 여섯 자리). 그 상태에서 ey 로
+        # CENTERED 를 요구하면 **영원히 안 켜지고 누르기 버튼이 안 열린다** —
+        # 2026-09-10 13:52:49~13:53:21 '링 덫' 33.4초와 같은 모양이고, 표값 ±15mm
+        # 클램프가 2026-09-10 15:29 에 실패한 것도 이것이다(CENTERED·APPROACH·READY
+        # 0회). 이번에 다른 점은 **세로 판정 자리를 전부 같이 바꾼다**는 것뿐이다.
+        # → 세로는 "lift 가 표값 근처인가"로 본다. ey 는 판정에서 빼되 계속 기록한다.
+        # 🔴 표를 모르면(_pin_h is None) 아래 세 판정 모두 기존 ey·dz 기준 그대로다.
+        _pin_h, _pin_band = _lift_pin()
+        _pin_dev = None if _pin_h is None else float(lift) - _pin_h
+        _vert_ok = True if _pin_h is None else abs(_pin_dev) <= _pin_band
+        if _pin_h is None:
+            _vy_in   = abs(ey) < dz
+            _vy_hold = abs(ey) <= dz + CENTER_HOLD_PAD
+            _vy_out  = abs(ey) > dz + 4
+        else:
+            # 진입·유지·해제가 모두 같은 기준이다 — lift 는 멈춰 있으므로 경계에서
+            # 떨릴 여지가 없다(히스테리시스가 필요했던 이유가 사라진다).
+            _vy_in = _vy_hold = _vert_ok
+            _vy_out = not _vert_ok
+            if time.time() - getattr(self, "_pin_stat_ts", 0) > 5.0:
+                self._pin_stat_ts = time.time()
+                self._dlog(f"[LIFT] 고정 — lift {float(lift):.3f} / 표값 {_pin_h:.3f} "
+                           f"({_pin_dev*1000:+.0f}mm · 허용 ±{_pin_band*1000:.0f}mm) · "
+                           f"세로 잔차 y{ey:+.0f}px({_ey_mm(ey, tdist):+.0f}mm, "
+                           "판정에서 제외 — 기록만)")
+        _strict = abs(ex) < dz and _vy_in
         _hold   = False
         if not _strict:
             with state_lock:
@@ -6109,7 +6234,7 @@ class ElevatorTracker(Node):
             #    링 덫이 실제로 문제가 되는 구간은 READY **이전의 접근 단계**다.
             _hold = (_latch and not _rdy
                      and abs(ex) <= dz + CENTER_HOLD_PAD
-                     and abs(ey) <= dz + CENTER_HOLD_PAD)
+                     and _vy_hold)
         if _strict or _hold:
             if _strict:
                 with state_lock:
@@ -6199,7 +6324,8 @@ class ElevatorTracker(Node):
                     # 모양 전용 정합(앵커 0)으로 추론된 위치를 향해 높이를 움직이지
                     # 않는다 — 2026-09-09 실패판이 그것이었다(글자를 하나도 못 읽은
                     # 추론 위치로 +28mm 까지 흘러 두 행 사이 평면을 눌렀다).
-                    if abs(ey) >= act and not det.get("shape"):
+                    if (abs(ey) >= act and not det.get("shape")
+                            and not self._lift_pin_skip("polish 높이 보정", ey)):
                         # 🔴 여기에 절대 클램프를 걸지 않는다 — _lift_row_clamp
                         #    독스트링의 "눈 감고 헤매는 것만 묶는다" 참고.
                         self._send_goal(["joint_lift"],
@@ -6217,13 +6343,24 @@ class ElevatorTracker(Node):
                 (abs(ex) > max(3 * dz, 40) or abs(ey) > max(3 * dz, 40)):
             if time.time() - getattr(self, "_jump_log_ts", 0) > 5.0:
                 self._jump_log_ts = time.time()
-                self._dlog(f"[READY] 라벨 점프 무시 (x{ex:+.0f} y{ey:+.0f}px) — "
-                           "동결 유지 (오인식으로 판단)")
+                # 고정 모드에서 **세로만** 크게 벌어진 것은 라벨 점프가 아니라 대개
+                # 표/층 불일치다 — 높이는 표가 정했고 ey 로는 줄일 수단이 없다.
+                # 🔴 판정(동결 유지)은 그대로 두고 **사유만** 가른다. _strict 에 19mm 을
+                #    넣으면 lift 로 못 줄이는 잔차가 다시 교착을 만든다(15:29 재현).
+                if (_pin_h is not None and abs(ey) > max(3 * dz, 40)
+                        and abs(ex) <= max(3 * dz, 40)):
+                    self._dlog(f"[READY] 표와 세로가 {_ey_mm(ey, tdist):+.0f}mm 다르다 "
+                               f"(y{ey:+.0f}px · lift {float(lift):.3f} = 표값 "
+                               f"{_pin_h:.3f}) — 층을 잘못 알았거나 라벨이 옆 행이다. "
+                               "동결 유지 — 층 확인 필요")
+                else:
+                    self._dlog(f"[READY] 라벨 점프 무시 (x{ex:+.0f} y{ey:+.0f}px) — "
+                               "동결 유지 (오인식으로 판단)")
             return
         # CENTERED는 래치가 아님 — 히스테리시스(+4px) 넘게 벗어나면 해제 후 재정렬
         with state_lock:
             was_centered = state["centered"]
-            if was_centered and (abs(ex) > dz + 4 or abs(ey) > dz + 4):
+            if was_centered and (abs(ex) > dz + 4 or _vy_out):
                 state["centered"] = False
                 state["press_ready"] = False   # 정조준이 깨지면 READY 래치도 해제
                 was_centered = False
@@ -6263,7 +6400,22 @@ class ElevatorTracker(Node):
             self._offdz_since = None
         # 상하(ey) → lift 서보. yaw는 고정(카메라만 돌 뿐 손끝 경로를 못 옮김).
         # 앵커 조건: 모양 전용 정합(글자 미판독)으로 추론된 위치에는 높이를 안 맞춘다.
-        if abs(ey) >= dz and det.get("shape"):
+        if _pin_h is not None:
+            # 고정 모드: ey 로 높이를 고치지 않는다. 다만 **표값에서 벗어나 있으면
+            # 표값으로 되돌린다** — 여기서 나가는 유일한 값은 표값이고 ey 는 안 쓴다.
+            # 왜 필요한가: 타겟을 못 읽는 동안 도는 인식 지글(±1.2cm)·탐색 스윕
+            # (±1.5cm)이 lift 를 표에서 밀어낸다. 밀린 채로 타겟이 다시 잡히면
+            # 세로 판정(_vert_ok)이 영원히 안 켜져 CENTERED 가 막힌다 — 되돌릴
+            # 수단이 이 자리밖에 없다("고정"은 얼리는 것이 아니라 표에 붙이는 것).
+            # 2초 스로틀: 명령이 목표에 닿을 시간을 준다(매 프레임 재전송 금지).
+            if not _vert_ok and time.time() - getattr(self, "_pin_back_ts", 0) > 2.0:
+                self._pin_back_ts = time.time()
+                self._dlog(f"[LIFT] 표값 복귀 {float(lift):.3f}→{_pin_h:.3f} "
+                           f"({_pin_dev*1000:+.0f}mm 벗어남 · 허용 "
+                           f"±{_pin_band*1000:.0f}mm) — ey 는 쓰지 않는다 "
+                           f"(참고 y{ey:+.0f}px)")
+                self._send_goal(["joint_lift"], [max(0.15, min(1.10, _pin_h))])
+        elif abs(ey) >= dz and det.get("shape"):
             if time.time() - getattr(self, "_shape_lift_log_ts", 0) > 5.0:
                 self._shape_lift_log_ts = time.time()
                 self._dlog(f"[LIFT] 모양 추론(앵커 0) 위치라 높이 보정 생략 "
@@ -6373,7 +6525,27 @@ class ElevatorTracker(Node):
             _bx = (det["box"]["x1"] + det["box"]["x2"]) / 2 - (CX + _ox)
             _by = (det["box"]["y1"] + det["box"]["y2"]) / 2 - (CY + _oy)
             _dz = _dead_zone_px(d) + 2   # 경계선 재측정 잡음으로 인한 억울한 거부 방지
-            if abs(_bx) >= _dz or abs(_by) >= _dz:
+            _pin_s, _ = _lift_pin()
+            if _pin_s is not None:
+                # 고정 모드: 세로를 dz 로 요구하면 초록불은 켜지는데 클릭은 거부되고,
+                # 재정렬을 시켜도 lift 는 못 움직인다 = 무한 루프. 세로는 **표대로
+                # 왔는가**(19mm)만 본다. 좌우는 폐루프가 살아 있으므로 그대로.
+                if abs(_bx) >= _dz:
+                    # CENTERED 해제 → 서보가 즉시 재정렬 (히스테리시스 교착 방지)
+                    with state_lock:
+                        state["centered"] = False
+                    return (f"좌우 정렬 어긋남 (x{_bx:+.0f}px, 허용±{_dz}) — "
+                            "자동 재정렬 시작, 몇 초 뒤 다시 누르세요")
+                _mm_s = _ey_mm(_by, d)
+                if abs(_mm_s) > PRESS_EY_MAX_MM:
+                    # 🔴 centered 는 건드리지 않는다 — 재정렬로 줄어드는 오차가
+                    #    아니다(lift 는 표에 묶여 있다). 사유만 돌려준다.
+                    self._dlog(f"[PRESS] ⛔ 세로 게이트(클릭) — 표값 {_pin_s:.3f} · "
+                               f"세로 {_mm_s:+.0f}mm (y{_by:+.0f}px @ {d:.2f}m)")
+                    return (f"표와 높이가 다르다 — 층을 잘못 알았거나 표가 틀렸다 "
+                            f"(세로 {_mm_s:+.0f}mm > 허용 ±{PRESS_EY_MAX_MM:.0f}mm, "
+                            f"lift 표값 {_pin_s:.3f})")
+            elif abs(_bx) >= _dz or abs(_by) >= _dz:
                 # CENTERED 해제 → 서보가 즉시 재정렬 (히스테리시스 교착 방지)
                 with state_lock:
                     state["centered"] = False
@@ -6407,6 +6579,8 @@ class ElevatorTracker(Node):
         with state_lock:
             state["pressing"] = True
             _scene0 = state.get("scene")
+        # 고정 모드(표를 아는 상태)인가 — 이 시퀀스 내내 같은 답을 쓴다.
+        _pin_p, _ = _lift_pin()
         # 누름 검증용 프레임 — 이 회차의 폴더를 정하고 A(누르기 직전)를 남긴다.
         # 요청만 하고 바로 지나간다(인코딩·쓰기는 별도 스레드) — 모션을 늦추지 않는다.
         _pdir = _press_run_dir(_scene0, tgt)
@@ -6469,7 +6643,8 @@ class ElevatorTracker(Node):
                     bxm = (det_m["box"]["x1"] + det_m["box"]["x2"]) / 2 - (CX + oxm)
                     bym = (det_m["box"]["y1"] + det_m["box"]["y2"]) / 2 - (CY + oym)
                     dzm = _dead_zone_px(d_now)
-                    if abs(bym) > dzm:
+                    if abs(bym) > dzm and not self._lift_pin_skip(
+                            "접근 중 높이 보정", bym):
                         with state_lock:
                             lift_now = state["lift"]
                         if lift_now is not None:
@@ -6523,6 +6698,48 @@ class ElevatorTracker(Node):
                         state["press_fail_ts"] = time.time()
                     return
 
+            # ── 세로 게이트 (검사만, 보정 없음) ──────────────────────────────
+            # 고정 모드에서 남은 세로 잔차는 "조준이 덜 됐다"가 아니라 **"표와 실제가
+            # 다르다"** 는 신호다(높이는 표가 정했고 아무도 못 움직인다). 표가 맞으면
+            # 이 값은 mm 대로 떨어진다 — ±6mm 안 92% 닿음 / 19mm 이상 38%.
+            # 🔴 여기서 lift 를 고치지 않는다. 검사만 하고, 어긋나면 누르지 않는다.
+            # direct(READY 동결 직행) 경로는 아래 B-2 를 통째로 건너뛰므로 세로를
+            # 보는 자리가 여기밖에 없다.
+            _gate_px = _gate_mm = None
+            if _pin_p is not None:
+                with state_lock:
+                    _dets_g = list(state["detections"])
+                # 차단을 하는 게이트다 — 관측 필터가 셋 중 가장 느슨하면 오탐 관측
+                # 하나로 정상 누르기를 막는다. start_press 의 `_obs_ok` 와 같은 기준을
+                # 쓴다: suspect 배제 + "2초 내 OR (8초 내 + 그 뒤 로봇 정지)".
+                _e_pg = self._det_mem.get(tgt)
+                _lm_g = getattr(self, "_last_motion_ts", 0)
+
+                def _obs_ok_g(x):
+                    if x.get("text") != tgt or x.get("suspect"):
+                        return False
+                    if x.get("age", 9.9) < 2.0:
+                        return True
+                    return (x.get("age", 9.9) < 8.0 and _e_pg is not None
+                            and _e_pg["ts"] > _lm_g + 0.3)
+
+                _det_g = next((x for x in _dets_g if _obs_ok_g(x)), None)
+                if _det_g is not None:
+                    _oxg, _oyg = _aim_offsets(d2)
+                    _gate_px = ((_det_g["box"]["y1"] + _det_g["box"]["y2"]) / 2
+                                - (CY + _oyg))
+                    _gate_mm = _ey_mm(_gate_px, d2)
+                    if abs(_gate_mm) > PRESS_EY_MAX_MM:
+                        st(f"❌ 표와 높이가 다르다 — 층을 잘못 알았거나 표가 틀렸다 "
+                           f"(세로 {_gate_mm:+.0f}mm > 허용 ±{PRESS_EY_MAX_MM:.0f}mm, "
+                           f"y{_gate_px:+.0f}px @ {d2:.3f}m) — 누르지 않고 복귀")
+                        self._dlog(f"[PRESS] ⛔ 세로 게이트 — lift 표값 {_pin_p:.3f} · "
+                                   f"세로 {_gate_mm:+.0f}mm · 누르기 중단")
+                        self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
+                        with state_lock:
+                            state["press_fail_ts"] = time.time()
+                        return
+
             # B-2. 근접 재정렬: 접근 중 처짐/벽 기울기로 생긴 오차를 "가까운 거리"에서
             #      다시 잡는다. 여기서의 1px는 실거리로 훨씬 작아 정밀함.
             #      (press 중 자동 서보는 잠겨 있으므로 여기서 통제된 lift 보정만 수행)
@@ -6550,12 +6767,19 @@ class ElevatorTracker(Node):
                     by2 = (det2["box"]["y1"] + det2["box"]["y2"]) / 2 - (CY + oy2)
                     last_err = (bx2, by2)
                     tx2 = max(6, int(dz2 * 0.75))   # 좌우는 더 엄격 (경계 통과 → 좌우 어긋남 실측)
-                    if abs(bx2) <= tx2 and abs(by2) <= dz2:
-                        st(f"근접 재정렬 OK (x{bx2:+.0f} y{by2:+.0f}px)")
+                    # 세로는 고정 모드에서 표 기준(19mm)이다 — dz2 를 요구하면 lift 로
+                    # 줄일 수 없는 잔차 때문에 5회를 헛돌고 아래 결과 게이트로 떨어진다.
+                    _vy2 = (abs(_ey_mm(by2, d2)) <= PRESS_EY_MAX_MM
+                            if _pin_p is not None else abs(by2) <= dz2)
+                    if abs(bx2) <= tx2 and _vy2:
+                        st(f"근접 재정렬 OK (x{bx2:+.0f} y{by2:+.0f}px"
+                           + (f", 세로 {_ey_mm(by2, d2):+.0f}mm"
+                              if _pin_p is not None else "") + ")")
                         aligned = True
                         break
                     moved = False
-                    if abs(by2) > dz2:                   # 상하 → lift
+                    if abs(by2) > dz2 and not self._lift_pin_skip(
+                            "근접 재정렬 높이 보정", by2):   # 상하 → lift
                         with state_lock:
                             lift_now = state["lift"]
                         if lift_now is not None:
@@ -6609,6 +6833,8 @@ class ElevatorTracker(Node):
                 #    "표가 틀렸는가"와 "조준이 틀렸는가"를 섞는다. 주차 자세가 바꾸는
                 #    몫(15:29 +19.7mm)은 폐루프가 메워야 하는 것이고, 버튼에 맞았는지는
                 #    카메라가 재는 잔차(by2)가 직접 말한다. 표값 이탈은 **진단으로만** 남긴다.
+                if last_err:
+                    _gate_px, _gate_mm = last_err[1], _ey_mm(last_err[1], d2)
                 _ex = _lift_prior_exact()
                 if _ex is not None and last_err:
                     with state_lock:
@@ -6619,13 +6845,45 @@ class ElevatorTracker(Node):
                                    f"{(float(_lf_now) - _ex) * 1000:+.0f}mm "
                                    f"(행 간격 절반 28mm · 승강장 ▲▼ 간격 절반 31mm). "
                                    f"잔차 y{last_err[1]:+.0f}px")
+                # 세로 항만 고정 모드에서 19mm 로 **교체**한다(좌우는 그대로).
+                # 1.5*dz2 는 d≈0.20m 에서 9.3mm 라, 19mm 를 얹기만 하면 기존 기준이
+                # 먼저 걸려 새 게이트가 아무 일도 안 한다. 표를 모르면 기존 기준 그대로.
+                _vfail = bool(last_err) and (
+                    abs(_ey_mm(last_err[1], d2)) > PRESS_EY_MAX_MM
+                    if _pin_p is not None else
+                    abs(last_err[1]) > dz2 * PRESS_RESID_MAX_MULT)
                 if not aligned and last_err and (
-                        abs(last_err[0]) > dz2 * PRESS_RESID_MAX_MULT
-                        or abs(last_err[1]) > dz2 * PRESS_RESID_MAX_MULT):
+                        abs(last_err[0]) > dz2 * PRESS_RESID_MAX_MULT or _vfail):
+                    # 고정 모드가 아니면 문구도 예전 그대로 둔다(기존 동작 보존).
                     st(f"❌ 근접 재정렬 실패 (x{last_err[0]:+.0f} y{last_err[1]:+.0f}px, "
-                       f"허용 ±{dz2 * PRESS_RESID_MAX_MULT:.0f}px ≈ 버튼 반경) — 복귀")
+                       + (f"좌우 허용 ±{dz2 * PRESS_RESID_MAX_MULT:.0f}px ≈ 버튼 반경"
+                          f" · 세로 {_ey_mm(last_err[1], d2):+.0f}mm "
+                          f"(허용 ±{PRESS_EY_MAX_MM:.0f}mm)"
+                          f"{' — 표와 높이가 다르다' if _vfail else ''}"
+                          if _pin_p is not None else
+                          f"허용 ±{dz2 * PRESS_RESID_MAX_MULT:.0f}px ≈ 버튼 반경")
+                       + ") — 복귀")
                     self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
+                    # 대시보드(scene_press_failed)가 먹는 신호. 위 세로 게이트와 **같은
+                    # 사유**로 끝나는 길이라 한쪽만 찍으면 대시보드가 절반만 본다.
+                    with state_lock:
+                        state["press_fail_ts"] = time.time()
                     return
+
+            # ── 누르기 직전 한 줄: 실제 lift / 표값 / 차이mm / ey 환산mm ──
+            # 사후에 "닿았나"를 높이와 대조할 수 있는 기록이다(direct 경로 포함).
+            if _pin_p is not None:
+                with state_lock:
+                    _lf_pr = state["lift"]
+                self._dlog(
+                    "[PRESS] 고정 높이 — 실제 lift "
+                    + (f"{float(_lf_pr):.3f}" if _lf_pr is not None else "미수신")
+                    + f" / 표값 {_pin_p:.3f} / 차이 "
+                    + (f"{(float(_lf_pr) - _pin_p) * 1000:+.0f}mm"
+                       if _lf_pr is not None else "—")
+                    + " / ey "
+                    + (f"{_gate_mm:+.0f}mm (y{_gate_px:+.0f}px @ {d2:.3f}m)"
+                       if _gate_mm is not None else "— (세로 관측 없음)"))
 
             # C. 이제서야 그리퍼 닫기 (누르기 직전)
             st("3/6 그리퍼 닫기 (누르기 준비)")
