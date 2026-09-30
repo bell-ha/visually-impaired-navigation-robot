@@ -2166,6 +2166,37 @@ def _elev_status(timeout=3):
     _jr("elev_status", st, None, _jr_caller())
     return st
 
+# 이 아래면 '팔이 접혔다'로 본다. 수납 목표는 0.000m 이고(엘베 이동자세·_stow_arm 둘 다
+# wrist_extension=0), 5cm 는 정지 오차·관절 잡음을 덮는 여유다. 2026-09-30 사고값은
+# 0.372m 라 어떤 합리적 문턱으로도 걸린다 — 문턱을 다투는 문제가 아니었다.
+_ARM_STOWED_M = 0.05
+
+def _elev_arm_stowed():
+    """팔이 접혔나를 **재서** 판정. (안전한가, 사유) 반환.
+
+    🔴 fail-closed — 못 물었거나(None) 키가 없으면 "안전"이라고 하지 않는다. 이 함수가
+       막으려는 사고가 바로 **재지 않은 값을 안전으로 읽은 것**이다(2026-09-30 ② 문앞
+       Nav2 주행 23초를 팔 37cm 뻗은 채로 달렸다. arm_safe 는 True 였다).
+    ⚠ 한계 — 이 값은 엘베앱이 /joint_states 에서 받아 둔 **마지막 값**이고, /status 응답에는
+      그것을 언제 쟀는지가 없다. 엘베앱의 joint_states 구독이 끊기면 옛값이 그대로 온다.
+      즉 '틀린 값'은 걸러도 '낡은 값'은 못 거른다. 대시보드가 /joint_states 를 직접 구독하면
+      닫히는 구멍이다(이번 범위 밖 — FINDINGS 로 넘긴다).
+    """
+    st = _elev_status()
+    if st is None:
+        return False, "엘베앱 상태를 못 받았다 — 팔 위치를 확인할 수 없다"
+    v = st.get("arm_ext")
+    if v is None:
+        return False, "엘베앱이 팔 위치(arm_ext)를 주지 않는다 — 확인할 수 없다"
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return False, f"팔 위치를 숫자로 읽을 수 없다 (arm_ext={v!r})"
+    if v > _ARM_STOWED_M:
+        return False, (f"팔이 {v*100:.1f}cm 뻗어 있다 "
+                       f"(수납 기준 {_ARM_STOWED_M*100:.0f}cm)")
+    return True, f"팔 수납 확인 {v*100:.1f}cm (실측)"
+
 @_jr_traced("elev_scene")
 def _elev_scene(n, move=True):
     """엘베앱 씬 n 트리거(자세 전환·자동안무). **(전송성공, run_seq)** 반환.
@@ -2229,10 +2260,17 @@ def _elev_wait_ready(timeout=45, tok=None):
 @_jr_traced("elev_wait_press_done", post=_jr_cancel_post)
 def _elev_wait_press_done(timeout=30):
     """누르기 완료 대기 — press 씬(0/4)의 scene_next_ok(press_ok_ts>scene_ts) True까지.
-    이게 True면 '버튼 눌림 + 팔 복귀 + 그리퍼 열기'까지 끝난 상태라 이동해도 안전.
     취소 존중. 완료 True / 타임아웃·취소·**접촉 판정 실패** False.
-    ※ False면 _auto_run은 흐름을 계속하지 않고 여정을 중단한다(S1) — 팔이
-    복귀했는지 확인할 다른 수단이 없어서, 모르면 베이스를 안 움직인다."""
+
+    🔴 **이게 True 라고 이동해도 안전한 것이 아니다.** 예전 이 자리에 "버튼 눌림 + 팔
+       복귀 + 그리퍼 열기까지 끝난 상태라 이동해도 안전"이라고 적혀 있었는데 **틀렸다.**
+       엘베앱의 누르기 '복귀'는 0 이 아니라 `start_ext`(누르기를 시작한 시점의 팔 길이)로
+       돌아간다. 접근 단계가 이미 팔을 뻗어 놨으면 복귀해도 뻗은 채다 —
+       2026-09-30 15:29:26 `[PRESS] 5/6 복귀 중… →0.372m` 가 그 '복귀'다.
+       그 문장을 믿고 이동한 것이 ② 문앞 23초 주행(팔 37cm)이다.
+    → 이 함수가 보증하는 것은 **누르기 시퀀스가 끝났다**는 것뿐이다. 팔이 접혔는지는
+      `_elev_arm_stowed()` 로 **재서** 확인한다(② 문앞이 그렇게 한다).
+    ※ False면 _auto_run은 흐름을 계속하지 않고 여정을 중단한다(S1)."""
     t0 = time.time()
     while time.time() - t0 < timeout:
         with _auto_lock:
@@ -2604,8 +2642,36 @@ def _auto_front_nav2():
     if not p:
         _auto_set("오류", f"'{_FRONT_LOC}' 좌표가 location.yaml 에 없음 — ② 중단")
         return False
-    _auto_set("② 문앞정렬", "Nav2 주행 준비 — 엘베앱 제어권 회수 중...",
+    _auto_set("② 문앞정렬", "Nav2 주행 준비 — 팔 수납·제어권 회수 중...",
               wait=False, phase="front")
+    # ── 🔴 팔 수납을 주행 **앞**으로 옮긴다 (2026-09-30) ──────────────────────
+    # 2026-09-30 15:29 실기: ② 문앞 Nav2 주행 23초를 **팔 37cm 뻗은 채** 달렸다.
+    # 사용자가 로봇 손잡이를 잡고 옆에서 함께 걷는다 — 뻗은 팔은 사람과 문틀에 직접 닿는다.
+    #   15:29:26.295 [PRESS] 5/6 복귀 중… →0.372m   ← 누르기 "복귀"가 0 이 아니다
+    #   15:29:27.650 [PRESS] ✅ 누르기 완료          ← 여기서 출발
+    #   15:29:50.908 [SCENE] 이동 자세 … 팔 수납     ← 다 달린 **뒤에야** 접었다
+    # 자세 전환이 없었던 게 아니다. 이 줄(_elev_scene(1, move=False))이 함수 **맨 끝**에
+    # 있어서 순서가 뒤집혀 있었을 뿐이다. 그래서 새 수납 경로를 만들지 않고 **자리를 옮긴다**.
+    # 🔴 반드시 리스 회수 **전**이어야 한다 — 회수 뒤의 엘베앱은 관찰만 가능해서 관절을
+    #    못 움직인다. 지금 이 자리가 "엘베앱이 팔의 유일한 주인"인 마지막 시점이다.
+    # 매듭·누적 리셋도 같이 앞으로 온다. 그 편이 오히려 맞다 — 주행 23초 동안 엘베앱 씬이
+    # ① 로 남아 그 구간 로그·블랙박스가 전부 ① 로 기록되던 것이 같이 고쳐진다.
+    if not _auto_hold("② 단계 전환"):
+        return False
+    _sent2, _ = _elev_scene(1, move=False)
+    if not _sent2:
+        _auto_notify("팔을 접지 못해 이동을 멈췄습니다", stow_hint=True)
+        _auto_set("오류", "🚨 ② 자세 전환(팔 수납) 전송 실패 — 뻗은 팔로 주행할 수 "
+                          "없다. ② 중단", phase="front")
+        return False
+    # 전송 성공은 "보냈다"까지다. **접혔는지는 잰다.** arm_safe 가 True 인데 팔이 37cm
+    # 나와 있던 것이 이번 사고이므로, 여기서만은 플래그가 아니라 측정을 믿는다.
+    _arm_ok, _arm_why = _elev_arm_stowed()
+    if not _arm_ok:
+        _auto_notify("팔이 접혔는지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
+        _auto_set("오류", f"🚨 팔 수납 미확인 — {_arm_why}. ② 주행 거부", phase="front")
+        return False
+    _log("AUTO", f"② 주행 전 {_arm_why}")
     # 제어권 회수가 실패하면 주행을 시작하지 않는다. 두 주체가 /cmd_vel 을 동시에
     # 쓰는 것은 사람 옆에서 절대 허용할 수 없다(fail-closed).
     if not _grant_elev_lease(False, "② 문앞 Nav2 주행"):
@@ -2646,11 +2712,10 @@ def _auto_front_nav2():
                   f"'{_FRONT_LOC}' 를 모를 수 있다(장소 추가 후 interface 재시작 필요). "
                   "엘베UI 로 수동 정렬 후 '다음'", wait=True, phase="front")
         return _auto_wait_confirm()
-    # 단계 기록만 ② 로 넘긴다 — 안무는 띄우지 않는다(Nav2 가 이미 데려다 놨다).
-    # 건너뛰면 [SCENE] 매듭·누적 리셋이 없어 다음 단계 로그가 ① 로 남는다.
-    if not _auto_hold("② 단계 전환"):
-        return False
-    _elev_scene(1, move=False)
+    # 단계 기록(_elev_scene(1, move=False))은 **주행 앞**으로 옮겼다 — 위 '팔 수납을
+    # 주행 앞으로' 주석 참조. 안무는 여기서도 띄우지 않는다(Nav2 가 이미 데려다 놨다).
+    # 여기서 다시 부르지 않는다: 자세 전환이 한 번 더 나가 이미 접힌 팔에 goal 을 또
+    # 쏘고, 누적 리셋도 두 번이 된다(씬 누적 관련 사고 전력이 있다).
     d = _dist_to(p.get("x"), p.get("y"))
     try:
         # 모듈 최상위에 `import math` 가 없다 — 예전 `math.degrees` 는 NameError 로 except 에 떨어져
@@ -2992,10 +3057,14 @@ def _auto_run(dest):
     # 꺼진 채 남는 #91 재발). 이건 해제(release)가 아니라 진입 시 상태 위생이고,
     # 실제 해제 지점은 여전히 /elevator_app {running:false} 한 곳뿐이다.
     _rescue_hold = False
-    # 팔이 수납돼 있다고 볼 수 있는가. 대시보드는 /joint_states를 안 보므로 팔
-    # 자세를 직접 못 잰다 — 엘베앱이 주는 "누르기+팔복귀+그리퍼열기 완료" 신호가
-    # 유일한 근거다. 그래서 이 래치를 푸는 곳은 아래 단 두 곳(press_done True)뿐이고,
-    # 다른 데서 True로 만들면 근거 없는 안전 주장이 된다.
+    # 🔴 이 래치의 뜻을 2026-09-30 에 좁혔다. **"팔이 접혔다"가 아니라 "누르기 시퀀스가
+    #    끝났다"** 이다. 엘베앱의 누르기 '복귀'는 0 이 아니라 start_ext(누르기를 시작한
+    #    시점의 팔 길이)로 돌아가므로, press_done=True 여도 팔은 뻗은 채일 수 있다
+    #    (9/30 15:29:26 `5/6 복귀 중… →0.372m`). 그 오해가 ② 문앞 23초 주행을 냈다.
+    # → 팔이 실제로 접혔는지는 **재서** 확인한다: `_elev_arm_stowed()`(엘베앱 /status 의
+    #   arm_ext). ② 문앞은 자세 전환 직후 그 측정을 통과해야만 주행한다.
+    # 이 래치를 푸는 곳은 여전히 아래 단 두 곳(press_done True)뿐이고, 다른 데서 True로
+    # 만들면 근거 없는 주장이 된다 — 다만 이제 그 주장의 범위가 "누르기가 끝났다"까지다.
     arm_safe = True     # 여정 시작 시점의 "가정" — 잰 값이 아니다. 직전에
                         # 운영자가 팔을 뻗어둔 채 여정을 시작하면 이 가정은 틀린다.
     _AUTO["arm_safe"] = arm_safe   # 블랙박스 미러(run_end.state) — 아래 4곳도 같다. 판정에 안 쓴다
@@ -3127,10 +3196,20 @@ def _auto_run(dest):
             _auto_abort_elev(); return
         arm_safe = True                         # 유일한 release 지점 (1/2)
         _AUTO["arm_safe"] = arm_safe
+        # 이 시점의 팔 길이를 **잰 값으로** 남긴다. 래치는 "누르기가 끝났다"까지만
+        # 말하고 팔 자세는 말하지 않으므로, 둘이 갈라지는 순간을 기록으로 붙잡아 둔다
+        # (9/30 사고 때 이 한 줄이 있었으면 로그만 보고 원인을 알 수 있었다).
+        _ok1, _why1 = _elev_arm_stowed()
+        _log("AUTO", f"① 누르기 종료 시점 팔 상태 — {_why1}"
+                     + ("" if _ok1 else " · 이동 전 자세 전환이 반드시 선행해야 한다"))
 
         # ② 문앞 정렬 — 2026-09-09: 3단 안무(전진 80.8 + 우회전 90°) → Nav2 주행.
         # 팔 수납 확인은 그대로 선행한다(⑥ 직전과 같은 게이트). Nav2 든 3단이든
         # 뻗은 팔로 문틀 옆을 지나면 부딪힌다.
+        # 🔴 아래 `if not arm_safe` 는 "누르기가 끝났나"만 본다. **팔이 접혔나는 여기서
+        #    판정하지 않는다** — 이 자리의 팔은 아직 뻗어 있는 것이 정상이고(누르기 복귀가
+        #    start_ext 다), 접는 것은 _auto_front_nav2() 첫머리의 자세 전환이다. 실제
+        #    수납 판정은 그 직후 _elev_arm_stowed() 가 하고, 거기서 막히면 주행을 안 한다.
         if not arm_safe:
             _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(② 문앞정렬)")
@@ -3178,6 +3257,11 @@ def _auto_run(dest):
             _auto_abort_elev(); return
         arm_safe = True                         # 유일한 release 지점 (2/2)
         _AUTO["arm_safe"] = arm_safe
+        # (1/2) 와 같은 이유의 기록. ⑥ 은 씬 이동이라 자세 전환이 _elev_scene(5) **안에**
+        # 붙어 있어 여기서 게이트를 걸면 정상 여정을 막는다 — 재서 남기기만 한다.
+        _ok2, _why2 = _elev_arm_stowed()
+        _log("AUTO", f"⑤ 누르기 종료 시점 팔 상태 — {_why2}"
+                     + ("" if _ok2 else " · ⑥ 자세 전환이 접는다(_elev_scene(5) 선행)"))
 
         # 엘베 이동 대기 → ⑥ 하차: 후진 186 (자동 안무)
         _auto_set("이동중", f"{dest_floor}층 이동 중 — 도착·하차 준비되면 '다음'",
