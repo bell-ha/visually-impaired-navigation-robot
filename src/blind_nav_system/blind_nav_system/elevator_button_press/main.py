@@ -6536,15 +6536,21 @@ class ElevatorTracker(Node):
                         state["centered"] = False
                     return (f"좌우 정렬 어긋남 (x{_bx:+.0f}px, 허용±{_dz}) — "
                             "자동 재정렬 시작, 몇 초 뒤 다시 누르세요")
+                # 🔴 세로는 **기록만 한다 — 거부하지 않는다** (사용자 결정 2026-09-30:
+                #    "좌표는 보정이 될 거 아니야 … 정녕 좌표가 달랐다 해도 그 좌표를
+                #    신뢰할 수 있어?? 아니잖아 / 높이는 틀리면 내가 알아서 수정할게").
+                #    근거: 2026-09-30 15:31 에 이 게이트가 -49mm 로 막았는데, 같은
+                #    순간 깨끗한 프레임의 진짜 잔차는 -6mm 였다. 캐빈에서 로봇이
+                #    움직이고 패널이 흔들리는 값으로 누르기를 막는 것이 설계 오류다.
+                #    높이의 권위는 표에 있다(사진 86점 ≤3.4mm · 중간층 재추출 ≤0.6mm
+                #    · 점등 확인 1건 · 승강장 22회 성공). 좌우 항은 그대로 거부한다 —
+                #    그쪽은 베이스 폐루프가 살아 있어 의미 있는 판정이다.
                 _mm_s = _ey_mm(_by, d)
                 if abs(_mm_s) > PRESS_EY_MAX_MM:
-                    # 🔴 centered 는 건드리지 않는다 — 재정렬로 줄어드는 오차가
-                    #    아니다(lift 는 표에 묶여 있다). 사유만 돌려준다.
-                    self._dlog(f"[PRESS] ⛔ 세로 게이트(클릭) — 표값 {_pin_s:.3f} · "
-                               f"세로 {_mm_s:+.0f}mm (y{_by:+.0f}px @ {d:.2f}m)")
-                    return (f"표와 높이가 다르다 — 층을 잘못 알았거나 표가 틀렸다 "
-                            f"(세로 {_mm_s:+.0f}mm > 허용 ±{PRESS_EY_MAX_MM:.0f}mm, "
-                            f"lift 표값 {_pin_s:.3f})")
+                    self._dlog(f"[PRESS] 세로 잔차 {_mm_s:+.0f}mm "
+                               f"(표값 {_pin_s:.3f} · 허용 참고 "
+                               f"{PRESS_EY_MAX_MM:.0f}mm · y{_by:+.0f}px @ {d:.2f}m) "
+                               "— 기록만, 누르기 진행")
             elif abs(_bx) >= _dz or abs(_by) >= _dz:
                 # CENTERED 해제 → 서보가 즉시 재정렬 (히스테리시스 교착 방지)
                 with state_lock:
@@ -6729,16 +6735,13 @@ class ElevatorTracker(Node):
                     _gate_px = ((_det_g["box"]["y1"] + _det_g["box"]["y2"]) / 2
                                 - (CY + _oyg))
                     _gate_mm = _ey_mm(_gate_px, d2)
+                    # 🔴 기록만 한다 — 거부하지 않는다(사용자 결정 2026-09-30,
+                    #    start_press 쪽 주석에 근거를 적었다).
                     if abs(_gate_mm) > PRESS_EY_MAX_MM:
-                        st(f"❌ 표와 높이가 다르다 — 층을 잘못 알았거나 표가 틀렸다 "
-                           f"(세로 {_gate_mm:+.0f}mm > 허용 ±{PRESS_EY_MAX_MM:.0f}mm, "
-                           f"y{_gate_px:+.0f}px @ {d2:.3f}m) — 누르지 않고 복귀")
-                        self._dlog(f"[PRESS] ⛔ 세로 게이트 — lift 표값 {_pin_p:.3f} · "
-                                   f"세로 {_gate_mm:+.0f}mm · 누르기 중단")
-                        self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
-                        with state_lock:
-                            state["press_fail_ts"] = time.time()
-                        return
+                        self._dlog(f"[PRESS] 세로 잔차 {_gate_mm:+.0f}mm "
+                                   f"(표값 {_pin_p:.3f} · 허용 참고 "
+                                   f"{PRESS_EY_MAX_MM:.0f}mm · y{_gate_px:+.0f}px "
+                                   f"@ {d2:.3f}m) — 기록만, 누르기 진행")
 
             # B-2. 근접 재정렬: 접근 중 처짐/벽 기울기로 생긴 오차를 "가까운 거리"에서
             #      다시 잡는다. 여기서의 1px는 실거리로 훨씬 작아 정밀함.
@@ -6848,9 +6851,17 @@ class ElevatorTracker(Node):
                 # 세로 항만 고정 모드에서 19mm 로 **교체**한다(좌우는 그대로).
                 # 1.5*dz2 는 d≈0.20m 에서 9.3mm 라, 19mm 를 얹기만 하면 기존 기준이
                 # 먼저 걸려 새 게이트가 아무 일도 안 한다. 표를 모르면 기존 기준 그대로.
-                _vfail = bool(last_err) and (
-                    abs(_ey_mm(last_err[1], d2)) > PRESS_EY_MAX_MM
-                    if _pin_p is not None else
+                # 🔴 고정 모드에서는 세로가 **판정에서 빠진다** — 기록만 한다
+                #    (사용자 결정 2026-09-30, start_press 쪽 주석에 근거).
+                #    좌우 항(last_err[0])은 그대로다. 표를 모르면 예전 기준 그대로.
+                if _pin_p is not None and last_err:
+                    _mm_r = _ey_mm(last_err[1], d2)
+                    if abs(_mm_r) > PRESS_EY_MAX_MM:
+                        self._dlog(f"[PRESS] 세로 잔차 {_mm_r:+.0f}mm "
+                                   f"(표값 {_pin_p:.3f} · 허용 참고 "
+                                   f"{PRESS_EY_MAX_MM:.0f}mm · y{last_err[1]:+.0f}px "
+                                   f"@ {d2:.3f}m) — 기록만, 누르기 진행")
+                _vfail = bool(last_err) and _pin_p is None and (
                     abs(last_err[1]) > dz2 * PRESS_RESID_MAX_MULT)
                 if not aligned and last_err and (
                         abs(last_err[0]) > dz2 * PRESS_RESID_MAX_MULT or _vfail):
