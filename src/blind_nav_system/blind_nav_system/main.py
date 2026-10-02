@@ -702,10 +702,29 @@ def init_ros():
 # 엘베 이동-씬의 수납 로직을 그대로 복제: 그리퍼 먼저 닫고(과부하 방지: 열린 채 손목
 # 돌리면 손가락이 몸통에 닿음) → 손목 안쪽 + 팔 완전 수축. 엘베 앱 없이도 동작하고,
 # one-shot이라 armleft처럼 계속 재전송하며 팔을 두고 다투는 일이 없다.
+# 수납이 이미 돌고 있나. 🔴 2026-09-30 이전에는 /stow_arm 이 여정 중 _journey_gate 로
+# 막혀 있어 연타가 구조적으로 불가능했다. 그 게이트를 여는(= 안전 조치를 되살리는) 변경과
+# 짝으로 이 가드가 필요하다 — 사용자는 실제로 **4번 눌렀다**. 가드가 없으면 데몬 스레드가
+# 4개 떠서 각자 그리퍼 닫기(블로킹 5s) 뒤 5관절 goal 을 쏘며 서로 선점한다. 목표가 같아
+# 결말은 같지만, 같은 관절에 여러 주인이 붙는 모양 자체가 이 저장소가 반복해 다친 지점이다.
+_stow_in_flight = False
+_stow_lock = threading.Lock()
+
 def _stow_arm():
+    """팔 수납 one-shot. 'started' / 'busy'(이미 진행 중) / 'noros' 를 돌려준다.
+
+    반환을 bool 로 두지 않는 이유: 호출부가 "이미 수납 중"과 "ROS 가 없어 못 한다"를
+    사용자에게 다르게 말해야 한다. 둘 다 '시작 안 됨'이지만 사람이 할 일이 정반대다.
+    """
     if _arm_client is None:
         _log("MAIN", "팔 수납 실패 — 액션클라 미초기화(ROS 없음)")
-        return
+        return "noros"
+    global _stow_in_flight
+    with _stow_lock:
+        if _stow_in_flight:
+            _log("MAIN", "팔 수납 요청 무시 — 이미 수납 중(중복 트리거)")
+            return "busy"
+        _stow_in_flight = True
     def _send(joint_names, positions, sec, wait_timeout=0.0):
         goal = FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = list(joint_names)
@@ -739,7 +758,23 @@ def _stow_arm():
             _log("MAIN", "팔 수납 완료 (닫기→손목 안쪽→팔 수축→lift 0.90)")
         except Exception as e:
             _log("MAIN", f"팔 수납 예외: {e!r}")
-    threading.Thread(target=_run, daemon=True).start()
+        finally:
+            # 🔴 반드시 finally — 예외로 빠져도 플래그가 남으면 그 뒤로 수납이 **영영**
+            #    안 된다(안전 조치가 영구히 잠긴다). 막는 쪽보다 푸는 쪽을 확실히 한다.
+            global _stow_in_flight
+            with _stow_lock:
+                _stow_in_flight = False
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception as e:
+        # 🔴 start() 가 던지면 _run 이 안 돌고, 해제 finally 는 _run **안**에 있다 →
+        #    플래그가 영구 True 로 남아 이후 모든 수납이 "이미 수납 중"으로 거부된다.
+        #    확률은 낮지만 실패 모드가 조용하고 문구가 거짓이다. 여기서 직접 푼다.
+        with _stow_lock:
+            _stow_in_flight = False
+        _log("MAIN", f"팔 수납 스레드 기동 실패: {e!r}")
+        return "noros"
+    return "started"
 
 def publish_cmd(lx: float, az: float):
     if not _cmd_pub:
@@ -1421,12 +1456,51 @@ def armleft_status():
 
 @app.route("/stow_arm", methods=["POST"])
 def stow_arm():
-    _g = _journey_gate('팔 수납')
-    if _g:
-        return _g
-    _stow_arm()
+    """팔 수납 — **여정 중에도 허용한다.** 여기만 `_journey_gate` 를 쓰지 않는다.
+
+    🔴 2026-09-30 16:37~16:38: 팔이 뻗은 채 ② 를 달리는 동안 사용자가 이 버튼을 **4번
+       눌렀고 4번 다 409 로 막혔다**(블랙박스 blocked 4건, path=/stow_arm).
+       `_journey_gate` 의 취지는 "여정을 흔드는 조작 차단"인데 팔 수납은 흔드는 게 아니라
+       **안전 조치**다. 사용자가 로봇 손잡이를 잡고 옆에서 걷는다 — 뻗은 팔은 사람과
+       문틀에 직접 닿는다. 안전 잠금이 안전 조치를 막은 것이다.
+
+    막는 경우는 하나뿐 — 엘베앱이 버튼을 누르는 중(pressing)이면 팔의 주인이 이미 있다.
+    대시보드가 동시에 접으면 **두 주인**이 된다. 이 저장소의 고전적 사고 유형이고
+    (`/cmd_vel` 퍼블리셔 경합과 같은 모양), 누르기 시퀀스는 중간에 멈추지도 않는다.
+
+    ⚠ 다른 게이트와 **방향이 반대다 — 상태를 못 읽으면 fail-OPEN(허용)이다.** 실수가
+      아니다. `pressing` 을 못 읽었다는 건 엘베앱이 불통이라는 뜻이고, 앱이 죽었으면
+      **누르기 스레드도 같이 죽어 있어 선점할 대상이 없다.** 동시에 엘베UI 조종 패드도
+      사라지므로 `_stow_arm()`(직접 ROS 액션)이 **유일하게 남은 수단**이다. 여기서 막으면
+      "뻗은 팔 + 시각장애인 옆 + 복구 수단 0" 이 된다. 막아서 지키는 것(주인 경합)보다
+      막아서 잃는 것(안전 조치)이 크다.
+
+    이 수정은 파일 안의 자기모순도 푼다 — `_ARM_STOW_NOTE` 가 운영자에게 *"대시보드
+    '팔 수납'으로 넣은 뒤 밀거나 수동주행할 것"* 이라고 **안내하는 바로 그 동작을**
+    게이트가 막고 있었다.
+    """
+    st = _elev_status(timeout=1.0)
+    if st is not None and st.get("pressing"):
+        err = "누르기 진행 중 — 끝나면 가능"
+        _log("AUTO", f"⛔ 팔 수납 거부 — 엘베앱이 버튼을 누르는 중 ({request.remote_addr})")
+        _jr("reject", _AUTO.get("dest"), err, what="팔 수납", path=request.path,
+            step=_AUTO.get("step", ""), remote_addr=request.remote_addr)
+        return jsonify(ok=False, error=err), 409
+    res = _stow_arm()
+    if res == "noros":
+        return jsonify(ok=False, error="ROS 액션 클라이언트가 없다 — 런치가 떠 있는지 확인"), 503
+    if res == "busy":
+        return jsonify(ok=True, busy=True, note="이미 수납 중입니다")
     _log("WEB", "팔 수납 (웹 트리거)")
-    return jsonify(ok=True)
+    # ⚠ `_stow_arm()` 은 one-shot 이다. 엘베앱이 제어권을 들고 정렬 중이면 자동 접근이
+    #    팔을 **다시 뻗는다** — 사용자 눈에는 "넣었는데 다시 나온다"로 보인다. 그래도
+    #    막지는 않는다(한 번 접히는 것 자체가 안전에 쓸모가 있고, 막으면 위 fail-open
+    #    논리와 어긋난다). 대신 그럴 수 있다고 **미리 말해 둔다** — 말 없이 되돌아가면
+    #    사용자는 버튼이 고장난 줄 알고 연타한다(9/30 에 실제로 4번 눌렀다).
+    note = None
+    if st is not None and st.get("authority"):
+        note = "엘베앱이 제어권을 들고 있어 정렬 중이면 팔이 다시 뻗을 수 있습니다"
+    return jsonify(ok=True, note=note)
 
 @app.route("/armleft", methods=["POST"])
 def armleft():
@@ -2197,6 +2271,66 @@ def _elev_arm_stowed():
                        f"(수납 기준 {_ARM_STOWED_M*100:.0f}cm)")
     return True, f"팔 수납 확인 {v*100:.1f}cm (실측)"
 
+# 팔이 접히기를 기다리는 상한. `_elev_scene` 의 응답은 "명령을 받았다"까지이고 **관절
+# 이동 완료가 아니다** — 2026-09-30 ② 가 그걸 몰라 명령 직후에 잰 값으로 거부했다:
+#   17:53:05.670 [SCENE] 이동 자세 — 그리퍼 닫고→팔 수납   ← 여기서 응답이 돌아왔고
+#   17:53:06.989 -> wrist_extension=0.000                  ← 명령은 그 1.3초 **뒤에** 나갔다
+#   17:53:07.0xx 🚨 팔 수납 미확인 — 42.3cm. ② 주행 거부   ← 움직일 시간을 안 줬다
+# 실측 소요(2026-09-04 성공 사례, 같은 "이동 자세" 경로):
+#   14:12:11.995 수납 명령 → 14:12:16.271 ext 0.00 = 0.45m 를 4.3초(약 0.105 m/s).
+#   그 앞에 그리퍼를 먼저 닫는 1.3초가 더 붙는다(14:12:10.697 [SCENE] → 11.995 명령).
+# 합이 ≈5.6초이므로 12초는 그 2배 남짓이다. 넉넉한 쪽으로 잡는 이유: 이 상한을 넘기면
+# 여정이 멈추고 사람이 개입해야 하는데, 팔이 느리게 접히는 중인 것과 안 접히는 것을
+# 가르는 비용이 서로 다르다(전자를 틀리면 멀쩡한 여정을 끊는다).
+_ARM_STOW_WAIT_SEC = 12.0
+
+def _elev_wait_arm_stowed(timeout=_ARM_STOW_WAIT_SEC, on_progress=None):
+    """팔이 접힐 때까지 폴링(0.3s)하고 판정. `_elev_arm_stowed` 와 같은 (안전한가, 사유).
+
+    🔴 fail-closed 는 그대로다 — 상한까지 기다려도 안 접혔으면 "안전"이라고 하지 않는다.
+       기다리는 것은 **판정을 미루는 것**이지 완화하는 것이 아니다. 못 물었거나(None)
+       키가 없는 경우도 `_elev_arm_stowed` 가 하던 대로 '안전 아님'으로 남는다.
+    🔴 취소를 존중한다(`_auto_sleep`) — 사람이 멈추라고 한 뒤에 계속 기다리면 안 된다.
+       취소로 끝나면 **사유를 None 으로** 돌려준다. 호출부가 거부 통보(사람에게 알리고
+       '오류' 단계로 가는 경로)와 취소를 가를 수 있어야 하기 때문이다. 취소는 사람이 이미
+       아는 일이라 통보가 필요 없다 — `_auto_hold` 가 False 를 돌려줄 때와 같은 자리다.
+    on_progress(경과초, 마지막사유) — 화면 문구 갱신용. 새 상태값을 만들지 않는다.
+    """
+    t0 = time.monotonic()
+    last_note = None            # 직전에 띄운 문구 — 같으면 다시 쓰지 않는다
+    ok, why = _elev_arm_stowed()
+    while not ok:
+        if _AUTO.get("paused"):
+            # 멈춘 시간은 시간초과에서 뺀다 — `_elev_wait_press_done`·`_auto_wait_arrival` 과
+            # 같은 모양이다. 🔴 이게 없으면 멈춤이 상한을 태우고 "팔이 42.3cm" 로 끊어서
+            # **멈춘 게 원인인데 팔을 범인으로 적는다.** 그리고 뻗은 팔을 본 사용자가
+            # 멈추는 순간이 정확히 이 창이다.
+            t0 += _auto_pause_wait()
+            continue
+        el = time.monotonic() - t0
+        if el >= timeout:
+            # 사유에 "얼마나 기다렸는지"를 같이 싣는다 — 로그만 보고 "안 기다렸다"와
+            # "기다렸는데 안 됐다"를 가를 수 있어야 한다(이번 사고가 그 구분이었다).
+            # 설정값(timeout)이 아니라 **실제 기다린 시간**을 적는다. 폴링이 밀리거나
+            # /status 가 느리면 둘이 벌어지는데, 사고 조사에 쓸모 있는 쪽은 실측이다.
+            return False, f"{el:.1f}초 기다렸는데 여전히 {why}"
+        # 🔴 문구가 **바뀔 때만** 갱신한다. `_auto_set` 은 호출마다 `_jr("step",…)` + `_log`
+        #    를 둘 다 하므로, 0.3초마다 부르면 정상 수납(5.6초)에 ≈18건·타임아웃에 ≈40건이
+        #    쌓인다. 9/30 런 전체가 177건이었다 — 한 지시자가 런의 10~23% 를 차지한다.
+        #    같은 사고를 규명한 도구를 그 사고의 수정이 둔하게 만들면 안 된다.
+        #    🔴 "문구가 바뀔 때만"으로는 **안 걸린다** — 수납 중에는 arm_ext 가 폴링마다
+        #    달라서(0.423→0.41→0.39…) why 가 매번 새 문자열이다. 그래서 **초 단위로만**
+        #    끊는다: 정상 수납(5.6초) ≤6건, 타임아웃(12초) ≤12건.
+        if on_progress is not None:
+            sec = int(el)
+            if sec != last_note:
+                last_note = sec
+                on_progress(el, why)
+        if not _auto_sleep(0.3):
+            return False, None          # 취소 — 호출부의 기존 취소 처리로 넘긴다
+        ok, why = _elev_arm_stowed()
+    return True, why
+
 @_jr_traced("elev_scene")
 def _elev_scene(n, move=True):
     """엘베앱 씬 n 트리거(자세 전환·자동안무). **(전송성공, run_seq)** 반환.
@@ -2666,7 +2800,15 @@ def _auto_front_nav2():
         return False
     # 전송 성공은 "보냈다"까지다. **접혔는지는 잰다.** arm_safe 가 True 인데 팔이 37cm
     # 나와 있던 것이 이번 사고이므로, 여기서만은 플래그가 아니라 측정을 믿는다.
-    _arm_ok, _arm_why = _elev_arm_stowed()
+    # 🔴 단 **한 번 재고 끝내지 않는다**(2026-09-30) — 위 _ARM_STOW_WAIT_SEC 주석 참조.
+    #    0.423m → 0 은 몇 초가 걸리는데 명령 직후에 잰 값으로 거부해 여정이 여기서 멈췄다.
+    #    거부 자체는 옳았다. 틀린 것은 **언제 쟀는가** 뿐이라 판정은 그대로 두고 시점만 민다.
+    def _arm_progress(_el, _why):
+        _auto_set("② 문앞정렬", f"팔 수납 중... ({_el:.0f}초 — {_why})",
+                  wait=False, phase="front")
+    _arm_ok, _arm_why = _elev_wait_arm_stowed(on_progress=_arm_progress)
+    if _arm_why is None:
+        return False          # 대기 중 취소 — _auto_hold 가 False 일 때와 같은 모양으로 끝낸다
     if not _arm_ok:
         _auto_notify("팔이 접혔는지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
         _auto_set("오류", f"🚨 팔 수납 미확인 — {_arm_why}. ② 주행 거부", phase="front")
