@@ -1839,6 +1839,16 @@ _ARRIVE_YAW_STILL_DEG = 1.0
 # 직선 **60.2m** 이고, 오늘 실측 속도(8.6m / 31.9s ≈ 0.27m/s)로도 223초다 — 복도 경로는 직선보다
 # 길다. **정상 주행이 시간초과로 '도착 실패'가 된다.** 느슨하게 푸는 방향이라 물리 위험은 없다.
 _ARRIVE_MIN_SEC  = 200      # 지금까지의 고정값 — 하한으로 남긴다(짧은 다리는 그대로다)
+# 거리를 **못 잰 경우**의 상한. 예전에는 여기서도 200초로 떨어졌는데, 그건 거꾸로다 —
+# 측위가 흔들려 거리를 못 재는 바로 그 상황에서 상한이 가장 짧아져, 60.2m 하차지점→123호가
+# 460초(0.15m/s + 준비 60초)를 필요로 하는데 200초에 끊긴다. **멀쩡한 주행이 '도착 실패'가
+# 되고, 이제 그 실패 경로는 Nav2 목표까지 취소한다**(아래 목적지 주행). 거짓 실패의 대가가
+# 커졌으므로 거리 미상일 때는 넉넉한 쪽으로 간다.
+# 600 인 근거: 알려진 가장 긴 다리 60.2m 가 위 식으로 461초다. 복도 경로는 직선보다 기니
+# 그 위로 약 30% 여유를 둔 값이다. (여정은 사람이 지켜보는 중이고 '멈춤'·'취소'가 언제든
+# 듣는다 — 길게 잡아서 잃는 것은 **이미 멈춘 여정의 실패 선언이 늦어지는 것**뿐이다.
+# 그 대가는 받아들인다. 짧게 잡아서 잃는 것은 멀쩡한 주행이다.)
+_ARRIVE_UNKNOWN_SEC = 600
 _ARRIVE_SLOW_MPS = 0.15     # 실측 0.27 의 절반. 복도 우회·감속·회전 여유를 이 반값으로 흡수한다
 _ARRIVE_PAD_SEC  = 60       # 출발 전 준비·마지막 정렬 몫
 
@@ -1865,7 +1875,10 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None):
             except Exception:
                 d_line = None
     if timeout is None:
-        timeout = _ARRIVE_MIN_SEC      # 측위를 못 읽었다 — 예전과 같은 값으로 간다
+        # 거리를 못 쟀다(측위를 한 번도 못 읽었거나 좌표가 이상하다). `_robot_pose` 는
+        # **마지막으로 알던 값을 들고 있으므로**, 여기까지 왔다는 건 추정할 포즈 자체가
+        # 없다는 뜻이다 — 더 나은 추정이 없다. 그래서 상한은 넉넉한 쪽으로 간다(위 주석).
+        timeout = _ARRIVE_UNKNOWN_SEC
     if not p:
         _jr_gate_arrival(name, None, None, None, None, tol, timeout, "no_loc", False,
                          d_line=d_line)
@@ -2394,7 +2407,11 @@ def _elev_wait_ready(timeout=45, tok=None):
 @_jr_traced("elev_wait_press_done", post=_jr_cancel_post)
 def _elev_wait_press_done(timeout=30):
     """누르기 완료 대기 — press 씬(0/4)의 scene_next_ok(press_ok_ts>scene_ts) True까지.
-    취소 존중. 완료 True / 타임아웃·취소·**접촉 판정 실패** False.
+    취소 존중. **사유 문자열**을 돌려준다 — "ok" / "timeout" / "cancel" / "press_failed".
+
+    bool 이 아니게 된 이유(2026-10-02): 실패 사유 세 가지 중 **접촉 판정 실패만 결말이
+    다르다** — 끊지 않고 사람에게 묻는다. 호출부가 셋을 구분하지 못하면 그 분기를 만들 수
+    없어서 반환형을 넓혔다. 해석은 `_press_done_or_confirm()` 한 곳에서만 한다.
 
     🔴 **이게 True 라고 이동해도 안전한 것이 아니다.** 예전 이 자리에 "버튼 눌림 + 팔
        복귀 + 그리퍼 열기까지 끝난 상태라 이동해도 안전"이라고 적혀 있었는데 **틀렸다.**
@@ -2404,12 +2421,13 @@ def _elev_wait_press_done(timeout=30):
        그 문장을 믿고 이동한 것이 ② 문앞 23초 주행(팔 37cm)이다.
     → 이 함수가 보증하는 것은 **누르기 시퀀스가 끝났다**는 것뿐이다. 팔이 접혔는지는
       `_elev_arm_stowed()` 로 **재서** 확인한다(② 문앞이 그렇게 한다).
-    ※ False면 _auto_run은 흐름을 계속하지 않고 여정을 중단한다(S1)."""
+    ※ "ok" 가 아니어도 여정이 반드시 끊기는 것은 아니다 — "press_failed" 는 사람 확인으로
+      간다(S1 은 그대로다. 아래 `_press_done_or_confirm` 주석 참조)."""
     t0 = time.time()
     while time.time() - t0 < timeout:
         with _auto_lock:
             if _AUTO.get("cancel"):
-                return False
+                return "cancel"
         if _AUTO.get("paused"):
             # 멈춘 시간은 시간초과에서 뺀다. 누르기는 **다시 내지 않는다**(사용자 확정: 켜진 버튼을
             # 다시 누르면 취소된다).
@@ -2417,15 +2435,86 @@ def _elev_wait_press_done(timeout=30):
             continue
         st = _elev_status()
         if st and st.get("scene_next_ok"):
-            return True
-        # 엘베앱이 **접촉 판정 실패**(허공·판정 불가)를 보고하면 즉시 끊는다. 예전에는 그 판정을
-        # 아무도 쓰지 않아 '✅ 누르기 완료'가 났고(2026-09-23 P1), 쓰기 시작한 지금도 이 신호가
-        # 없으면 타임아웃(30s)까지 서 있게 된다. 결말은 기존 실패 경로 그대로다(새 문구·음성 0).
+            return "ok"
+        # 엘베앱이 **접촉 판정 실패**(허공·판정 불가)를 보고하면 기다리기를 그만둔다. 이 신호를
+        # 안 보면 타임아웃(30s)까지 서 있게 된다(2026-09-23 P1 의 반대편 문제).
+        # 🔴 2026-10-02 부터 **여기서 끊지 않는다** — 이 판정은 거짓음성을 낸다. 그날 차내
+        #    '1' 은 실제로 눌렸고(점등 사진 확인) 깊이가 24mm 짧게 읽혀 여유 31mm→7mm,
+        #    버튼 눌림 2~3mm 가 그 7mm 를 먹어 5mm 문턱을 못 넘었을 뿐이다.
+        #    끊을지 물을지는 호출부가 정한다 — 이 함수는 사유만 말한다.
         if st and st.get("scene_press_failed"):
-            _log("AUTO", "🚨 누르기 실패 — 엘베앱 접촉 판정(허공 또는 판정 불가). 여정 중단")
-            return False
+            _log("AUTO", "🚨 엘베앱 접촉 판정 실패(허공 또는 판정 불가) — 사람 확인으로 넘긴다")
+            return "press_failed"
         time.sleep(0.3)
-    return False
+    return "timeout"
+
+
+def _press_snap_key(scene, token):
+    """press 스냅샷 폴더의 접미사 `scene<N>_<안전토큰>` 를 만든다. 블랙박스 조인키다.
+
+    ⚠ 이건 엘베앱의 폴더 명명 규칙을 **복제한 것**이다
+      (`c if (c.isalnum() or c in "-_") else "_"`). `/status` 가 폴더명을 주지 않아서
+      같은 규칙을 양쪽에 두는 수밖에 없다 — **엘베앱이 규칙을 바꾸면 여기도 같이 바꿔야**
+      조인이 유지된다. 폴더명을 그대로 실어 주는 쪽이 전제가 하나 주는데, 지금은 그 경로가
+      없다.
+    🔴 치환이 필요한 이유: 상행 호출 토큰 '^' 가 폴더에서는 '_' 가 되어 그냥 넣으면
+      **짝이 안 붙는다.** 디스크의 scene0 폴더가 전부 '_s' 인 것은 지금까지 실기가 모두
+      하행이었기 때문이지 규칙이 안전해서가 아니다.
+    """
+    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(token))
+    return f"scene{scene}_{safe}"
+
+
+def _press_done_or_confirm(res, step, scene, token):
+    """`_elev_wait_press_done()` 의 사유를 '계속해도 되나'(bool)로 바꾼다. ①⑤ 공용.
+
+    (a) "timeout" · (b) "cancel" → **기존 동작 그대로** 중단(문구도 그대로).
+    (c) "press_failed" → 끊지 않고 **사람에게 묻는다.**
+
+    ■ 왜 접촉 판정만 다른가 (2026-10-02 사용자 결정)
+      그날 ①②③④⑤ 를 처음으로 전부 통과했는데 차내 '1' 이 **실제로 눌렸고 점등 사진으로
+      확인됐는데도** 접촉 판정이 "허공"이라 ⑥ 직전에 끊겼다. 사용자: "판정 실패를 없애는 거
+      어때? … 나중에는 시각장애인이 쓸거라서" → **없애지 않고 사람에게 묻는 단계를 끼운다.**
+      판정 자체(5mm 문턱)는 건드리지 않는다 — 최종판은 점등 자동 판정(2단계)이고, 그 전에
+      문턱을 흔들면 두 변경이 섞인다.
+
+    ■ ①(승강장)과 ⑤(차내)를 **같게** 처리하는 이유
+      거짓음성이라는 실패 모양이 같고 사람이 할 일(버튼에 불이 켜졌나 본다)도 같다.
+      승강장은 이 신호로 22/22 성공했으니 ① 에서는 이 분기가 거의 안 뜬다 — 즉 같게 둬도
+      비용이 없고, 다르게 두면 "같은 거짓음성인데 ① 에서만 여정이 끊기는" 자리가 남는다.
+      ①⑤ 둘 다 이미 바로 위에 확인 게이트가 있어 사람이 그 자리에 있는 흐름이기도 하다.
+
+    ■ S1(arm_safe) 는 깨지지 않는다
+      `arm_safe` 가 뜻하는 것은 **"누르기가 끝났나"** 뿐이고 팔이 접혔나가 아니다
+      (호출부 주석 참조). `scene_press_failed` 는 진행 중 상태가 아니라 엘베앱이 내린
+      **종결 판정**이라 그 시점에 시퀀스는 이미 끝나 있다. 실제 수납 판정은 하류가 한다 —
+      ① 뒤에는 `_auto_front_nav2()` 가 `_elev_wait_arm_stowed()` 로 막고, ⑤ 뒤에는
+      `_elev_scene(5)` 의 자세 전환이 접는다. 여기서 래치를 풀지 않으면 `if not arm_safe`
+      가 대신 끊어서 사람에게 물은 의미가 사라진다.
+    """
+    if res == "ok":
+        return True
+    if res != "press_failed":
+        _auto_notify("누르기를 확인하지 못해 멈췄습니다", stow_hint=True)
+        _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
+        return False
+    # 🔴 2단계(점등 자동 판정)의 학습 자료가 되는 자리다. press 스냅샷 폴더가
+    #    `<시각>_scene<N>_<토큰>` 으로 떨어지므로 조인키를 같이 남기면 사람의 답과 그때의
+    #    사진을 나중에 맞붙일 수 있다(예: 20261002T132320_scene4_1 ↔ scene4_1).
+    #    원본 토큰도 같이 남긴다 — 치환 뒤에는 '^'(상행)와 다른 기호를 되살릴 수 없다.
+    snap = _press_snap_key(scene, token)
+    _jr("human", "press_unconfirmed", step=step, scene=scene, token=str(token),
+        snap_key=snap, why="scene_press_failed")
+    _auto_set(step, "눌린 것을 확인하지 못했습니다 — 버튼에 불이 켜졌으면 '다음'", wait=True)
+    if not _auto_wait_confirm():
+        # 다른 확인 게이트의 취소와 같은 모양으로 끝낸다(통보 없음 — 사람이 이미 아는 일).
+        _jr("human", "press_unconfirmed_done", step=step, scene=scene,
+            token=str(token), snap_key=snap, answer="cancel")
+        return False
+    _jr("human", "press_unconfirmed_done", step=step, scene=scene,
+        token=str(token), snap_key=snap, answer="pressed")
+    _log("AUTO", f"{step} 접촉 판정 실패 — 사람이 '눌렸다'로 확인하고 계속한다 ({snap})")
+    return True
 
 # ⑥ 하차 완료 판정은 2026-09-09 부터 엘베앱의 실행 기록(scene_result)으로 한다.
 # 그래서 _EXIT_TARGET_CM(-186.0) · _EXIT_TOL_CM(1.0) · _EXIT_NEAR_CM(5.0) 을 지웠다.
@@ -3130,7 +3219,9 @@ def _press_or_pass() -> bool:
     — 모르면 안 움직인다.
 
     여기서는 아무것도 움직이지 않는다. 팔 복귀 확인(arm_safe)은 여전히
-    _elev_wait_press_done()만 풀 수 있다(S1 불변식)."""
+    _elev_wait_press_done() 의 결과로만 풀린다(S1 불변식). 2026-10-02 부터 그 결과를
+    _press_done_or_confirm() 이 해석하고, **접촉 판정 실패에 한해** 사람이 '눌렸다'고
+    확인하면 통과시킨다 — 판정을 없앤 것이 아니라 사람을 한 명 끼운 것이다."""
     if not _auto_hold("누르기"):
         _auto_notify("여정을 멈췄습니다", stow_hint=True)
         _auto_set("오류", "취소됨 — 여정 중단")
@@ -3331,10 +3422,10 @@ def _auto_run(dest):
         if not _press_or_pass():                # 다음 → 호출버튼 누르기
             _auto_abort_elev(); return
         _auto_set("① 호출", "호출 버튼 누르는 중... (팔 복귀까지 대기)")
-        # 눌림+팔복귀+그리퍼열기 완료까지 대기 — 이게 True여야 이동해도 안전하다.
-        if not _elev_wait_press_done():
-            _auto_notify("누르기를 확인하지 못해 멈췄습니다", stow_hint=True)
-            _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
+        # 눌림+팔복귀+그리퍼열기 완료까지 대기. 접촉 판정 실패면 끊지 않고 사람에게 묻는다
+        # (_press_done_or_confirm 주석 — ①⑤ 같은 처리다).
+        if not _press_done_or_confirm(_elev_wait_press_done(), "① 호출",
+                                      0, "^" if up else "s"):
             _auto_abort_elev(); return
         arm_safe = True                         # 유일한 release 지점 (1/2)
         _AUTO["arm_safe"] = arm_safe
@@ -3393,9 +3484,9 @@ def _auto_run(dest):
         if not _press_or_pass():                # 다음 → 층버튼 누르기
             _auto_abort_elev(); return
         _auto_set("⑤ 층선택", f"{dest_floor}층 버튼 누르는 중... (팔 복귀까지 대기)")
-        if not _elev_wait_press_done():         # 눌림+팔복귀 완료까지 대기
-            _auto_notify("누르기를 확인하지 못해 멈췄습니다", stow_hint=True)
-            _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
+        # 눌림+팔복귀 완료까지 대기. 접촉 판정 실패면 사람 확인으로 간다(① 과 같은 처리).
+        if not _press_done_or_confirm(_elev_wait_press_done(), "⑤ 층선택",
+                                      4, dest_floor):
             _auto_abort_elev(); return
         arm_safe = True                         # 유일한 release 지점 (2/2)
         _AUTO["arm_safe"] = arm_safe
@@ -3515,8 +3606,19 @@ def _auto_run(dest):
         #    시간초과·예외·본문 없음은 '모름'이다. 모르면 목적지 주행 전에 멈춘다(아래).
         #    층 확정은 내리지 않는다 — 층은 위에서 사용자 하차 확인으로 이미 정해졌고, 지도 전환
         #    실패는 층이 아니라 지도·map_server 쪽 문제다(C2b).
+        # 🔵 계측만 — 거동은 바꾸지 않는다(2026-10-02). `maps/all.yaml` 과 `maps/floor1.yaml`
+        #    이 같은 이미지(all.pgm)·같은 origin 인데도 판정이 `5 != 1` 이라 load_map 을 실제로
+        #    한다. 그때 AMCL 이 파티클을 재생성하며 **마지막 initialpose(= 여정 전 RViz 로 찍은
+        #    5층 포즈)로 돌아갈 가능성**이 있고, 그러면 거기서 60m 주행이 시작된다.
+        #    **아직 정황이고 실기 증거는 0건이다.** 전환 전후 포즈가 남으면 주행 한 번으로
+        #    확증 또는 반증이 된다 — 그게 이 두 줄의 전부다. 기존 "amcl" ev 모양 그대로다.
+        _jr("ev", "amcl", where="before_switch_map", pose=_jr_pose(),
+            floor_from=_current_floor, floor_to=dest_floor)
         _sw_body, _sw_err = _http_self_json("/switch_map", {"floor": dest_floor},
                                             _SWITCH_MAP_TIMEOUT)
+        _jr("ev", "amcl", where="after_switch_map", pose=_jr_pose(),
+            floor_from=_current_floor, floor_to=dest_floor,
+            switch_ok=bool(_sw_body) and (_sw_body or {}).get("ok") is True)
         _sw_ok = bool(_sw_body) and _sw_body.get("ok") is True \
             and str(_sw_body.get("floor")) == str(dest_floor)
         _sw_why = ""
@@ -3556,7 +3658,22 @@ def _auto_run(dest):
             _auto_set("완료", "목적지 도착 실패", phase="done"); return   # 도착 대기의 취소 결말과 같게
         _jr("ev", "amcl", where="before_dest_goto", pose=_jr_pose(), elev=_jr("elev_brief"))
         _write("iface", f"/goto {dest}")
-        _auto_set("완료", f"🎉 {dest} 도착! 여정 완료" if _auto_wait_arrival(dest)
+        arrived = _auto_wait_arrival(dest)
+        if not arrived:
+            # 🔴 2026-10-02: 여기에 바퀴를 놓는 자리가 **없었다.** 목적지 주행이 실패하거나
+            #    시간초과되면 화면에는 '목적지 도착 실패'가 뜨는데 **Nav2 목표는 살아 있어
+            #    로봇은 계속 간다.** 사용자가 로봇을 잡고 걷는 중이라 이게 제일 나쁘다.
+            #    ②(_auto_front_nav2)·승차지점과 **같은 모양**으로 맞춘다 — 확인 못 하면
+            #    fail-closed 로 알리고 끝낸다. 문구도 그 둘의 것을 그대로 쓴다.
+            #    도착한 경우에는 부르지 않는다: 정상 종료는 Nav2 가 스스로 서고, ②가
+            #    arrived=True 에도 부르는 것은 **제어권을 엘베앱에 넘기기 때문**이다.
+            #    여기는 넘길 상대가 없다(여정의 끝).
+            if not _nav_release_wheels(arrived, "목적지"):
+                _auto_notify("로봇이 멈췄는지 확인하지 못해 여정을 멈췄습니다. 도움을 요청하세요")
+                _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 목적지 주행 중단",
+                          phase="done")
+                return
+        _auto_set("완료", f"🎉 {dest} 도착! 여정 완료" if arrived
                   else "목적지 도착 실패", phase="done")
     except Exception as e:
         _jr("exception")                        # traceback 전문 — repr 만으로는 줄번호가 없다
