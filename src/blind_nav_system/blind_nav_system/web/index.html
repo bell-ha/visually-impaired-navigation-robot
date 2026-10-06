@@ -35,10 +35,15 @@
   .battery.low  { color: var(--warn); }
   .battery.crit { color: var(--bad); }
   .battery.charging { color: var(--accent); }
-  .badge { padding: 4px 12px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; }
+  /* 폭이 좁아지면 "자동 모드"가 두 줄로 쪼개져 sticky 헤더가 한 줄 더 먹는다(360px 실측).
+     ≤760 주석이 "한 줄이면 ~60px" 를 전제하므로 배지는 줄바꿈하지 않는다. */
+  .badge { padding: 4px 12px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; white-space: nowrap; }
   .badge-auto   { background: var(--ok-bg); color: var(--ok); }
   .badge-manual { background: var(--warn-bg); color: var(--warn); }
-  .layout { display: grid; grid-template-columns: 1fr auto; flex: 1; overflow: hidden; }
+  /* 🔴 1fr 은 기본 min-width:auto 라, 안쪽에 줄어들지 않는 요소가 하나라도 있으면 트랙이
+     그만큼 **늘어나** 페이지에 가로 스크롤이 생긴다(그리드 블로우아웃). minmax(0,1fr) 로
+     트랙을 창 폭에 묶는다 — 줄어드는 것은 안쪽에서 처리한다(아래 #arm-manual·#auto-dest). */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) auto; flex: 1; overflow: hidden; }
 
   /* 뷰 전환기(관제 로그 / 엘리베이터 화면) — log-container 최상단, 항상 노출 */
   .view-switch { display: flex; gap: 4px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--border); }
@@ -136,6 +141,16 @@
   .ctrl-col:last-child > div:last-child  { border-bottom: none; padding-bottom: 0; }
   .ctrl-panel h2 { font-size: 0.68rem; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
 
+
+  /* ── 좁은 폭에서 잘리던 두 자리 (2026-10-06 헤드리스 실측) ───────────────────
+     · #auto-dest: flex:1 인데 select 의 기본 min-width:auto 가 **가장 긴 보기**(예:
+       "과학기술정책대학원 세미나실 (4층)")보다 못 줄어든다 → 옆의 🚀 출발 버튼이
+       패널 밖으로 밀려 잘렸다. 1024·1280·1920 전부에서 11~33px 넘쳤다.
+     · #arm-manual: 뻗기 줄(숫자칸 + −1cm + +1cm + 적용)이 한 줄을 고집해 폭 362px 를
+       요구한다 — 320px 패널에서 92px 넘치고, ≤760 한 칸 배치에서는 페이지를 통째로
+       옆으로 밀어 여정 화면 글씨까지 잘렸다(360px 실측). 줄만 접게 한다. */
+  #auto-dest { min-width: 0; }
+  #arm-manual div { flex-wrap: wrap; }
 
   /* 버튼 통일 시스템 */
   .btn { display: block; width: 100%; border: none; border-radius: 6px; padding: 9px 14px; font-size: 0.82rem; font-weight: 600; cursor: pointer; text-align: center; color: #fff; transition: opacity .15s; }
@@ -262,7 +277,7 @@
      그 폭에서는 한 컬럼으로 쌓고, '화면에 꽉 맞추고 안에서 스크롤'을 페이지 스크롤로 바꾼다. */
   @media (max-width: 760px) {
     body { height: auto; min-height: 100vh; }
-    .layout { grid-template-columns: 1fr; overflow: visible; }
+    .layout { grid-template-columns: minmax(0, 1fr); overflow: visible; }
     .log-container { overflow: visible; }            /* 왼쪽(로그·여정)이 위 */
     .ctrl-panel { width: auto; border-left: none; border-top: 1px solid var(--border);
                   overflow-y: visible; padding: 14px; }   /* 오른쪽 패널이 아래 */
