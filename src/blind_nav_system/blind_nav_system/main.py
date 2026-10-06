@@ -2449,6 +2449,60 @@ def _elev_wait_press_done(timeout=30):
     return "timeout"
 
 
+# ③ 문열림 감지 대기 상한(초). 호출→도착까지 통상 1분 이내(이 건물 실측 없음 — 통념)에
+# 2연속 관측 디바운스(elevator_button_press/main.py 의 door_streak≥2, 수백ms~수초) 여유를
+# 더해 60s 가 아니라 90s 로 잡는다. 이보다 길면 감지가 끝내 실패했을 때 사람이 너무 오래
+# 묶인다 — 이 단계는 자동 진행이 아니라 게이트일 뿐이라, 시간초과 뒤에도 '다음'은 사람이
+# 직접 누른다(여기서 자동으로 누르지 않는다).
+_DOOR_OPEN_TIMEOUT_S = 90.0
+
+def _elev_wait_door_open(timeout=_DOOR_OPEN_TIMEOUT_S):
+    """③ 문열림(door_open) 대기. 사유 문자열을 돌려준다.
+    "ok" / "timeout" / "cancel" / "forced" / "unavailable"(감지 자체가 불가능 — fail-open).
+
+    🔴 fail-open 은 **처음 한 번만** 확인한다(`_elev_status()` 가 None 이거나 응답에
+    `door_open` 키 자체가 없을 때) — 엘베앱이 이 값을 아예 안 주는 상태에서 사람까지
+    막으면 여정이 죽는다(사용자 지시). 일단 감지가 가능하다고 확인되면, 폴링 중의 **일시적**
+    무응답은 `_elev_wait_press_done` 과 같은 관례로 그냥 재시도한다 — 매 무응답마다
+    포기하면 게이트가 너무 쉽게 뚫린다.
+
+    🔴 강제(force) 검사 — `_elev_wait_scene_done`·`_elev_wait_exit_done` 과 같은 자리
+    (루프 맨 위, cancel 과 같은 `_auto_lock` 블록, 1회용 소비). 전에는 ③이 안무 없이
+    즉시 열려 강제가 필요 없었는데, 이제 최대 90초 창이 생겨 **문이 열렸는데 감지가
+    안 되는 바로 그 순간**이 사람이 강제를 눌러야 하는 상황이 됐다 — 그걸 90초 묶어
+    두면 안 된다.
+
+    `door_streak` 는 기록하지 않는다 — 엘베앱 `state` 에는 있지만(door_open 과 달리)
+    `/status` 의 jsonify 목록에 안 실려 있어 `st.get("door_streak")` 가 항상 None 이다
+    (엘베앱 쪽은 이번 범위 밖). 안 실리는 값을 기록하는 코드를 남겨 두면 나중에
+    "기록했는데 왜 없지"로 또 샌다 — 필요해지면 엘베앱 jsonify 에 키를 추가해야 하고,
+    그때는 `s = state.copy()` 가 문 감지 로직보다 먼저라는 것도 같이 봐야 한다."""
+    st0 = _elev_status()
+    if st0 is None or "door_open" not in st0:
+        _log("AUTO", "⚠ 문 열림 감지 불가(엘베앱 무응답 또는 door_open 미제공) — 게이트 없이 진행")
+        _jr("gate", "door_open_wait", fail_open=True, timed_out=False, forced=False)
+        return "unavailable"
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        with _auto_lock:
+            if _AUTO.get("force"):
+                _AUTO["force"] = False      # 1회용 — 다음 단계로 새어나가면 안 된다
+                _jr("gate", "door_open_wait", fail_open=False, timed_out=False, forced=True)
+                return "forced"
+            if _AUTO.get("cancel"):
+                return "cancel"
+        if _AUTO.get("paused"):
+            t0 += _auto_pause_wait()        # 멈춘 시간은 시간초과에서 뺀다
+            continue
+        st = _elev_status()
+        if st and st.get("door_open"):
+            _jr("gate", "door_open_wait", fail_open=False, timed_out=False, forced=False)
+            return "ok"
+        time.sleep(0.3)
+    _jr("gate", "door_open_wait", fail_open=False, timed_out=True, forced=False)
+    return "timeout"
+
+
 def _press_snap_key(scene, token):
     """press 스냅샷 폴더의 접미사 `scene<N>_<안전토큰>` 를 만든다. 블랙박스 조인키다.
 
@@ -3449,11 +3503,47 @@ def _auto_run(dest):
             _auto_abort_elev(); return
         if not _auto_front_nav2(): _auto_abort_elev(); return
 
-        # ③ 문 열림 대기 (자동 감지)
-        # ③은 SCENE_MOVES 에 없어 안무가 없다 → noanmu 로 즉시 '다음'이 열린다.
-        ok_, _why, _res = _auto_scene_step(
-            "③ 문열림", 2, "문 열림 감시 준비 중...",
-            "문 열림 대기 중... 문 열리면 '다음'", "door")
+        # ③ 문 열림 대기 (자동 감지) — 2026-10-06: door_open 을 '다음'의 게이트로 쓴다.
+        # 전에는 ③이 SCENE_MOVES 에 없어 noanmu 로 **즉시** '다음'이 열렸다 — 엘베앱의
+        # door_open(③ 문대기 전방 여유 점프 감지, elevator_button_press/main.py 약 2092)
+        # 을 여정이 한 번도 읽지 않은 게 원인이라, 문이 닫힌 채로도 누를 수 있었다.
+        # _auto_scene_step 과 같은 모양(잠금→전송→대기→결과와 함께 개방)을 따르되,
+        # "대기"만 안무 완료가 아니라 door_open 으로 바꿨다 — _auto_scene_step 자체는
+        # 안 건드린다. 호출처는 원래 ③·④ 둘뿐이고 ⑥은 애초에 그 함수를 안 쓴다
+        # (_elev_wait_exit_done 이 따로 있다) — 그래서 이 변경은 ④에 무영향이다.
+        with _auto_lock:
+            _AUTO["force"] = False
+        _auto_set("③ 문열림", "문 열림 감시 준비 중...", wait=False, phase="door")
+        if not _auto_hold("③ 문열림"): _auto_abort_elev(); return
+        _sent3, _ = _elev_scene(2)
+        if not _sent3:
+            _auto_set("③ 문열림", "⚠ 엘베앱에 ③ 문열림 전송 실패 — 확인 후 '다음'",
+                      wait=True, phase="door")
+            ok_ = _auto_wait_confirm()
+        else:
+            _auto_set("③ 문열림", "문이 닫혀 있습니다 — 열리면 자동으로 '다음'이 열립니다",
+                      wait=False, phase="door")
+            _why3 = _elev_wait_door_open()
+            if _why3 == "cancel":
+                _auto_abort_elev(); return
+            if _why3 == "forced":
+                # _auto_scene_step 의 "forced" 분기와 같은 뜻 — 확인 절차까지 건너뛴다.
+                # 여기서 다시 wait=True 로 열면 방금 강제를 누른 사람에게 한 번 더
+                # 누르라고 요구하는 셈이라 버튼의 의미가 없어진다.
+                _auto_set("③ 문열림", "⏭ 강제로 넘어감 — 문 열림 미확인 상태로 진행",
+                          wait=False, phase="door")
+                ok_ = True
+            else:
+                if _why3 == "ok":
+                    _auto_set("③ 문열림", "🚪 문 열림 감지 — '다음'", wait=True, phase="door")
+                elif _why3 == "timeout":
+                    _auto_set("③ 문열림",
+                              f"⚠ {_DOOR_OPEN_TIMEOUT_S:.0f}초 안에 문 열림을 감지하지 "
+                              "못했습니다 — 직접 확인 후 '다음'", wait=True, phase="door")
+                else:   # "unavailable" — 감지 불가, 기존 동작(게이트 없이 즉시 개방)으로 폴백
+                    _auto_set("③ 문열림", "문 열림 대기 중... 문 열리면 '다음'",
+                              wait=True, phase="door")
+                ok_ = _auto_wait_confirm()
         if not ok_: _auto_abort_elev(); return
 
         # ④ 엘리베이터 안: 전진 185 (자동 안무)
