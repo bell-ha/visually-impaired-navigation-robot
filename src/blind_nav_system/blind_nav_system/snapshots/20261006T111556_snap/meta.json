@@ -1,0 +1,159 @@
+{
+  "label": "",
+  "primary_frame": "base_link",
+  "wall_time": "2026-10-06T11:15:57+0900",
+  "dash_time": "2026-10-06T11:15:56",
+  "floor": "1",
+  "battery": {
+    "pct": null,
+    "voltage": 12.6,
+    "charging": false
+  },
+  "amcl_pose": {
+    "x": -47.502,
+    "y": 4.956,
+    "z": 0.9955,
+    "w": 0.0949,
+    "yaw_deg": 169.1
+  },
+  "localization_available": true,
+  "rot_grip": 0,
+  "rot_body": 1,
+  "joint_states": {
+    "wrist_extension": 0.1802738066112631,
+    "joint_lift": 0.8999932995851788,
+    "joint_arm_l3": 0.045068451652815776,
+    "joint_arm_l2": 0.045068451652815776,
+    "joint_arm_l1": 0.045068451652815776,
+    "joint_arm_l0": 0.045068451652815776,
+    "joint_head_pan": 0.0,
+    "joint_head_tilt": 0.0,
+    "joint_wrist_yaw": 0.03004045709609381,
+    "joint_wrist_pitch": -0.03374757733348411,
+    "joint_wrist_roll": -0.0015339807878856412,
+    "joint_gripper_finger_left": 0.36574487065120426,
+    "joint_gripper_finger_right": 0.36574487065120426
+  },
+  "cameras": {
+    "gripper": {
+      "color": "grip_color.jpg",
+      "color_stamp": 1791252956.2209804,
+      "depth": "grip_depth.png",
+      "depth_stamp": 1791252956.2209804,
+      "aligned": true,
+      "color_info": {
+        "K": [
+          431.570556640625,
+          0.0,
+          415.5458068847656,
+          0.0,
+          431.1651306152344,
+          240.33712768554688,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "D": [
+          -0.05399240553379059,
+          0.05522029846906662,
+          0.0005651129758916795,
+          0.0011813163291662931,
+          -0.017749549821019173
+        ],
+        "w": 848,
+        "h": 480,
+        "distortion_model": "plumb_bob"
+      },
+      "frame_color": "gripper_camera_color_optical_frame",
+      "orientation": "sensor_native"
+    },
+    "body": {
+      "color": "body_color.jpg",
+      "color_stamp": 1791252956.33611,
+      "depth": null,
+      "color_info": {
+        "K": [
+          909.5986328125,
+          0.0,
+          653.2219848632812,
+          0.0,
+          909.5479125976562,
+          370.3106689453125,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "D": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "w": 1280,
+        "h": 720,
+        "distortion_model": "plumb_bob"
+      },
+      "frame_color": "camera_color_optical_frame",
+      "orientation": "sensor_native"
+    }
+  },
+  "tf": {
+    "base_link__grip_color": {
+      "translation": {
+        "x": -0.009331857395110665,
+        "y": -0.4224301368889114,
+        "z": 1.0694265588536533
+      },
+      "rotation": {
+        "x": -0.01192679005087783,
+        "y": 0.7766779425210769,
+        "z": -0.6297251500886266,
+        "w": 0.008681049830851483
+      }
+    },
+    "base_link__body_color": {
+      "translation": {
+        "x": 0.0453052258234202,
+        "y": -0.0029260109998371364,
+        "z": 1.3072236339435162
+      },
+      "rotation": {
+        "x": -0.0014830782597889556,
+        "y": 0.7056058608791359,
+        "z": -0.0015087264957819224,
+        "w": 0.7086013641789365
+      }
+    },
+    "odom__base_link": {
+      "translation": {
+        "x": -25.27279393915443,
+        "y": -5.489289806856196,
+        "z": 0.0
+      },
+      "rotation": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": -0.8578510085169437,
+        "w": 0.5138984794552933
+      }
+    },
+    "map__base_link": {
+      "translation": {
+        "x": -47.5683713387509,
+        "y": 4.9728203980814065,
+        "z": 0.0
+      },
+      "rotation": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.9931021620664059,
+        "w": 0.11725227374780446
+      }
+    },
+    "errors": {}
+  },
+  "missing": [
+    "body_depth"
+  ]
+}
