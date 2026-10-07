@@ -1833,6 +1833,52 @@ def _auto_hold(label):
 #   명령(cmd_vel)으로 한 번 더 막는다.
 _ARRIVE_YAW_STILL_DEG = 1.0
 
+# 도착 '방향' 판정 — 목표 방위와의 **절대 오차** 허용폭(°). 위 _ARRIVE_YAW_STILL_DEG 와
+# 🔴 **역할이 다르다**: 저건 "폴링 간 yaw 변화율"(멈췄나), 이건 "목표 대비 방위 오차"(맞게 섰나).
+# 한 상수가 두 역할을 겸하면 한쪽 근거로 튜닝할 때 다른 쪽이 조용히 따라 움직인다 — 이 저장소가
+# 이미 겪은 사고라 일부러 상수를 나눴다.
+#
+# 왜 필요한가 (2026-10-07 ② 실측): 우리 게이트의 '도착'은 **xy 10cm + 정지**뿐이고 **방향을 아예
+# 안 봤다.** nav2 의 도착은 xy 3cm + yaw 2.9° 다. 문턱이 안 맞아서 nav2 가 마지막 정렬을 끝내기
+# 전에 "도착"이 떴고, 그 선언이 _nav_release_wheels → _cmd_quiet_wait(1.0, 10.0) 의 10초 타이머를
+# 걸어 /cancel 로 **마지막 정렬을 끊었다**(확증: latency_ms=11135.6, 13:22:32.988+10.0=43.0 ↔
+# nav 로그 13:22:43.066 "Client requested to cancel". 그 순간 d=1.7cm, 남은 회전 41.1°).
+# 즉 "거짓 도착"이 아니라 **방향을 안 봐서 생긴 통과**였다(4.3cm 통과는 tol 0.1 대로 설계대로다).
+#
+# 10° 인 근거:
+#   · 임계 근거는 **② 종료 후 잔여**(= nav2 가 정렬을 끝낸 뒤의 값. 아래 "② 문앞 Nav2 도착" 로그는
+#     `_nav_release_wheels` **뒤**에 찍힌다). 전 코퍼스 **n=5**:
+#         −1.4 / −0.7 / +1.3 / +1.5 / **+35.3°**  → 수렴한 nav2 는 **±1.5° 에 모인다**, 이상치 1건.
+#   · ⚠ **게이트 통과 시점**의 방위 오차는 이것과 **전혀 다르다**(전 코퍼스 6건:
+#         +31.3 / −0.7 / −69.8 / +62.9 / +68.2 / −158.7°).
+#     그 시점은 **아직 도는 중**이라 임계 근거가 **될 수 없다**. 🔴 두 수치를 섞지 마라 —
+#     섞어 읽으면 "게이트는 평소 ±1.5° 에 뜬다"로 오해해 임계를 더 조이게 되는데,
+#     실제 게이트는 **±70° 에서도 떴다.**
+#   · 하한(이보다 빡빡하면 영구 교착): nav2 `yaw_goal_tolerance` 0.05rad=**2.9°**(nav2 가 만족해서
+#     멈춘 지점) + AMCL `update_min_a` 0.1rad=**5.73°**(그만큼 안 돌면 pose 를 재발행하지 않아
+#     우리가 보는 yaw 가 그만큼 묵을 수 있다) = 8.63° → **10°**.
+#
+# "조이면 ② 가 실패로 끝나는 것 아닌가"에 대한 실측 반증(2026-10-07, 취소 직전 5초):
+#   오차 94.8 → 80.8 → 66.4 → 47.6 → 41.1 → 35.3° — **단조 수렴**이다.
+#   ⚠ 단 **등속이 아니라 감속 중**이다(구간별 −14.0 / −14.4 / −18.8 / −6.5 / −5.8 °/s —
+#   마지막 두 구간이 절반 이하). `RotateToGoal.slowing_factor: 10.0` 때문에 목표에 가까울수록
+#   느려진다. 그래서 35.3° → 10° 소요는 평균(12.0°/s)으로 보면 2.1초, 마지막 순간값(~5.8°/s)으로
+#   보면 4.4초다 — **자료가 지지하는 범위는 "2~5초"** 이고 한 숫자로 박으면 낙관이 된다.
+#   어느 쪽이든 ② 예산(_FRONT_ARRIVE_SEC)이 **28초** 남아 있었다.
+#   → 이 조건이 있었다면 그날은 실패가 아니라 **몇 초 뒤 정상 통과**였다.
+#   (취소 직후 :45~:49 는 방위 118.6°=오차 +35.3° 에서 완전 정지 — **우리가 끊은 것**이지 로봇이 못 한 게 아니다.)
+#
+# 🔴 **미해결(이 수정의 범위 밖)**: 같은 주행 13:22:19 에 DWB 가 오차 최소(+29°)인 지점에서
+#   **반대로 틀었다.** 원인 미확정이다 — abort 는 4초 뒤라 원인이 아니다. 가르려면
+#   `FollowPath.publish_evaluation: true` + `/cmd_vel` 기록이 필요하다. **이번 수정은 그걸 안
+#   고친다** — nav2 를 끝까지 돌게 두는 것까지가 이번 몫이고, 그래도 수렴 못 하면 위 ② 실패
+#   경로로 **솔직하게 실패한다**(사람 확인 게이트). 원인 추측은 여기 적지 않는다.
+# ⚠ 한계: pose 가 더 오래 묵으면(그날 게이트 기록 `pose_age_s` 1.7s) 이 여유를 넘는 지연 오차가
+#   생길 수 있다. 신선도 검사는 이번에 **안 넣었다** — 진짜로 멈추면 AMCL 이 조용해지는 것이
+#   정상이라(`_jr_pose` 독스트링) 신선도를 요구하면 반대 방향 교착이 된다. **다만 `pose_age_s` 는
+#   이미 이 게이트에 기록되고 있다 — 다음에 이 문제를 다룰 레버는 그 값이다.**
+_ARRIVE_YAW_TOL_DEG = 10.0
+
 
 # 도착 대기 상한을 거리로 만든다(2026-09-23). 예전엔 200초 고정이었고, 짧은 다리(승차지점
 # 8.6m·문앞)만 돌려 봐서 안 드러났다. 하차지점(−48.232, 4.932) → 123호(0.497, −30.454)는
@@ -1853,7 +1899,7 @@ _ARRIVE_SLOW_MPS = 0.15     # 실측 0.27 의 절반. 복도 우회·감속·회
 _ARRIVE_PAD_SEC  = 60       # 출발 전 준비·마지막 정렬 몫
 
 
-def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None):
+def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None, check_yaw=False):
     """name 지점 '정밀 도착'까지 대기. nav이 5cm로 서므로, 여기선 목표 tol(기본 10cm)
     이내에서 로봇이 settle초간 '멈춰있으면'(=nav 완료 = 정밀 도착) True.
     - 단순히 tol 이내를 지나가는 중인 것과 구분하려고 '정지'까지 확인 (jitter 여유로 10cm).
@@ -1861,7 +1907,23 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None):
     cancel/timeout이면 False.
 
     timeout=None(호출부가 안 넘긴 경우)이면 **지금 위치에서 목표까지의 직선 거리**로 만든다.
-    명시된 호출부(② 문앞의 _FRONT_ARRIVE_SEC)는 그대로 그 값을 쓴다."""
+    명시된 호출부(② 문앞의 _FRONT_ARRIVE_SEC)는 그대로 그 값을 쓴다.
+
+    check_yaw=True 면 **목표 방위까지** 본다(_ARRIVE_YAW_TOL_DEG, 위 상수 주석에 근거).
+    🔴 기본값이 False 인 이유 — 이 함수의 호출처는 4곳이고 성격이 갈린다:
+       · 2026-10-07 현재 켜는 곳은 **② 문앞 한 곳뿐**이다(사용자가 눈으로 본 그 증상 자리).
+       · `엘리베이터 탑승지점` 도 좌표에 방위가 있지만 **이번엔 켜지 않는다** — 그 호출처는
+         실패 시 `_nav_release_wheels` 를 타지 않고 바로 return 해서 **Nav2 목표가 살아 있다.**
+         방향 검사를 켜면 그 경로를 처음으로 실패 가능하게 만든다. 그건 별건으로 올렸다.
+       · 목적지(방)는 **좌표에 방위가 아예 없어서**(아래 z 존재검사) 켜도 저절로 건너뛴다.
+    ※ **방위가 없는 목표는 yaw 항을 통째로 건너뛴다(통과 쪽으로).** 이 가드가 존재하는 이유는
+      분모에 있다 — `config/location.yaml` **143곳 중 z·w 가 둘 다 있는 건 3곳뿐**이고
+      (엘베 탑승지점 168.4° / 문앞 83.3° / 하차지점 75.3°) **나머지 140곳은 방향이 아예 없다**
+      (`w: 1.0` 만 있고 z 없음).
+      🔴 그래서 `p.get("z") or 0.0` 같은 **기본값 채우기는 절대 금지**다 — 140곳이 "목표 방위 0°"
+      라는, 없는 값이 아니라 **틀린 값**을 갖게 된다. z 와 w **둘 다** 있는지로 가른다.
+      🔴 그리고 이 건너뛰기가 없으면, 나중에 누가 `check_yaw` 를 다른 호출처에 켜는 순간
+      **방 도착이 전부 타임아웃 → 그 뒤 `/cancel`** 이 된다(140/143). 켤 때 이 분모를 먼저 볼 것."""
     p = _loc(name)
     d_line = None
     if p is not None and timeout is None:
@@ -1884,15 +1946,26 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None):
                          d_line=d_line)
         return False
     tx, ty = p.get("x"), p.get("y")
+    # 목표 방위(°). 🔴 키 **존재**로 가른다(위 독스트링) — 없으면 None 이고 방향 검사를 건너뛴다.
+    tgt_yaw = None
+    if check_yaw and isinstance(p, dict) and p.get("z") is not None and p.get("w") is not None:
+        try:
+            tgt_yaw = _math_auto.degrees(2.0 * _math_auto.atan2(float(p["z"]), float(p["w"])))
+        except (TypeError, ValueError):
+            tgt_yaw = None       # 좌표가 이상하면 방향 검사를 포기한다(기존 동작 유지)
+    if check_yaw and tgt_yaw is None:
+        _log("AUTO", f"'{name}' 좌표에 방위(z/w)가 없다 — 도착 방향 검사 건너뜀")
     _jr("set_goal", name, p)
     t0 = time.monotonic()
     stable_since = None
     last = None
     yaw_still = None      # 기록 전용(C4 증명). 판정에는 쓰지 않는다 — 아래 stopped 식은 그대로다.
+    yaw_err = None        # 목표 방위와의 오차(°). 🔴 이쪽은 **판정에 쓴다**(aligned). 루프 전에
+                          #    None 으로 둬야 첫 폴링 전 취소/재개 분기가 이름을 못 찾는 일이 없다.
     while time.monotonic() - t0 < timeout:
         if _AUTO["cancel"]:
             _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "cancel", False,
-                             yaw_still=yaw_still, d_line=d_line)
+                             yaw_still=yaw_still, yaw_err=yaw_err, d_line=d_line)
             return False
         if _AUTO.get("paused"):
             # 멈춤(S1): 멈춘 시간은 시간초과에서 뺀다. 정지가 Nav2 목표를 취소했으므로 풀리면
@@ -1901,13 +1974,15 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None):
             t0 += _auto_pause_wait()
             stable_since, last = None, None
             yaw_still = None                      # 기준이 사라졌으니 기록값도 비운다
+            yaw_err = None                        # 방위 오차도 다시 잰다
             if _AUTO["cancel"]:
                 continue                  # 위 취소 분기가 기록하고 끝낸다
             if not _nav_params_restore_normal(f"재개 /goto {name}"):
                 _log("AUTO", f"🚨 재개 — Nav2 파라미터를 평소값으로 되돌리지 못해 '{name}' 목표를 "
                              "다시 내지 않는다")
                 _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout,
-                                 "resume_params_fail", False, yaw_still=yaw_still, d_line=d_line)
+                                 "resume_params_fail", False, yaw_still=yaw_still,
+                                 yaw_err=yaw_err, d_line=d_line)
                 return False
             _write("iface", f"/goto {name}")
             _log("AUTO", f"▶ 재개 — '{name}' 주행 목표를 다시 냈다")
@@ -1915,9 +1990,13 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None):
         rx, ry, ryaw = _robot_pose["x"], _robot_pose["y"], _robot_pose["yaw_deg"]
         d = _dist_to(tx, ty)
         # 🔵 기록 전용(U8) — 아래 stopped 가 쓰는 것과 **같은 값**을 따로 담기만 한다. 판정에는
-        #    쓰지 않는다(stopped 식은 그대로 둔다 — 도착 판정은 f2973cb 이후 한 줄도 바뀌지 않았다).
+        #    쓰지 않는다(stopped 식 자체는 f2973cb 그대로다).
         #    이게 없으면 C4(도착에 yaw 도 본다)를 블랙박스로 증명할 수 없다: 게이트에 남는 건
         #    d_last·settled_s·elapsed_s 뿐이라 "yaw 가 멎어서 통과했다"가 기록에 없었다.
+        # 🔴 2026-10-07: 판정에 **`aligned` 한 항이 추가됐다**(아래). `near`·`stopped` 는 여전히
+        #    f2973cb 그대로이고 한 글자도 안 바뀌었지만, **"도착 판정이 통째로 안 바뀌었다"는 더는
+        #    사실이 아니다** — 예전 주석이 그렇게 적혀 있었고, 그대로 두면 다음 사람이 안 바뀐
+        #    코드로 믿는다. 새 항도 같은 이유로 게이트에 기록한다(yaw_err_deg·yaw_tol_deg·aligned).
         yaw_still = (abs((ryaw - last[2] + 180.0) % 360.0 - 180.0)
                      if (last is not None and ryaw is not None and last[2] is not None) else None)
         near    = (d is not None and d <= tol)
@@ -1926,12 +2005,18 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None):
                    and _math_auto.hypot(rx - last[0], ry - last[1]) < 0.02
                    and ryaw is not None and last[2] is not None
                    and abs((ryaw - last[2] + 180.0) % 360.0 - 180.0) < _ARRIVE_YAW_STILL_DEG)
-        if near and stopped:
+        # 방향 = 목표 방위와의 절대 오차. 목표에 방위가 없으면(tgt_yaw None) 항상 True =
+        # 예전과 똑같이 동작한다. ryaw 가 None 이면 위 stopped 가 이미 False 라 여기서 막을 일이
+        # 없다 — 즉 이 항이 도착을 막는 유일한 길은 **방위가 실제로 어긋났을 때**뿐이다.
+        yaw_err = (((ryaw - tgt_yaw + 180.0) % 360.0 - 180.0)
+                   if (tgt_yaw is not None and ryaw is not None) else None)
+        aligned = (yaw_err is None) or (abs(yaw_err) <= _ARRIVE_YAW_TOL_DEG)
+        if near and stopped and aligned:
             if stable_since is None:
                 stable_since = time.monotonic()
             elif time.monotonic() - stable_since >= settle:
                 _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "arrived", True,
-                                 yaw_still=yaw_still, d_line=d_line)
+                                 yaw_still=yaw_still, yaw_err=yaw_err, d_line=d_line)
                 return True      # 목표 이내 + settle초 정지 = 정밀 도착 확정
         else:
             stable_since = None
@@ -1939,7 +2024,7 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None):
             last = (rx, ry, ryaw)
         time.sleep(0.3)
     _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "timeout", False,
-                     yaw_still=yaw_still, d_line=d_line)
+                     yaw_still=yaw_still, yaw_err=yaw_err, d_line=d_line)
     return False
 
 # 자동정렬 실패 뒤 확인 대기에서 "사람이 뭘 해야 하는지 모른 채" 서 있는 시간의 상한.
@@ -2973,7 +3058,10 @@ def _auto_front_nav2():
     if not _auto_hold("② 문앞 주행"):
         return False
     _write("iface", f"/goto {_FRONT_LOC}")
-    arrived = _auto_wait_arrival(_FRONT_LOC, timeout=_FRONT_ARRIVE_SEC)
+    # check_yaw=True — 이 호출처 **하나만** 방향까지 본다(2026-10-07). 근거는
+    # _ARRIVE_YAW_TOL_DEG 주석: 여기 '도착'이 방향을 안 보고 떠서 nav2 의 마지막 정렬을
+    # /cancel 로 끊고 있었다. 다른 세 호출처는 켜지 않는다(_auto_wait_arrival 독스트링 참조).
+    arrived = _auto_wait_arrival(_FRONT_LOC, timeout=_FRONT_ARRIVE_SEC, check_yaw=True)
     # 🔴 제어권을 돌려주기 **전에** Nav2 가 바퀴를 놓았는지 확인한다(A1·A2 — _NAV_* 주석).
     #    못 확인하면 제어권을 돌려주지 않는다. 여기서 False 를 돌려주면 _auto_run 이 엘베앱을
     #    끈다 — 팔은 ① 누르기 뒤 수납 확인된 상태(arm_safe)라 앱 종료로 잃는 것은 패드뿐이고,
@@ -2989,12 +3077,29 @@ def _auto_front_nav2():
         _auto_set("오류", "제어권 재부여 실패 — 여정 중단")
         return False
     if not arrived:
-        # 가장 흔한 원인을 문구에 박는다: interface 는 location.yaml 을 **init 에 한 번만**
-        # 읽는다(interface.py:1177). 장소를 새로 추가했으면 interface 를 재시작해야
-        # _handle_goto 가 받는다 — 아니면 "목록에 없는 목적지 무시"로 조용히 버린다.
+        # 🔴 사유를 먼저 재서 문구에 싣는다(2026-10-07). 전에는 원인을 하나로 단정해
+        # "interface 가 문앞을 모를 수 있다(재시작 필요)"만 띄웠는데, 방향 검사가 생긴 뒤로는
+        # **위치는 맞는데 방위만 안 맞아서** 실패하는 경우가 생긴다. 그때 재시작 안내가 뜨면
+        # 운영자가 엉뚱한 조치를 한다. 잰 값을 보여주고 판단은 사람이 하게 한다.
+        _d_f = _dist_to(p.get("x"), p.get("y"))
+        try:
+            _ty_f = _math_auto.degrees(2.0 * _math_auto.atan2(float(p["z"]), float(p["w"])))
+            _dy_f = (_robot_pose["yaw_deg"] - _ty_f + 180.0) % 360.0 - 180.0
+        except (TypeError, ValueError, KeyError):
+            _dy_f = None
+        _near_f = (_d_f is not None and _d_f <= 0.10)
+        if _near_f and _dy_f is not None and abs(_dy_f) > _ARRIVE_YAW_TOL_DEG:
+            _why_f = (f"위치는 맞는데 방향이 {_dy_f:+.1f}° 어긋났다 "
+                      f"(허용 ±{_ARRIVE_YAW_TOL_DEG:.0f}°) — 로봇이 끝까지 못 돌았다")
+        else:
+            # 위치부터 못 맞춘 경우. interface 는 location.yaml 을 **init 에 한 번만** 읽는다
+            # (interface.py:1177) — 장소를 새로 추가했으면 재시작해야 _handle_goto 가 받는다.
+            _why_f = (("남은 거리 " + ("?" if _d_f is None else f"{_d_f*100:.0f}cm"))
+                      + (f" / 방향 {_dy_f:+.1f}°" if _dy_f is not None else "")
+                      + f" — interface 가 '{_FRONT_LOC}' 를 모를 수 있다"
+                        "(장소 추가 후 interface 재시작 필요)")
         _auto_set("② 문앞정렬",
-                  f"⚠ 문앞 도착 실패(≤{_FRONT_ARRIVE_SEC:.0f}s) — interface 가 "
-                  f"'{_FRONT_LOC}' 를 모를 수 있다(장소 추가 후 interface 재시작 필요). "
+                  f"⚠ 문앞 도착 실패(≤{_FRONT_ARRIVE_SEC:.0f}s) — {_why_f}. "
                   "엘베UI 로 수동 정렬 후 '다음'", wait=True, phase="front")
         return _auto_wait_confirm()
     # 단계 기록(_elev_scene(1, move=False))은 **주행 앞**으로 옮겼다 — 위 '팔 수납을
@@ -3873,13 +3978,18 @@ def _jr_end():
 
 
 def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result,
-                     yaw_still=None, d_line=None):
-    """_auto_wait_arrival 의 판정 — 마지막 거리·정지 지속·경과·pose 신선도·yaw 정지량.
+                     yaw_still=None, yaw_err=None, d_line=None):
+    """_auto_wait_arrival 의 판정 — 마지막 거리·정지 지속·경과·pose 신선도·yaw 정지량·방위 오차.
 
     yaw_still_deg: 마지막 폴링 간 yaw 변화(°). 도착 '정지' 판정의 두 축 중 하나인데(다른 하나는
     xy 2cm) 여기 없어서 C4(f2973cb, 제자리 회전 중 도착 선언 A2 수정)를 기록으로 증명할 수
     없었다. 임계는 _ARRIVE_YAW_STILL_DEG(1.0°) — 값이 그보다 작으면 yaw 축은 통과였다는 뜻이다.
-    None = 비교할 직전 표본이 없었다(첫 폴링·멈춤 직후)."""
+    None = 비교할 직전 표본이 없었다(첫 폴링·멈춤 직후).
+
+    yaw_err_deg / yaw_tol_deg / aligned: 2026-10-07 에 판정에 **더해진** 방향 항(목표 방위와의
+    절대 오차). yaw_still 때와 같은 이유로 기록한다 — 없으면 "방향이 맞아서 통과했다"를
+    블랙박스로 증명할 수 없다. yaw_err_deg=None 이면 방향 검사를 **안 한 호출**이라는 뜻이고
+    (목표에 z/w 가 없거나 check_yaw=False), 그때 aligned 는 True 로 남는다 = 예전과 같은 판정."""
     if _JR is None:
         return
     try:
@@ -3892,6 +4002,10 @@ def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result,
                  elapsed_s=(round(now - t0, 1) if t0 else None), pose=_jr_pose(),
                  yaw_still_deg=(round(yaw_still, 2) if isinstance(yaw_still, (int, float)) else None),
                  yaw_still_thr_deg=_ARRIVE_YAW_STILL_DEG,
+                 yaw_err_deg=(round(yaw_err, 2) if isinstance(yaw_err, (int, float)) else None),
+                 yaw_tol_deg=_ARRIVE_YAW_TOL_DEG,
+                 aligned=(True if not isinstance(yaw_err, (int, float))
+                          else abs(yaw_err) <= _ARRIVE_YAW_TOL_DEG),
                  # 상한이 왜 그 값이었나 — 거리로 만든 경우 직선거리도 같이 남긴다.
                  timeout_s=timeout, d_line_m=d_line)
     except Exception:
