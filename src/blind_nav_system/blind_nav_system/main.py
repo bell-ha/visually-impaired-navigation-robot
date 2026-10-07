@@ -204,9 +204,15 @@ _procs: dict = {}
 _NOISE_PREFIXES = ("ALSA lib", "Cannot open device", "Unknown PCM", "Invalid field", "Invalid card", "Found no matching", "Expression '")
 
 def _capture(proc: subprocess.Popen, name: str):
+    global _nav_fail_seen
     for line in proc.stdout:
         if any(line.strip().startswith(p) for p in _NOISE_PREFIXES):
             continue
+        # Nav2 목표 실패를 **여기서** 잡는다 — navigation_client 의 `_nav_failed` 가 찍는 줄이
+        # interface stdout 으로 올라온다(그 노드는 interface 프로세스 안에서 돈다).
+        # 도착 게이트가 `"0"` 의 성공/실패를 가르는 데 쓴다(위 _nav_fail_seen 주석).
+        if "[NAV] 목표 실패" in line:
+            _nav_fail_seen = time.monotonic()
         _log(name, line)
 
 @_jr_traced("write")   # /goto·/cancel·/say — "Nav2 목표를 끊었나"(A1)를 기록으로 증명하려고
@@ -1879,6 +1885,80 @@ _ARRIVE_YAW_STILL_DEG = 1.0
 #   이미 이 게이트에 기록되고 있다 — 다음에 이 문제를 다룰 레버는 그 값이다.**
 _ARRIVE_YAW_TOL_DEG = 10.0
 
+# ── Nav2 완료 신호 (`/tmp/navigation_active`) ───────────────────────────────────
+# navigation_client.py 가 이미 쓰고 있는데 **대시보드가 한 번도 읽지 않았다**(grep 0건).
+#   102 goto 시작 → "1" · 382 SUCCEEDED → "0" · 399 _nav_failed → "0" · 429 cleanup → "0"
+#   STATUS_CANCELED → 조기 return, **안 쓴다**(재계획 취소가 완료로 안 보인다)
+# 즉 Nav2 자신의 판정(xy 3cm + yaw 2.9°)이 파일로 나와 있는데, 우리는 그걸 무시하고
+# **pose 를 폴링해 "멈춘 것 같으면 도착"** 이라고 추정해 왔다. 그게 "Nav2 완료보다 중앙값
+# 9.3초 먼저 도착 선언" 의 뿌리다.
+#
+# 🔴 **이 설계의 안전성을 통째로 보증하는 한 줄:**
+#    **신호는 도착을 `늦출 수만` 있고, `앞당기지 못한다`.**
+#    못 쓸 상태면(파일 없음·"1" 안 뜸·읽기 실패) 조용히 레거시(near+stopped)로 돌아간다.
+#    그래서 **최악이 오늘과 같다** — 신호 때문에 새로 끊기는 경로가 생기지 않는다.
+#
+# 추가대기 25초의 근거 (전수 22구간 = 승차 14 + ② 8, N = nav 종료 − 레거시 게이트 발화):
+#   · N>0 은 15/22. 중앙값 8.1s · 90퍼센타일 13.9s · **최댓값 21.5s**
+#   · 분류(두 세션 교차확인, 같은 분할·다른 이름):
+#       17 자력 succeeded + 4 우리가 끊음 + 1 런스톱(succeeded 끝내 없음)
+#     = 17 succeeded + 5 canceled
+#   · N 을 다 쓰고 버리는 건 **1/22 = 4.5%**(그 1건은 세션 한가운데 런스톱 — 여정이 이미
+#     끝난 상황이라 N 을 버려도 잃는 게 없다). 반대로 **4건(18%)은 더 기다렸으면 됐다**
+#     (41.7~59.3초에 우리가 끊었고 타임아웃은 한참 남아 있었다).
+# 🔴 **21.5 는 상한이 아니라 하한이다** — 22건 중 5건이 `Goal canceled` 이고 그 취소는
+#    **전부 우리가 한 것**이라 Nav2 가 얼마나 더 필요했는지 **측정된 적이 없다.** 새 게이트는
+#    그 5건을 안 끊으므로 실제 N 은 21.5 를 넘을 수 있다. **25.0 은 잠정값이고, 실기 1~2회 뒤
+#    분포를 다시 뽑아 재조정하는 것을 전제로 한다.**
+_NAV_DONE_EXTRA_WAIT_S = 25.0
+# `/goto` 를 쓴 뒤 "1" 이 뜨기를 기다리는 상한. `_write` 는 **stdin 에 썼다**까지만 보장하고
+# interface 는 별 프로세스라 수백 ms~수 초가 뜬다. 이 안에 "1" 을 못 보면 신호를 **안 쓴다**
+# — `/goto` 가 interface 에서 조용히 버려지는 알려진 경우(장소를 모름)가 있고, 그때 "1" 을
+# 계속 기다리면 오늘보다 나빠지기 때문이다.
+_NAV_SIGNAL_WAIT_S = 5.0
+_NAV_ACTIVE_FILE = "/tmp/navigation_active"
+# ── 이 변경이 약속하는 것과, 약속하지 않는 것 ──────────────────────────────────
+# 약속: **Nav2 가 끝내기 전에 우리가 끊는 일이 없어진다**(최대 위 추가대기까지). 그 이상은 없다.
+# ⚠ "우리가 끊었던 4건이 구해진다"고 쓰지 마라 — 그 4건은 **취소돼서 완료 시각이 없고**, 얼마나
+#   더 필요했는지 모른다. 구해지는 건 "남은 시간 ≤ 추가대기" 인 건뿐이고 그게 4건 중 몇인지는
+#   이 자료로 못 가른다(두 세션이 독립으로 같은 한계를 짚었다).
+# ⚠ **ALIGN 의 횡보정 부족은 이 변경이 안 고친다** — odom 실측(n=18) 전달률 0.37, 명령 1.5cm
+#   미만은 **0.00**(최소 유효명령 1.2cm), 실질 예산 15cm → 약 8cm. 그건 별건이다.
+#
+# ── 기록: 같은 함정을 네 번 밟았다(사람 아니라 사건으로 남긴다) ────────────────
+# ① 2026-10-06 ② 상수 주석에 **"게이트 통과 시점 값은 임계 근거가 될 수 없다 — 두 수치를 섞지
+#    마라"** 고 적어 놓고, **다음 날** 승차지점 설계에서 **같은 게이트 시점 값**을 임계 근거로 다시
+#    썼다. 그대로 켰으면 멀쩡한 주행 5건을 끊었다. **경고가 쓰여 있어도 안 막혔다.**
+# ② 같은 날, 이 호출처 타임아웃을 90초로 줄이자고 제안했다. 관측 **최대값이 109.3초**였고
+#    **그 값을 직접 뽑아 보고까지 한 뒤였는데** 중앙값 32초만 보고 "여유 있다"고 썼다.
+#    제안대로 했으면 그 주행이 끊겼다.
+# → 교훈은 "조심하라"가 아니다(그건 ① 에 이미 쓰여 있었고 못 막았다). 구체적으로:
+#    · **상한을 정할 땐 중앙값이 아니라 최대값을 본다.**
+#    · **내 손에 있는 수치가 내가 본 수치는 아니다.**
+# → 근본 원인은 개인 부주의보다 **이 코드베이스가 수치의 측정 시점을 숨기는 구조**에 가깝다:
+#    같은 "방향 오차"가 **게이트 시점 · 제어권 이양 시점 · ② 종료 후** 셋인데 **이름이 하나다.**
+#    그래서 섞인다. 그래서 이번 설계는 **우리가 방위를 재지 않는다** — 재는 주체를 Nav2 하나로
+#    줄이는 쪽이 이름을 늘리는 것보다 낫다.
+
+# `[NAV] 목표 실패 …` 를 마지막으로 본 시각(monotonic). `_nav_failed`(navigation_client.py:399)
+# 가 찍는 줄이고, NavigationClient 는 **interface 프로세스 안**에서 돌므로 그 stdout 이
+# `_capture(iface, "IFACE")` 로 이미 대시보드에 들어온다 — 신호를 새로 만들 필요가 없었다.
+# 왜 필요한가: `"0"` 은 **성공·실패·cleanup 셋 다**라 그것만으로는 성공을 못 가린다.
+# ABORTED 뒤 우연히 목표 10cm 안이면 yaw 보장이 사라지는데, DWB abort 는 실제로 관측됐다.
+_nav_fail_seen = 0.0
+
+# 직전 `_auto_wait_arrival` 이 **추가대기를 다 쓰고도 Nav2 완료를 못 보고 통과했는가.**
+# 왜 전역인가: 호출처가 이 사실을 알아야 하는데 그 함수의 반환형(bool)을 바꾸면 호출처 4곳을
+#   전부 건드려야 한다. 한 곳만 읽으므로 전역이 싸다.
+# 🔴 왜 **화면에 보여주는가**: 사용자가 로봇 옆에 서서 '다음'을 직접 누른다. 블랙박스에만 남기면
+#   **그 사람은 영영 모른다** — `도착 ✅` 를 보고 누르는데 실제로는 Nav2 가 못 끝낸 상태인 것,
+#   그게 이 저장소가 뿌리로 적어 둔 **"B. 실패가 사용자에 전달 안 됨"** 의 바로 그 모양이다.
+#   게다가 **추가대기를 다 쓰는 구간이 곧 방향이 제일 나빴던 구간**이다(실측 Δyaw −41.1° · −29.6°)
+#   — ⚠ 가 뜨는 순간이 사람이 제일 눈여겨봐야 할 순간이다.
+# ⚠ **매 호출 시작에서 False 로 초기화한다** — 이전 주행 값이 새면 안 된다. 바로 아래
+#   `navigation_active` 의 "묵은 0" 이 같은 유형의 함정이었다.
+_last_arrival_fell_back = False
+
 
 # 도착 대기 상한을 거리로 만든다(2026-09-23). 예전엔 200초 고정이었고, 짧은 다리(승차지점
 # 8.6m·문앞)만 돌려 봐서 안 드러났다. 하차지점(−48.232, 4.932) → 123호(0.497, −30.454)는
@@ -1899,7 +1979,20 @@ _ARRIVE_SLOW_MPS = 0.15     # 실측 0.27 의 절반. 복도 우회·감속·회
 _ARRIVE_PAD_SEC  = 60       # 출발 전 준비·마지막 정렬 몫
 
 
-def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None, check_yaw=False):
+def _nav_active_read():
+    """`/tmp/navigation_active` → (내용, mtime). 못 읽으면 (None, None).
+
+    mtime 까지 돌려주는 이유: 내용만 보면 **이전 주행이 남긴 "0"** 을 우리 것으로 읽는다.
+    내용 + mtime 을 같이 봐야 "이번 goto 이후에 쓰인 값인가"를 가를 수 있다."""
+    try:
+        return (Path(_NAV_ACTIVE_FILE).read_text().strip(),
+                os.path.getmtime(_NAV_ACTIVE_FILE))
+    except Exception:
+        return (None, None)
+
+
+def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None, check_yaw=False,
+                       wait_nav_done=False):
     """name 지점 '정밀 도착'까지 대기. nav이 5cm로 서므로, 여기선 목표 tol(기본 10cm)
     이내에서 로봇이 settle초간 '멈춰있으면'(=nav 완료 = 정밀 도착) True.
     - 단순히 tol 이내를 지나가는 중인 것과 구분하려고 '정지'까지 확인 (jitter 여유로 10cm).
@@ -1923,7 +2016,16 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None, check_yaw=False
       🔴 그래서 `p.get("z") or 0.0` 같은 **기본값 채우기는 절대 금지**다 — 140곳이 "목표 방위 0°"
       라는, 없는 값이 아니라 **틀린 값**을 갖게 된다. z 와 w **둘 다** 있는지로 가른다.
       🔴 그리고 이 건너뛰기가 없으면, 나중에 누가 `check_yaw` 를 다른 호출처에 켜는 순간
-      **방 도착이 전부 타임아웃 → 그 뒤 `/cancel`** 이 된다(140/143). 켤 때 이 분모를 먼저 볼 것."""
+      **방 도착이 전부 타임아웃 → 그 뒤 `/cancel`** 이 된다(140/143). 켤 때 이 분모를 먼저 볼 것.
+
+    wait_nav_done=True 면 레거시 조건(near+stopped)이 충족돼도 **Nav2 가 끝났다는 신호**
+    (`/tmp/navigation_active` → "0")를 최대 `_NAV_DONE_EXTRA_WAIT_S` 만큼 더 기다린다.
+    우리가 방위를 직접 재는 `check_yaw` 와 **역할이 다르다** — 이쪽은 **Nav2 의 판정을 읽기만**
+    한다(Nav2 가 SUCCEEDED 면 이미 xy 3cm + yaw 2.9° 를 만족한 것이다). 둘을 같은 호출처에
+    같이 켜지 마라 — 어느 쪽이 효과였는지 못 가른다.
+    🔴 **신호는 도착을 늦출 수만 있고 앞당기지 못한다.** 신호가 못 쓸 상태면 조용히 레거시로
+    돌아가고, 추가대기를 다 써도 **끊지 않고 통과시킨다**(사후에 가려지도록 기록만 남긴다).
+    그래서 **최악이 오늘과 같다.**"""
     p = _loc(name)
     d_line = None
     if p is not None and timeout is None:
@@ -1955,6 +2057,22 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None, check_yaw=False
             tgt_yaw = None       # 좌표가 이상하면 방향 검사를 포기한다(기존 동작 유지)
     if check_yaw and tgt_yaw is None:
         _log("AUTO", f"'{name}' 좌표에 방위(z/w)가 없다 — 도착 방향 검사 건너뜀")
+    # Nav2 완료 신호 상태. `sig_t0` = 이 함수에 들어온 시각(= `/goto` 직후). "1" 을 **이 시각
+    # 이후 mtime 으로** 본 뒤에야 "0" 을 기다린다 — 그래야 **이전 주행이 남긴 "0"** 을 우리 것으로
+    # 읽지 않는다(mtime 만 보면 직전 주행이 우리 goto 직후 끝나며 쓴 "0" 에 즉시 속는다).
+    # 🔴 "1 을 먼저 본다"는 조건은 **빼면 안 된다.** mtime 검사만으로는 묵은 "0" 을 못 막는다 —
+    #    직전 주행이 우리 goto **직후**에 끝나며 쓴 "0" 은 mtime 도 우리 goto 보다 뒤라 통과한다.
+    #    이건 추론이 아니라 **스텁 실행으로 확인한 것**이다(묵은 "0" 을 현재 mtime 으로 준 경우에도
+    #    "1" 선행 조건이 잡아냈다). "mtime 만 보면 되잖아"로 되돌리지 마라.
+    global _last_arrival_fell_back
+    _last_arrival_fell_back = False     # 매 호출 초기화 — 이전 주행 값이 새면 안 된다
+    sig_t0 = time.monotonic()
+    sig_seen_1 = None       # "1"(mtime ≥ sig_t0)을 본 시각. None = 아직 못 봄
+    sig_usable = bool(wait_nav_done)
+    nav_fail_at_start = _nav_fail_seen
+    legacy_ok_since = None  # 레거시 조건이 처음 충족된 시각(= 추가대기 시작점)
+    nav_done = False
+    fell_back = False
     _jr("set_goal", name, p)
     t0 = time.monotonic()
     stable_since = None
@@ -2011,15 +2129,62 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None, check_yaw=False
         yaw_err = (((ryaw - tgt_yaw + 180.0) % 360.0 - 180.0)
                    if (tgt_yaw is not None and ryaw is not None) else None)
         aligned = (yaw_err is None) or (abs(yaw_err) <= _ARRIVE_YAW_TOL_DEG)
+        # ── Nav2 완료 신호 추적 (켜져 있을 때만) ──────────────────────────────
+        if sig_usable:
+            _txt, _mt = _nav_active_read()
+            if _txt is None:
+                # 파일 없음·읽기 실패 → 신호를 안 쓴다(구버전 interface·수동 기동).
+                sig_usable = False
+                _log("AUTO", f"{_NAV_ACTIVE_FILE} 를 못 읽는다 — Nav2 완료 신호 없이 진행")
+            elif sig_seen_1 is None:
+                if _txt == "1" and _mt is not None and _mt >= sig_t0 - 1.0:
+                    sig_seen_1 = time.monotonic()
+                elif time.monotonic() - sig_t0 >= _NAV_SIGNAL_WAIT_S:
+                    # `/goto` 가 interface 에서 조용히 버려졌을 수 있다(장소를 모름).
+                    # 계속 기다리면 오늘보다 나빠지므로 신호를 포기한다.
+                    sig_usable = False
+                    _log("AUTO", f"{_NAV_SIGNAL_WAIT_S:.0f}초 안에 Nav2 주행 시작 신호를 못 봤다 "
+                                 "— 완료 신호 없이 진행(기존 판정)")
+            elif not nav_done and _txt == "0" and _mt is not None and _mt >= sig_seen_1 - 1.0:
+                # `"0"` 은 성공·실패·cleanup 셋 다다. 실패는 `[NAV] 목표 실패` 로 가른다 —
+                # 실패를 '완료'로 치면 ABORTED 뒤 우연히 10cm 안일 때 yaw 보장이 사라진다.
+                if _nav_fail_seen > nav_fail_at_start:
+                    pass          # 실패한 목표 — 완료로 인정하지 않는다(추가대기를 다 쓴다)
+                else:
+                    nav_done = True
         if near and stopped and aligned:
             if stable_since is None:
                 stable_since = time.monotonic()
             elif time.monotonic() - stable_since >= settle:
+                # 레거시 조건 충족. 신호를 쓸 수 있으면 "0" 을 최대 _NAV_DONE_EXTRA_WAIT_S 만큼
+                # 더 기다린다 — **늦출 수만 있고 앞당기지 못한다.**
+                if sig_usable and not nav_done:
+                    if legacy_ok_since is None:
+                        legacy_ok_since = time.monotonic()
+                    waited = time.monotonic() - legacy_ok_since
+                    if waited < _NAV_DONE_EXTRA_WAIT_S:
+                        time.sleep(0.3)
+                        continue          # 아직 기다린다(last 갱신도 건너뛴다 — 기준 유지)
+                    # 🔴 다 썼어도 **끊지 않는다.** 끊으면 과거 5/22 에서 여정이 멈추고 사용자가
+                    #    서는데, 그 순간 로봇은 제 위치에 있고 방향만 덜 맞은 상태라 물리 위험이
+                    #    아니다. "늦출 수만 있고 앞당기지 못한다"는 **최악이 오늘과 같아야** 한다는
+                    #    뜻이고, 끊으면 그 규칙이 깨진다.
+                    #    ⚠ 다만 **이 구간이 방향이 제일 나빴던 구간**이다(실측: 추가대기를 다 쓴
+                    #    구간의 Δyaw −41.1° · −29.6°). 그래서 조용히 통과시키지 않고 **사후에
+                    #    가려지도록** 기록·문구를 다르게 남긴다. 이 숫자가 쌓이면 그때 실패로
+                    #    올릴지 결정한다 — 지금 끊으면 **근거 없이 여정을 멈추는 것**이다.
+                    fell_back = True
+                    _log("AUTO", f"⚠ '{name}' — Nav2 완료 신호를 {_NAV_DONE_EXTRA_WAIT_S:.0f}초 "
+                                 "기다렸지만 안 왔다. 기존 판정으로 진행한다(방향이 덜 맞을 수 있다)")
                 _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, "arrived", True,
-                                 yaw_still=yaw_still, yaw_err=yaw_err, d_line=d_line)
+                                 yaw_still=yaw_still, yaw_err=yaw_err, d_line=d_line,
+                                 nav_done=nav_done, fell_back=fell_back,
+                                 extra_waited_s=(None if legacy_ok_since is None else
+                                                 round(time.monotonic() - legacy_ok_since, 1)))
                 return True      # 목표 이내 + settle초 정지 = 정밀 도착 확정
         else:
             stable_since = None
+            legacy_ok_since = None        # 조건이 깨졌으면 추가대기도 처음부터
         if rx is not None:
             last = (rx, ry, ryaw)
         time.sleep(0.3)
@@ -3531,8 +3696,30 @@ def _auto_run(dest):
         if not _auto_hold("승차지점 주행"):
             _auto_set("오류", "승차지점 도착 실패(취소/시간초과)"); return
         _write("iface", "/goto 엘리베이터 탑승지점")
-        if not _auto_wait_arrival("엘리베이터 탑승지점"):
-            _auto_set("오류", "승차지점 도착 실패(취소/시간초과)"); return
+        # wait_nav_done=True — **Nav2 의 완료 판정을 읽는다**(2026-10-07). 여기 '도착'이 Nav2
+        # 완료보다 중앙값 9.3초 먼저 떠서, 그 선언이 `_nav_release_wheels` 의 `/cancel` 로
+        # **마지막 정렬을 끊고 있었다**(전수 22건 중 4건). `check_yaw` 는 켜지 않는다 —
+        # 역할이 겹치고(우리가 재기 vs Nav2 판정 읽기) 같이 켜면 효과를 못 가린다.
+        _board_arrived = _auto_wait_arrival("엘리베이터 탑승지점", wait_nav_done=True)
+        if not _board_arrived:
+            # 🔴 2026-10-07: 여기에 바퀴를 놓는 자리가 **없었다.** 실패하면 그대로 return 해서
+            #    아래 `_nav_release_wheels`(승차지점)까지 못 가고, `_auto_run` 의 finally 도
+            #    리스·플래그만 건드린다 → **Nav2 목표가 살아 있다.** 화면엔 "도착 실패"가 뜨는데
+            #    사람이 잡고 걷는 로봇은 계속 간다. ②·목적지와 **같은 모양**으로 맞춘다.
+            #    fail-closed 가 성립한다: 이 시점엔 엘베앱이 아직 안 떴지만, 여정이 끝나면서
+            #    대시보드가 통째로 돌아오고(`/cmd` 수동주행은 `_journey_gate` 에 안 걸린다)
+            #    팔은 아직 뻗지 않았다(엘베 씬 진입 전).
+            if not _nav_release_wheels(_board_arrived, "승차지점"):
+                _auto_notify("로봇이 멈췄는지 확인하지 못해 여정을 멈췄습니다. 도움을 요청하세요")
+                _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 승차지점 중단")
+                return
+            # 사유를 재서 문구에 싣는다 — "취소/시간초과"만 뜨면 운영자가 원인을 못 가린다.
+            _d_b = _dist_to((_loc("엘리베이터 탑승지점") or {}).get("x"),
+                            (_loc("엘리베이터 탑승지점") or {}).get("y"))
+            _auto_set("오류", "승차지점 도착 실패 — "
+                              + ("남은 거리 ?" if _d_b is None else f"남은 거리 {_d_b*100:.0f}cm")
+                              + " (취소이거나, Nav2 가 끝내 목표에 못 섰다)")
+            return
         _auto_set("도착", "승차지점 도착 ✅", phase="board")
 
         # 2) 엘베앱 ON + 제어권 리스 부여 (한 여정에 1회 — 유일한 자동 grant 지점)
@@ -3978,7 +4165,8 @@ def _jr_end():
 
 
 def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result,
-                     yaw_still=None, yaw_err=None, d_line=None):
+                     yaw_still=None, yaw_err=None, d_line=None,
+                     nav_done=None, fell_back=None, extra_waited_s=None):
     """_auto_wait_arrival 의 판정 — 마지막 거리·정지 지속·경과·pose 신선도·yaw 정지량·방위 오차.
 
     yaw_still_deg: 마지막 폴링 간 yaw 변화(°). 도착 '정지' 판정의 두 축 중 하나인데(다른 하나는
@@ -4006,6 +4194,11 @@ def _jr_gate_arrival(name, tx, ty, t0, stable_since, tol, timeout, why, result,
                  yaw_tol_deg=_ARRIVE_YAW_TOL_DEG,
                  aligned=(True if not isinstance(yaw_err, (int, float))
                           else abs(yaw_err) <= _ARRIVE_YAW_TOL_DEG),
+                 # Nav2 완료 신호(`/tmp/navigation_active`). nav_done=None 이면 신호를 **안 쓴
+                 # 호출**이고(wait_nav_done=False), fell_back=True 는 **추가대기를 다 쓰고도
+                 # 완료를 못 보고 통과한** 구간이다 — 실측상 방향이 제일 나빴던 구간이라
+                 # 이 플래그가 쌓이는 것을 보고 "실패로 올릴지"를 나중에 결정한다.
+                 nav_done=nav_done, fell_back=fell_back, extra_waited_s=extra_waited_s,
                  # 상한이 왜 그 값이었나 — 거리로 만든 경우 직선거리도 같이 남긴다.
                  timeout_s=timeout, d_line_m=d_line)
     except Exception:
