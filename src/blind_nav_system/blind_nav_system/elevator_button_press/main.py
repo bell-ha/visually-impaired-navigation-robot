@@ -40,6 +40,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, JointState, LaserScan, CameraInfo
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
 from cv_bridge import CvBridge
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -1285,6 +1286,15 @@ state = {
     #   **베이스 예산 소진(= 주차를 옮겨야 함)** 이었다 — 지시가 정반대였다.
     #   (2026-10-07 17:37 122호: 그 지시를 받은 사람이 6.6초 뒤 다시 눌렀고 여정이 끝났다.)
     "align_block":  None,   # 정조준을 막고 있는 사유 목록(list[str]) — 없으면 None
+    # 🔴 런스톱(물리 버튼) — 누르면 **모터 전원이 끊겨 팔이 중력으로 떨어진다.**
+    #   2026-10-12 12:56:28 실측: 런스톱 ON → lift 0.873 → 0.59 (**28cm 자유낙하**).
+    #   12:57:05 해제했지만 **자동으로 안 올라온다** — 드라이버는 마지막 목표를 기억하지
+    #   않는다. 누군가 새 목표를 보내야 올라온다(실제로 17초 뒤 사람이 보냈다).
+    #   그래서 (a) 떨어지기 **직전** 자세를 기억해 두고 (b) 해제되면 복구할 수 있게 한다.
+    "runstopped":      False,  # /is_runstopped 최신값
+    "runstop_ts":      0.0,    # 마지막 전이 시각
+    "runstop_drop":    None,   # {"lift":..., "arm_ext":..., "at":...} 떨어지기 직전 자세
+    "runstop_fell_mm": None,   # 실제로 몇 mm 떨어졌나(해제 시 계산) — None = 아직 모름
     "align_block_ts": 0.0,  # 그 사유를 마지막으로 갱신한 시각(낡은 값 구분용)
     "pressing":     False,  # 누르기 시퀀스 진행 중
     "press_status": None,   # 누르기 진행 메시지
@@ -2273,6 +2283,9 @@ def status():
                    wall_flat=s.get("wall_flat"),
                    base_align=s.get("base_align"), align_note=s.get("align_note"),
                    align_block=s.get("align_block"),
+                   runstopped=s.get("runstopped"),
+                   runstop_fell_mm=s.get("runstop_fell_mm"),
+                   runstop_drop=s.get("runstop_drop"),
                    align_block_age=(None if not s.get("align_block_ts") else
                                     round(time.time() - s["align_block_ts"], 1)),
                    guard_off=s.get("guard_off"), place=s.get("place"),
@@ -3492,6 +3505,7 @@ class ElevatorTracker(Node):
         # 오도메트리 — _base_move 실이동 피드백용 (구독 누락으로 침묵 사망하던 버그 수정)
         self._odom_xy = None
         self.create_subscription(Odometry, "/odom", self._on_odom, qos_profile_sensor_data)
+        self.create_subscription(Bool, "/is_runstopped", self._on_runstop, 10)
 
         self.action_client = ActionClient(
             self, FollowJointTrajectory,
@@ -6599,6 +6613,56 @@ class ElevatorTracker(Node):
             self._maybe_base_nudge(ex, tdist)
 
     # ── 누르기(press) 시퀀스 ──────────────────────────────────────────
+    def _on_runstop(self, msg):
+        """물리 런스톱 전이 감시 — 눌리면 자세를 기억하고, 풀리면 **되돌린다.**
+
+        🔴 왜 (2026-10-12 12:56 실측):
+            12:56:28 ON  → lift 0.873 → **0.59** (28cm 자유낙하)
+            12:57:05 OFF → **17초 동안 그대로** — 드라이버는 마지막 목표를 기억하지 않는다
+            12:57:22 사람이 수동으로 목표를 보내고서야 올라옴
+        런스톱은 모터 전원을 끊고, Stretch 의 lift 는 중력 보상을 모터가 하므로 떨어진다.
+        해제해도 스스로 안 올라온다. 그래서 여기서 되돌린다.
+
+        복구 조건을 좁게 둔다 — 넓히면 엉뚱할 때 팔이 움직인다:
+          · 실제로 **10mm 이상 떨어졌을 때만** (측정 잡음으로 움직이지 않게)
+          · 목표가 **조작반 대역(LIFT_PANEL_BAND) 안일 때만**
+          · 복구는 **lift 하나만** — 팔 신장(arm_ext)은 안 건드린다(뻗는 방향이라 더 위험)
+        """
+        try:
+            now = bool(msg.data)
+        except Exception:
+            return
+        with state_lock:
+            if now == bool(state.get("runstopped")):
+                return
+            state["runstopped"] = now
+            state["runstop_ts"] = time.time()
+            if now:
+                state["runstop_drop"] = {"lift": state.get("lift"),
+                                         "arm_ext": state.get("arm_ext"),
+                                         "at": time.time()}
+                state["runstop_fell_mm"] = None
+                _want = None
+            else:
+                _d = state.get("runstop_drop") or {}
+                _b, _n = _d.get("lift"), state.get("lift")
+                _fell = (None if (_b is None or _n is None) else (_b - _n) * 1000.0)
+                state["runstop_fell_mm"] = None if _fell is None else round(_fell, 0)
+                _want = (_b if (_fell is not None and _fell >= 10.0
+                                and LIFT_PANEL_BAND[0] <= _b <= LIFT_PANEL_BAND[1])
+                         else None)
+                _fell_s = "모름" if _fell is None else f"{_fell:+.0f}mm"
+        if now:
+            self._dlog("[RUNSTOP] 🔴 눌림 — 모터 전원 끊김, 팔이 떨어진다. 직전 자세 기억")
+            return
+        if _want is None:
+            self._dlog(f"[RUNSTOP] 해제됨 — 떨어진 양 {_fell_s}. 복구 안 함"
+                       "(10mm 미만이거나 목표가 조작반 대역 밖)")
+            return
+        self._dlog(f"[RUNSTOP] 해제됨 — {_fell_s} 떨어졌다. lift 를 {_want:.3f} 로 되돌린다")
+        threading.Thread(target=self._move_joint_wait,
+                         args=("joint_lift", _want, 3, 12.0), daemon=True).start()
+
     def _move_joint_wait(self, joint: str, pos: float, sec: int, timeout: float) -> bool:
         """관절 하나를 목표 위치로 움직이고 완료까지 블로킹 대기. 성공 여부 반환.
         (press 전용 — 별도 스레드에서 호출됨)"""
