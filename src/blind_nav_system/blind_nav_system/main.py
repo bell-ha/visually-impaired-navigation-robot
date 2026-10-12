@@ -5,6 +5,7 @@
 - 브라우저에서 실시간 로그 확인 + 수동 조작 가능
 - 실행: python3 main.py  →  http://localhost:8080 자동 오픈
 """
+import atexit
 import collections
 import json
 import os
@@ -200,6 +201,76 @@ def _make_pull_detector():
 
 # ── 서브프로세스 관리 ─────────────────────────────────────────────────────────
 _procs: dict = {}
+
+
+def _shutdown_children(why="종료"):
+    """대시보드가 끝날 때 **자기가 띄운 자식을 같이 끝낸다.**
+
+    🔴 2026-10-12 — 이게 없어서 고아가 쌓였다. 대시보드를 세 번 재시작했더니
+       `interface.py` **4개**, `robot_diag_nav.py` **3개** 가 동시에 돌고 있었다
+       (고아는 전부 ppid=1 로 재부모화돼 있었다).
+       `interface.py` 는 **Nav2 에 목표를 쏘는 주체**다. 여러 개가 살아 있으면 서로 다른
+       목표를 쏠 수 있고 `/cmd_vel` 퍼블리셔도 그만큼 늘어난다 — 바퀴 주인이 둘이 되는,
+       이 저장소의 고전적 사고 유형이다. `atexit` 도 시그널 핸들러도 **0개**였다
+       (CLAUDE.md 뿌리 C: 프로세스 생명주기).
+
+    SIGTERM → 최대 3초 대기 → SIGKILL.
+    ⚠ 엘베앱(`_procs["elevator"]`)은 **여기서 안 건드린다** — 그쪽은
+      `/elevator_app{running:false}` 가 **제어권 회수 → 정지 → SIGTERM** 순서로 정리한다.
+      여기서 막 죽이면 그 순서가 깨져 팔·바퀴가 중간 상태로 남는다.
+    """
+    for name, pr in list(_procs.items()):
+        if name == "elevator" or pr is None:
+            continue
+        try:
+            if pr.poll() is not None:
+                continue
+            print(f"[SHUTDOWN] {why} — 자식 정리 {name} pid={pr.pid} SIGTERM", flush=True)
+            pr.terminate()
+        except Exception:
+            pass
+    _t0 = time.time()
+    for name, pr in list(_procs.items()):
+        if name == "elevator" or pr is None:
+            continue
+        try:
+            pr.wait(timeout=max(0.2, 3.0 - (time.time() - _t0)))
+        except Exception:
+            try:
+                print(f"[SHUTDOWN] {name} 응답 없음 — SIGKILL", flush=True)
+                pr.kill()
+            except Exception:
+                pass
+
+
+_prev_sig_handlers: dict = {}
+
+
+def _install_shutdown():
+    """정상 종료(atexit)와 SIGTERM·SIGINT 모두에서 자식을 정리한다.
+
+    ⚠ 기존 `install_signal_logging(reraise=False)` 은 **로깅만** 하고 종료 동작을
+      바꾸지 않는다. 우리 핸들러가 뒤에 걸리므로 **이전 핸들러를 보관했다가 같이 부른다**
+      — 그래야 그 로깅이 그대로 남는다.
+    """
+    atexit.register(_shutdown_children, "atexit")
+
+    def _h(signum, frame):
+        _shutdown_children(f"signal {signum}")
+        prev = _prev_sig_handlers.get(signum)
+        if callable(prev):
+            try:
+                prev(signum, frame)
+            except Exception:
+                pass
+        raise SystemExit(0)
+
+    for _s in (signal.SIGTERM, signal.SIGINT):
+        try:
+            _prev_sig_handlers[_s] = signal.getsignal(_s)
+            signal.signal(_s, _h)
+        except Exception:
+            pass
 
 _NOISE_PREFIXES = ("ALSA lib", "Cannot open device", "Unknown PCM", "Invalid field", "Invalid card", "Found no matching", "Expression '")
 
@@ -5393,6 +5464,10 @@ def main():
     # 종료 신호 로깅 (원래 동작은 그대로, 로그만 추가) — app.run 직전에 설치
     if _diag is not None and _diaglog is not None:
         _diag.install_signal_logging(_diaglog, reraise=False)
+
+    # 🔴 자식 정리는 **시그널 로깅 설치 뒤**에 건다 — 우리 핸들러가 이전 것을
+    #    보관했다가 같이 부르므로 로깅도 그대로 남는다.
+    _install_shutdown()
 
     app.run(host="0.0.0.0", port=8080, threaded=True)
 
