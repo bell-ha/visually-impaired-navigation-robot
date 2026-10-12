@@ -1804,7 +1804,15 @@ _AUTO = {"active": False, "dest": "", "step": "", "msg": "",
          "phase": "", "dest_floor": "", "mode": "",
          # paused: 여정은 살아 있고 **다음 이동 명령만 내지 않는 상태**(STOP S1). 앱·리스·하트비트는
          # 그대로 둔다 — 종료가 아니다. 이동 명령 직전마다 _auto_hold 가 이 값을 본다.
-         "paused": False}
+         "paused": False,
+         # 🔴 auto_advance: "센서가 성공을 확인한" 확인 단계를 사람 클릭 없이 넘긴다.
+         #   여정 **시작 시점의 토글 값으로 고정**된다 — 도는 중에 바뀌면 사람이 기대한
+         #   흐름과 실제가 갈린다. 끄고 싶으면 취소하거나 '다음'을 직접 눌러 진행한다.
+         #   켜도 항상 사람을 기다리는 자리: ①③⑤ 의 **실패·시간초과** 뒤, 그리고
+         #   **"이동중 → ⑥ 하차"**(엘리베이터가 목적 층에 섰는지는 귀로 판단한다).
+         "auto_advance": False}
+# UI 토글이 쓰는 기본값(여정 밖에서 보관). 여정 시작 때 _AUTO 로 복사된다.
+_auto_advance_pref = False
 _auto_lock = threading.Lock()
 
 def _auto_set(step, msg, wait=False, phase=None):
@@ -2264,8 +2272,24 @@ _ALIGN_NUDGE_MSG = ("⚠ 정렬 실패 후 60초 경과 — 엘베앱 화면에�
 
 
 @_jr_traced("auto_wait_confirm", post=_jr_cancel_post)
-def _auto_wait_confirm(timeout=900):
-    """블로커 단계 — 사용자 '다음 확인' 대기. /auto_confirm이 waiting=False로 풀어줌."""
+def _auto_wait_confirm(timeout=900, auto_ok=False):
+    """블로커 단계 — 사용자 '다음 확인' 대기. /auto_confirm이 waiting=False로 풀어줌.
+
+    auto_ok=True 이고 **자동 넘김 토글**(_AUTO["auto_advance"])이 켜져 있으면 기다리지 않는다.
+    🔴 `auto_ok` 는 **호출부가** 정한다 — 여기서 문구를 보고 추측하지 않는다.
+       "센서가 성공을 확인한 뒤의 확인"만 True 다. 실패·시간초과 뒤의 확인은
+       **사람이 눈으로 보라고 멈춘 것**이라 토글과 무관하게 항상 기다린다.
+       (③ 문열림이 90초 안에 감지 안 됐을 때 자동으로 넘기면 **닫힌 문으로 전진한다.**)
+    🔴 그리고 "이동중 → ⑥ 하차"는 **호출부에서 auto_ok 를 아예 안 준다** —
+       엘리베이터가 목적 층에 섰는지는 **귀로 판단**하고, 층 감지는 지도 전환 뒤 null 이
+       되어 믿을 수 없다. 거기서 잘못 넘기면 **엉뚱한 층에서 내린다.**
+    """
+    if auto_ok and _AUTO.get("auto_advance") and not _AUTO.get("cancel"):
+        _log("AUTO", f"▶▶ 자동 넘김 — [{_AUTO.get('step','')}] (토글 ON)")
+        _jr("human", "auto_advance", step=_AUTO.get("step"), auto=True)
+        with _auto_lock:
+            _AUTO["waiting"] = False
+        return True
     t0 = time.monotonic()
     nudged = False
     while time.monotonic() - t0 < timeout:
@@ -2548,7 +2572,8 @@ def _auto_scene_step(label, n, busy_msg, noanmu_msg, phase):
         _auto_set(label, msg, wait=False, phase=phase)
         return True, why, res
     _auto_set(label, msg, wait=True, phase=phase)             # ← 여기서 '다음'이 열린다
-    return _auto_wait_confirm(), why, res
+    # 센서가 "씬 완료"를 확인한 뒤의 확인 — 토글이 켜져 있으면 자동으로 넘어간다.
+    return _auto_wait_confirm(auto_ok=True), why, res
 
 
 def _elev_status(timeout=3):
@@ -3351,7 +3376,8 @@ def _auto_front_nav2():
                             + ("?" if d is None else f"{d*100:.1f}cm")
                             + ("" if dy is None else f" / {dy:+.1f}°") + " · '다음'",
               wait=True, phase="front")
-    return _auto_wait_confirm()
+    # Nav2 가 도착(+방향 10° 이내)을 확인한 뒤 — 토글 시 자동
+    return _auto_wait_confirm(auto_ok=True)
 
 
 def _scene_res_txt(res):
@@ -3757,7 +3783,9 @@ def _auto_run(dest):
                      "정지 요청이 전달되지 않습니다")
     try:
         with _auto_lock:
+            # 토글은 **여기서 한 번만** 읽는다 — 도는 중에 바뀌어도 이번 여정은 안 바뀐다.
             _AUTO.update(active=True, dest=dest, cancel=False, force=False,
+                         auto_advance=_auto_advance_pref,
                          phase="", mode="", paused=False)
         d = _loc(dest)
         if not d:
@@ -3887,11 +3915,13 @@ def _auto_run(dest):
         _elev_scene(0)                          # place=hall + 인식자세(블로킹)
         if not _auto_hold("① 호출 버튼 선택"): _auto_abort_elev(); return
         _elev_select("^" if up else "s")        # 호출버튼 자동 선택 (^=상행 s=하행)
-        if _elev_wait_ready(tok=("^" if up else "s")):
+        _align_ok = _elev_wait_ready(tok=("^" if up else "s"))
+        if _align_ok:
             _auto_set("① 호출", f"정렬 완료 ✅ — '다음' 누르면 호출({dir_txt}) 누름", wait=True)
         else:
             _auto_set("① 호출", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
-        if not _auto_wait_confirm(): _auto_abort_elev(); return
+        # 정렬 성공일 때만 자동으로 넘긴다. 실패는 사람이 엘베UI 에서 맞춰야 풀린다.
+        if not _auto_wait_confirm(auto_ok=_align_ok): _auto_abort_elev(); return
         if not _press_or_pass():                # 다음 → 호출버튼 누르기
             _auto_abort_elev(); return
         _auto_set("① 호출", "호출 버튼 누르는 중... (팔 복귀까지 대기)")
@@ -3962,7 +3992,9 @@ def _auto_run(dest):
                 else:   # "unavailable" — 감지 불가, 기존 동작(게이트 없이 즉시 개방)으로 폴백
                     _auto_set("③ 문열림", "문 열림 대기 중... 문 열리면 '다음'",
                               wait=True, phase="door")
-                ok_ = _auto_wait_confirm()
+                # 🔴 `_why3=="ok"`(실제 감지) 일 때만 자동. timeout(90초 안에 감지 못 함)·
+                #   전송 실패에서 자동으로 넘기면 **닫힌 문으로 전진한다.**
+                ok_ = _auto_wait_confirm(auto_ok=(_why3 == "ok"))
         if not ok_: _auto_abort_elev(); return
 
         # ④ 엘리베이터 안: 전진 185 (자동 안무)
@@ -3985,11 +4017,13 @@ def _auto_run(dest):
         _elev_scene(4)                          # place=cab + 인식자세
         if not _auto_hold("⑤ 층 버튼 선택"): _auto_abort_elev(); return
         _elev_select(dest_floor)                # 층버튼 자동 선택
-        if _elev_wait_ready(tok=dest_floor):
+        _align_ok = _elev_wait_ready(tok=dest_floor)
+        if _align_ok:
             _auto_set("⑤ 층선택", f"정렬 완료 ✅ — '다음' 누르면 {dest_floor}층 누름", wait=True)
         else:
             _auto_set("⑤ 층선택", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
-        if not _auto_wait_confirm(): _auto_abort_elev(); return
+        # 정렬 성공일 때만 자동으로 넘긴다. 실패는 사람이 엘베UI 에서 맞춰야 풀린다.
+        if not _auto_wait_confirm(auto_ok=_align_ok): _auto_abort_elev(); return
         if not _press_or_pass():                # 다음 → 층버튼 누르기
             _auto_abort_elev(); return
         _auto_set("⑤ 층선택", f"{dest_floor}층 버튼 누르는 중... (팔 복귀까지 대기)")
@@ -4424,6 +4458,17 @@ def auto_goto():
     _jr_begin(dest, request.remote_addr)     # 블랙박스 run_start — 스레드 시작 직전
     threading.Thread(target=_auto_run, args=(dest,), daemon=True).start()
     return jsonify(ok=True, dest=dest)
+
+@app.route("/auto_advance", methods=["POST"])
+def auto_advance_set():
+    """자동 넘김 토글. 여정 **밖에서만** 바꾼다 — 도는 중에 바꾸면 흐름이 갈린다."""
+    global _auto_advance_pref
+    if _AUTO.get("active"):
+        return jsonify(ok=False, error="여정 중에는 바꿀 수 없습니다 — 다음 여정부터 적용"), 409
+    _auto_advance_pref = bool((request.json or {}).get("on", False))
+    _log("AUTO", f"자동 넘김 토글 — {'ON' if _auto_advance_pref else 'OFF'}")
+    return jsonify(ok=True, on=_auto_advance_pref)
+
 
 @app.route("/auto_confirm", methods=["POST"])
 def auto_confirm():

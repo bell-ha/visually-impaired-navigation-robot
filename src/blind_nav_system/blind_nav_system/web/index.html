@@ -600,6 +600,20 @@
                  oninput="_speedDisplay(this.value)" onchange="_speedApply(this.value)">
           <div id="speed-note" style="font-size:0.72rem;color:var(--warn)"></div>
         </div>
+        <!-- 🔴 자동 넘김 — 켜면 "센서가 성공을 확인한" 확인 단계를 클릭 없이 넘어간다.
+             켜도 항상 사람을 기다리는 자리가 둘 있다(아래 안내 문구 참조). 여정 중에는
+             바꿀 수 없다(409) — 도는 중에 바뀌면 사람이 기대한 흐름과 실제가 갈린다. -->
+        <div id="auto-adv-row" style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+          <label class="toggle-switch" title="센서가 확인한 단계는 '다음' 없이 자동 진행">
+            <input type="checkbox" id="auto-adv" onchange="_autoAdvApply(this.checked)">
+            <span class="toggle-slider"></span>
+          </label>
+          <div style="min-width:0;flex:1">
+            <div style="font-size:0.8rem;color:var(--text)">자동 넘김</div>
+            <div id="auto-adv-note" style="font-size:0.7rem;color:var(--text-dim);line-height:1.25">
+              꺼짐 — 단계마다 '다음'을 누릅니다</div>
+          </div>
+        </div>
         <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
           <select id="auto-dest" style="flex:1;background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:0.82rem;"></select>
           <button id="auto-go-btn" onclick="autoGoto()" style="background:var(--ok);color:#fff;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:700;font-size:0.82rem;white-space:nowrap;">🚀 출발</button>
@@ -717,6 +731,28 @@ function loadLocations() {
 }
 loadLocations();
 loadRobotSpeed();   // 실제 주행 속도 1회
+
+function _autoAdvApply(on) {
+  const note = document.getElementById('auto-adv-note');
+  fetch('/auto_advance', {method:'POST', headers:{'Content-Type':'application/json'},
+                          body: JSON.stringify({on: !!on})})
+    .then(r => r.json().then(d => ({ok: r.ok, d})))
+    .then(({ok, d}) => {
+      if (!ok || !d.ok) {                       // 여정 중이면 409 — 토글을 되돌린다
+        document.getElementById('auto-adv').checked = !on;
+        if (note) note.textContent = d.error || '바꾸지 못했습니다';
+        return;
+      }
+      if (!note) return;
+      note.textContent = d.on
+        ? "켜짐 — 센서가 확인한 단계는 자동. 단 ①③⑤ 실패 때와 '이동중→하차'는 그대로 묻습니다"
+        : "꺼짐 — 단계마다 '다음'을 누릅니다";
+    })
+    .catch(() => {
+      document.getElementById('auto-adv').checked = !on;
+      if (note) note.textContent = '서버에 연결하지 못했습니다';
+    });
+}
 
 function getSpeed() { return parseFloat(document.getElementById('speed').value); }   // 슬라이더 값 = m/s 직접
 
