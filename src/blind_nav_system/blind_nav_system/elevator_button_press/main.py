@@ -1278,6 +1278,14 @@ state = {
     "base_travel":  0.0,    # 누적 이동량 (m)
     "press_ready":  False,  # 정조준+근접 래치 (진입 0.25/유지 0.28 히스테리시스)
     "align_note":   None,   # X정렬 상태 메시지
+    # 🔴 2026-10-12 — "무엇이 막고 있나"를 대시보드가 읽을 수 있게 올린다.
+    #   종전에는 `[ALIGN] ⚠ … 막힌 것 → ex: 베이스 예산 소진(15cm/15cm)` 이 **로그에만**
+    #   남았다. 그래서 대시보드는 /press 거부 문자열("CENTERED 상태가 아님")만 보고
+    #   **"베이스는 움직이지 말고 조준트림·lift 로 맞춰라"** 를 띄웠는데, 진짜 막은 것은
+    #   **베이스 예산 소진(= 주차를 옮겨야 함)** 이었다 — 지시가 정반대였다.
+    #   (2026-10-07 17:37 122호: 그 지시를 받은 사람이 6.6초 뒤 다시 눌렀고 여정이 끝났다.)
+    "align_block":  None,   # 정조준을 막고 있는 사유 목록(list[str]) — 없으면 None
+    "align_block_ts": 0.0,  # 그 사유를 마지막으로 갱신한 시각(낡은 값 구분용)
     "pressing":     False,  # 누르기 시퀀스 진행 중
     "press_status": None,   # 누르기 진행 메시지
     "authority":    False,   # 이동 제어권 — 대시보드(8080)가 부여/회수하는 주도권.
@@ -2264,6 +2272,9 @@ def status():
                    lift=s.get("lift"), wall_tilt=s.get("wall_tilt"),
                    wall_flat=s.get("wall_flat"),
                    base_align=s.get("base_align"), align_note=s.get("align_note"),
+                   align_block=s.get("align_block"),
+                   align_block_age=(None if not s.get("align_block_ts") else
+                                    round(time.time() - s["align_block_ts"], 1)),
                    guard_off=s.get("guard_off"), place=s.get("place"),
                    trim_x=_aim_trim["x_cm"], trim_y=_aim_trim["y_cm"],
                    ready=bool(s.get("centered") and s.get("press_ready")),
@@ -6542,6 +6553,11 @@ class ElevatorTracker(Node):
                     elif _bt >= BASE_TRAVEL_MAX:
                         _blk.append(f"ex: 베이스 예산 소진({_bt*100:.0f}cm/"
                                     f"{BASE_TRAVEL_MAX*100:.0f}cm)")
+                # 로그와 **같은 내용**을 상태에도 올린다 — 대시보드가 사람에게 줄 지시를
+                # 이걸로 만든다. 비면 None(모름)이지 "막힌 것 없음"이 아니다.
+                with state_lock:
+                    state["align_block"]    = list(_blk) if _blk else None
+                    state["align_block_ts"] = time.time()
                 self._dlog(f"[ALIGN] ⚠ {_held:.0f}초째 정조준 밖 "
                            f"(x{ex:+.0f} y{ey:+.0f}px · 허용 ±{dz}px) — "
                            + ("막힌 것 → " + " / ".join(_blk) if _blk else

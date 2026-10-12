@@ -3550,6 +3550,43 @@ def _auto_notify(msg: str, voice: bool = True, stow_hint: bool = False):
 # 여기 없는 사유는 전부 중단이다(분류를 못 하면 계속 갈 근거가 없다).
 _PRESS_RETRY_WAIT = ("인식이 멈춰 있음", "버튼 관측이 오래됨", "아직 접근 완료 전")
 _PRESS_RETRY_HELP = ("CENTERED 상태가 아님", "정렬 어긋남")
+
+# 한 번에 허용할 누르기 재시도 횟수. 종전 1회였는데, 사람이 **틀린 지시**를 받고 6.6초 만에
+# 다시 누른 뒤 여정이 끝난 사고가 있었다(2026-10-07 17:37 122호). 지시를 고쳐도 한 번에
+# 풀린다는 보장이 없다 — 주차를 옮기는 수습은 여러 번 걸린다. 사람이 '다음'을 누르는 한
+# 계속 받되, 구조적으로 안 풀리는 경우를 위해 상한을 둔다(각 회차는 _auto_wait_confirm
+# 900초 안에서 사람이 취소할 수 있다).
+_PRESS_RETRY_MAX = 3
+
+
+def _press_block_help(st):
+    """엘베앱이 보고한 '정조준을 막고 있는 사유'를 **사람이 할 행동**으로 바꾼다.
+
+    🔴 이 함수가 있는 이유 — 2026-10-07 17:37 122호:
+       엘베앱 로그: `막힌 것 → ex: 베이스 예산 소진(15cm/15cm)`  (= 주차를 옮겨야 함)
+       대시보드 지시: `베이스는 움직이지 말고 조준트림·lift 로 맞춘 뒤 '다음'`
+       **정반대였다.** 대시보드는 /press 거부 문자열만 보고 지시를 지어냈고, 진짜 사유는
+       엘베앱 로그에만 있었다. 그래서 사유를 /status(`align_block`)로 올려 여기서 읽는다.
+    사유를 모르면(None) 단정하지 않는다 — 추측한 지시가 틀린 지시보다 낫지 않다.
+    """
+    blk = (st or {}).get("align_block") or []
+    age = (st or {}).get("align_block_age")
+    if not blk:
+        return ("무엇이 막고 있는지 엘베앱이 아직 보고하지 않았다 — "
+                "엘베UI(:5000)의 정렬 메시지를 직접 보고 맞춘 뒤 '다음'")
+    acts = []
+    for b in blk:
+        if "예산 소진" in b:
+            acts.append("🔴 좌우 보정 예산을 다 썼다 — **로봇 주차 위치를 옮겨야** 한다"
+                        "(조준트림·lift 로는 안 풀린다). 옮긴 뒤 엘베UI에서 몸체이동을 다시 켜라")
+        elif "몸체이동 OFF" in b:
+            acts.append("몸체이동이 꺼져 있다 — 엘베UI에서 **몸체이동을 켜라**")
+        elif "모양 추론" in b or "글자가 읽혀야" in b:
+            acts.append("버튼 **글자가 안 읽힌다** — 조명·각도를 바꾸거나 엘베UI 조준트림(⇧)으로 맞춰라")
+        else:
+            acts.append(b)
+    stale = "" if (age is None or age <= 20) else f" (이 진단은 {age:.0f}초 전 것이다)"
+    return " / ".join(acts) + stale
 _PRESS_WAIT_SEC   = 4.0     # 재인식·접근이 한 번 더 돌 만큼만. 길게 잡으면 사용자가 방치된다
 
 
@@ -3609,16 +3646,36 @@ def _press_or_pass() -> bool:
             _auto_set("오류", "취소됨 — 여정 중단")
             return False
     elif any(k in why for k in _PRESS_RETRY_HELP):
-        # 조준이 어긋난 것 — 운영자가 엘베UI에서 맞춰줘야 풀린다.
-        # 베이스를 움직이면 정렬이 통째로 날아가므로 그러지 말라고 못박는다.
-        _auto_notify("버튼 위치를 다시 맞추고 있습니다. 잠시만 기다려 주세요")
-        _auto_set("재시도",
-                  f"누르기 거부: {why} — 베이스는 움직이지 말고 엘베UI 조준트림(⇧)·"
-                  "lift(+/-)로 맞춘 뒤 '다음'", wait=True)
-        if not _auto_wait_confirm():
-            _auto_notify("여정을 멈췄습니다", stow_hint=True)
-            _auto_set("오류", "취소됨 — 여정 중단")
-            return False
+        # 조준이 어긋난 것 — 사람이 수습해야 풀린다. **무엇을 하라고 할지는 엘베앱이
+        # 보고한 사유에서 만든다**(_press_block_help). 종전처럼 여기서 지어내지 않는다.
+        for _try in range(1, _PRESS_RETRY_MAX + 1):
+            _help = _press_block_help(st)
+            _auto_notify("버튼 위치를 다시 맞춰 주세요")
+            _auto_set("재시도",
+                      f"누르기 거부({_try}/{_PRESS_RETRY_MAX}): {why} — {_help} → 맞춘 뒤 '다음'",
+                      wait=True)
+            if not _auto_wait_confirm():
+                _auto_notify("여정을 멈췄습니다", stow_hint=True)
+                _auto_set("오류", "취소됨 — 여정 중단")
+                return False
+            if not _auto_hold("누르기 재시도"):
+                _auto_notify("여정을 멈췄습니다", stow_hint=True)
+                _auto_set("오류", "취소됨 — 여정 중단")
+                return False
+            ok_r, reason_r = _elev_press()
+            if ok_r:
+                return True
+            st = _elev_status() or st
+            if st is not None and (st.get("pressing") or st.get("scene_next_ok")):
+                _log("AUTO", f"재시도 거부({reason_r or '사유 없음'})지만 엘베앱 상태는 진행 중 — 통과")
+                return True
+            why = reason_r or why
+        # 상한까지 갔다 — 끊되, **마지막으로 본 사유를 문구에 남긴다**(종전엔 거부 문자열만 남아
+        # 운영자가 원인을 못 가렸다).
+        _auto_notify("누르기를 계속하지 못해 멈췄습니다", stow_hint=True)
+        _auto_set("오류", f"재시도 {_PRESS_RETRY_MAX}회 모두 거부: {why} — "
+                          f"{_press_block_help(st)} — 여정 중단")
+        return False
     else:
         _auto_notify("누르기 명령을 보내지 못해 멈췄습니다", stow_hint=True)
         _auto_set("오류", f"누르기 거부: {why} — 여정 중단")
