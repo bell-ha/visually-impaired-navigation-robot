@@ -7294,7 +7294,7 @@ class ElevatorTracker(Node):
         if prev is not None and abs(float(val) - prev) > 0.003 and dt < 2.0:
             self._dlog(f"[LIFT] ⚠ 덮어쓰기 — {dt * 1000:.0f}ms 전 {prev:.3f}"
                        f"({pwhere}) → 지금 {float(val):.3f}({where}). "
-                       "단일-goal 서버라 **나중 것이 이긴다**")
+                       "단일-goal 서버라 나중 것이 이긴다")
         self._lift_cmd = (float(val), time.time(), where)
 
     def _send_goal(self, joint_names, positions) -> bool:

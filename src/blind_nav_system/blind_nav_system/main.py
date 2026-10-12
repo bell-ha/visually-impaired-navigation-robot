@@ -1982,7 +1982,11 @@ _auto_advance_pref = False
 _auto_lock = threading.Lock()
 
 def _auto_set(step, msg, wait=False, phase=None):
-    """단계 상태 갱신. phase=전체 흐름 트래커에서 하이라이트할 단계 id(없으면 유지)."""
+    """단계 상태 갱신. phase=전체 흐름 트래커에서 하이라이트할 단계 id(없으면 유지).
+
+    🔴 msg 에 마크다운(**굵게**)을 쓰지 마라. 대시보드는 변환기가 없고 이 문장은
+    jv-msg 의 textContent·로그의 escHtml 로 들어가므로 별표가 그대로 화면에 보인다
+    (2026-10-12 에 8군데를 걷어냈다). 강조가 필요하면 🚨/🔴 기호를 앞에 붙여라."""
     with _auto_lock:
         _AUTO["step"] = step; _AUTO["msg"] = msg; _AUTO["waiting"] = wait
         if phase is not None:
@@ -2687,7 +2691,7 @@ def _nav_params_restore_normal(why=""):
         _log("NAV2", f"{_NAV2_PAD_PARAM} = {want} 재설정 성공"
                      + (f" [{why}]" if why else ""))
         return True
-    _log("NAV2", f"🚨 {_NAV2_PAD_PARAM} 재설정 실패 → **주행 거부**. {err}"
+    _log("NAV2", f"🚨 {_NAV2_PAD_PARAM} 재설정 실패 → 주행 거부. {err}"
                  + (f" [{why}]" if why else ""))
     return False
 
@@ -3798,12 +3802,12 @@ def _press_block_help(st):
     acts = []
     for b in blk:
         if "예산 소진" in b:
-            acts.append("🔴 좌우 보정 예산을 다 썼다 — **로봇 주차 위치를 옮겨야** 한다"
+            acts.append("🔴 좌우 보정 예산을 다 썼다 — 로봇 주차 위치를 옮겨야 한다"
                         "(조준트림·lift 로는 안 풀린다). 옮긴 뒤 엘베UI에서 몸체이동을 다시 켜라")
         elif "몸체이동 OFF" in b:
-            acts.append("몸체이동이 꺼져 있다 — 엘베UI에서 **몸체이동을 켜라**")
+            acts.append("몸체이동이 꺼져 있다 — 엘베UI에서 몸체이동을 켜라")
         elif "모양 추론" in b or "글자가 읽혀야" in b:
-            acts.append("버튼 **글자가 안 읽힌다** — 조명·각도를 바꾸거나 엘베UI 조준트림(⇧)으로 맞춰라")
+            acts.append("버튼 글자가 안 읽힌다 — 조명·각도를 바꾸거나 엘베UI 조준트림(⇧)으로 맞춰라")
         else:
             acts.append(b)
     stale = "" if (age is None or age <= 20) else f" (이 진단은 {age:.0f}초 전 것이다)"
@@ -4250,7 +4254,7 @@ def _auto_run(dest):
         #   대신 사람이 이미 멈춰 서는 이 자리에서 **묻기만** 한다.
         #   특히 3·4층은 버튼 높이가 2026-10-12 줄자 추정값이고 **눌러서 확인된 적이 0회**다.
         _auto_set("이동중",
-                  f"{dest_floor}층 버튼에 **불이 켜졌는지 확인**하고 '다음' — "
+                  f"{dest_floor}층 버튼에 불이 켜졌는지 확인하고 '다음' — "
                   "안 켜졌으면 엘베UI에서 다시 누르세요",
                   wait=True, phase="moving")
         if not _auto_wait_confirm(): _auto_abort_elev(); return
@@ -5468,7 +5472,7 @@ def serial_loop():
                             f"{_SERIAL_SUM_SEC / 60:.0f}분마다 1줄). "
                             "준비바의 '손잡이' 칸이 고장 여부를 말한다")
             elif _msg != _last_msg:
-                _log("ARD", f"손잡이 시리얼 실패 **사유 변경**({_n}회째): {_msg}")
+                _log("ARD", f"손잡이 시리얼 실패 사유 변경({_n}회째): {_msg}")
             elif time.monotonic() - _last_sum >= _SERIAL_SUM_SEC:
                 _last_sum = time.monotonic()
                 _log("ARD", f"손잡이 시리얼 여전히 안 붙는다 — {_n}회 누적, "
