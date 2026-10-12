@@ -610,11 +610,16 @@ def _obs_brief(obs) -> str:
         # 신선도 게이트에 걸렸거나 아예 안 온 경우 — "정상"이 아니라 "모름"이다.
         return "관측 없음/오래됨 — 판정 불가"
     mark = {"ok": "정상", "stale": "끊김", "unknown": "미관측"}
+    # 🔴 **정상인 것은 적지 않는다.** 셋을 항상 나열하면 문자열이 495px 가 되는데
+    #    320px 에서 알약 한 줄은 248px 뿐이라 절반이 … 로 잘리고, 정작 **어느 센서가
+    #    문제인지가 사라진다**(2026-10-12 iframe 실측). 문제 있는 것만 적으면
+    #    평소엔 "관측 정상" 5자로 끝나고, 사고 때만 길어진다.
     # 몸체캠은 표시만 하고 바를 빨갛게 만들지 않으므로, 초록 바에 "끊김"이
     # 떠 있어도 모순이 아니라는 걸 꼬리표로 알린다.
-    return " · ".join(f"{lbl} {mark.get(obs.get(k), '미관측')}"
-                      for k, lbl in (("driver", "팔"), ("body", "몸체캠(표시)"),
-                                     ("depth", "depth")))
+    bad = [f"{lbl} {mark.get(obs.get(k), '미관측')}"
+           for k, lbl in (("driver", "팔"), ("body", "몸체캠(표시)"), ("depth", "depth"))
+           if obs.get(k) != "ok"]
+    return " · ".join(bad) if bad else "관측 정상"
 
 
 def _readiness_poll_loop():
@@ -625,8 +630,12 @@ def _readiness_poll_loop():
             loc = _query_lc(_lc_loc_client)
             nav = _query_lc(_lc_nav_client)
             worst = min([loc, nav], key=lambda d: order[d["status"]])
-            _ready_val["nav2"] = {"status": worst["status"],
-                                  "detail": f"측위 {loc['detail']} / 주행 {nav['detail']}"}
+            # 둘이 같은 말이면 합친다 — "측위 X / 주행 X" 는 44자(333px)가 되어 320px 에서
+            # 뒤쪽이 잘리고, 그러면 **측위만 죽은 건지 둘 다인지 구분이 안 된다**(2026-10-12).
+            _ready_val["nav2"] = {
+                "status": worst["status"],
+                "detail": (f"측위·주행 {loc['detail']}" if loc["detail"] == nav["detail"]
+                           else f"측위 {loc['detail']} / 주행 {nav['detail']}")}
 
             try:
                 import requests   # 로컬 import — urllib과 달리 프록시 우회(proxies=)가 명시적
@@ -1427,9 +1436,10 @@ def _readiness_signal(key, label):
         if since <= grace:
             return {"status": "unknown", "age_sec": None,
                     "detail": f"{label} 미수신 (기동 {since:.0f}s — {grace:.0f}s 까지 대기)"}
+        # ** 는 마크다운이 아니다 — readiness 는 textContent 로 들어가므로 별표가
+        # 그대로 화면에 보인다(앞에 ✕ 기호가 이미 붙으므로 강조도 중복이었다).
         return {"status": "bad", "age_sec": None,
-                "detail": f"{label} **한 번도 수신 안 됨** ({since / 60:.0f}분째) — "
-                          "연결·포트를 확인하세요"}
+                "detail": f"{label} 한 번도 수신 안 됨 ({since / 60:.0f}분째) — 연결 확인"}
     age = time.monotonic() - updated_at
     if age > _READY_THRESH[key]:
         return {"status": "bad", "age_sec": round(age, 1),
