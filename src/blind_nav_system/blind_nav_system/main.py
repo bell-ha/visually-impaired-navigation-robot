@@ -1007,11 +1007,32 @@ def elev_authority_route():
 @app.route("/mode", methods=["POST"])
 def set_mode():
     global _manual_mode, _manual_active
-    _g = _journey_gate('수동/자동 모드 전환')
-    if _g:
-        return _g
     data = request.json or {}
     _manual_mode = data.get("manual", False)
+    # 🔴 2026-10-12 — **수동 전환은 여정 중에도 막지 않는다.**
+    #   종전에는 `_journey_gate` 가 "자동 여정 진행 중 — 취소 후 다시" 로 409 를 돌려줬다.
+    #   그런데 수동 전환은 "여정을 흔드는 조작"이 아니라 **사람이 주도권을 되찾는 조작**이고,
+    #   막아 놓으면 **남는 탈출구가 물리 런스톱뿐**이 된다.
+    #   2026-10-12 12:58:05 실측: 엘리베이터에 사람이 가득 차서 사용자가 수동으로 바꾸려 했는데
+    #   거부당했고(`⛔ 여정 중 조작 거부 — 수동/자동 모드 전환 [⑤ 층선택]`), 결국 물리
+    #   버튼으로 로봇을 껐다 켰다. 그 뒤 속도 변경도 9회 연속 거부됐다.
+    #   (`/stow_arm` 이 같은 이유로 이미 예외다 — 그쪽 주석 참조.)
+    #
+    #   🔴 다만 **그냥 열면 바퀴 주인이 둘이 된다.** 여정 스레드가 계속 돌면서 /goto·안무를
+    #   다시 쏘기 때문이다. 그래서 **여정을 먼저 끝내고** 수동으로 넘긴다 — 순서가 안전의 전부다:
+    #     ① 여정 취소 플래그(= /auto_cancel 과 같은 경로) → 여정 스레드가 스스로 정리하고 끝난다
+    #     ② interface /cancel → Nav2 목표 취소
+    #     ③ 엘베 리스 회수 → 엘베앱이 바퀴를 못 쓴다
+    #   ①을 ②③보다 먼저 해야 여정이 "취소됐다"를 보고 재발행을 멈춘다.
+    #   자동으로 **되돌리는** 것(manual=False)은 여정과 무관하므로 그대로 둔다.
+    if _manual_mode and _AUTO.get("active"):
+        with _auto_lock:
+            _AUTO["cancel"] = True
+            _AUTO["waiting"] = False
+            _step = _AUTO.get("step", "")
+        _log("AUTO", f"⛔ 수동 전환 — 여정을 끝낸다 [{_step}] ({request.remote_addr})")
+        _jr("human", "cancel", step=_step, remote_addr=request.remote_addr,
+            why="수동 전환(사람이 주도권 회수)")
     if _manual_mode:
         # 수동 전환 시: 진행 중인 목적지 취소 + LOCKED 상태로
         _write("iface", "/cancel")
@@ -2160,9 +2181,17 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None, check_yaw=False
         if sig_usable:
             _txt, _mt = _nav_active_read()
             if _txt is None:
-                # 파일 없음·읽기 실패 → 신호를 안 쓴다(구버전 interface·수동 기동).
-                sig_usable = False
-                _log("AUTO", f"{_NAV_ACTIVE_FILE} 를 못 읽는다 — Nav2 완료 신호 없이 진행")
+                # 🔴 2026-10-12 수정 — 종전에는 **첫 읽기에서 파일이 없으면 영구 포기**했다.
+                #   그런데 `/tmp` 는 재부팅으로 비워지고, 파일은 interface 가 첫 `/goto` 를
+                #   **받아서 처리한 뒤**에야 생긴다. 우리는 `_write` 직후에 읽으므로 항상
+                #   그보다 빠르다 → **재부팅 후 첫 여정은 신호가 100% 죽는다.**
+                #   (2026-10-12 12:50 실측: 12:43 부팅 → 12:50:21 goto → "못 읽는다" 로
+                #    영구 포기 → 파일은 12:53:43 에 생겼다.)
+                #   그래서 "파일 없음" 을 "1 아직 못 봄" 과 **같게** 다룬다 — 상한까지 기다린다.
+                if time.monotonic() - sig_t0 >= _NAV_SIGNAL_WAIT_S:
+                    sig_usable = False
+                    _log("AUTO", f"{_NAV_SIGNAL_WAIT_S:.0f}초 안에 {_NAV_ACTIVE_FILE} 가 "
+                                 "안 생겼다 — Nav2 완료 신호 없이 진행(기존 판정)")
             elif sig_seen_1 is None:
                 if _txt == "1" and _mt is not None and _mt >= sig_t0_wall - 1.0:
                     sig_seen_1 = time.monotonic()
