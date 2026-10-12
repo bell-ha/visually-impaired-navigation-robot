@@ -7075,15 +7075,26 @@ class ElevatorTracker(Node):
                                 "note": "팔 최대 전진 — 가림 정도 기록용, 판정 안 씀"})
 
             # 접촉 감지 (위치 오차): 명령보다 5mm 이상 못 갔으면 막힌 것 = 닿은 것
-            contact = None        # 판정 못 한 경우를 None 으로 남긴다(프레임 메타에 실린다)
+            # 🔴 2026-10-12 — **접촉 '판정'을 없앴다. 측정만 남긴다.**
+            #   종전: shortfall > 5mm → "닿음", 아니면 "허공" → 누르기 실패 선언.
+            #   그 판정은 **틀린 쪽으로 틀렸다.** 팔이 명령대로 끝까지 나가도(shortfall≈0)
+            #   버튼이 그 깊이에 있으면 눌린다 — 2026-10-02 차내 1층이 "✗ 허공" 으로 찍혔는데
+            #   **버튼 점등이 사진으로 확인**됐다. 전수 29건 중 11건이 "허공"인데, 그 중 몇이
+            #   진짜 미접촉인지 이 지표로는 **가를 수 없다**(메모리 press-illumination-signal-status:
+            #   "차내는 현 지표로 미분리").
+            #   그리고 판정이 맞았다 해도 **코드가 할 수 있는 일이 없다** — 재시도 로직이 없고,
+            #   결국 사람에게 "불이 켜졌으면 다음" 을 묻는다. 사람은 어차피 눈으로 본다.
+            #   그 사이 사용자는 틀린 "실패" 때문에 '다음'을 여러 번 더 눌러야 했다(10/7 ⑤ 3회).
+            #   → **shortfall 은 계속 기록한다**(진짜 데이터다). 다만 성공/실패로 부르지 않고,
+            #     누르기 실패 신호(press_fail_ts)도 여기서는 안 올린다.
+            shortfall_mm = None
             with state_lock:
                 actual = state["arm_ext"]
             if actual is not None:
-                shortfall = push - actual
-                contact = shortfall > 0.005
-                st(f"접촉 판정: {'✓ 닿음' if contact else '✗ 허공?'} "
-                   f"(명령 {push:.3f} vs 실제 {actual:.3f}, 차이 {shortfall*1000:.0f}mm)")
-                time.sleep(0.8)  # 판정 메시지 읽을 시간
+                shortfall_mm = (push - actual) * 1000.0
+                st(f"팔 진행 측정: 명령 {push:.3f} vs 실제 {actual:.3f} "
+                   f"(차이 {shortfall_mm:+.0f}mm) — 기록만, 접촉 여부는 사람이 본다")
+                time.sleep(0.8)
 
             st(f"5/6 복귀 중… →{start_ext:.3f}m")
             self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
@@ -7091,8 +7102,8 @@ class ElevatorTracker(Node):
             #    A 와 같은 자세여야 비교가 성립하므로 두 메타의 lift/arm_ext 를 대조할 것.
             # D: C+2초 — 점등이 늦는 패널 대비. 둘 다 스레드에서 쓰므로 여기서 안 기다린다.
             _press_capture(self, _pdir, "C_after",
-                           {"roi_ocr": _proi, "contact": contact,
-                            "note": "복귀 완료 직후 — 주 판정"})
+                           {"roi_ocr": _proi, "shortfall_mm": shortfall_mm,
+                            "note": "복귀 완료 직후 — 증거 프레임(판정 아님)"})
             _press_capture(self, _pdir, "D_after2s",
                            {"roi_ocr": _proi, "note": "C+2초 — 점등 지연 대비"},
                            delay=2.0)
@@ -7114,17 +7125,12 @@ class ElevatorTracker(Node):
             # (실패일수록 더 필요하다). 그래서 **선언만** 갈라진다 — 중복 복귀도 없다.
             #
             # contact is None(팔 위치 arm_ext 를 못 읽음)도 성공이 아니다: 모르면 fail-closed.
-            if contact is not True:
-                why = (f"허공 (명령 {push:.3f} vs 실제 {actual:.3f}) — 버튼에 닿지 않았다"
-                       if contact is False else
-                       "접촉 판정 불가 — 팔 위치(arm_ext)를 읽지 못했다")
-                st(f"❌ {why}. 누르기 실패로 처리한다")
-                self._dlog(f"[PRESS] ⛔ 누르기 실패 — {why}")
-                with state_lock:
-                    state["press_fail_ts"] = time.time()   # 대시보드가 즉시 끊는 근거
-                # 타겟은 **지우지 않는다** — 지우면 운영자·여정의 재시도가 버튼을 다시
-                # 골라야 한다. 성공 경로만 타겟을 해제한다(아래).
-                return
+            # 🔴 종전에 여기서 `if contact is not True:` 로 **누르기 실패를 선언**하고
+            #   `press_fail_ts` 를 올려 대시보드가 사람에게 되묻게 했다. 위 주석의 이유로 뺐다 —
+            #   틀린 실패가 사용자의 확인 절차만 늘렸다. 복귀·그리퍼 열기·증거 프레임은 원래
+            #   양쪽 경로가 똑같이 했으므로, 분기를 지워도 **동작은 그대로**이고 선언만 사라진다.
+            #   (정렬 실패·세로 게이트 쪽 press_fail_ts 는 **건드리지 않았다** — 그쪽은 누르기
+            #    전에 멈추는 것이라 성격이 다르다.)
             st("✅ 누르기 완료")
             # 수행 완료 → 타겟 자동 해제 (안 하면 추적·자동접근이 같은 버튼에 재시작됨)
             with state_lock:
