@@ -722,6 +722,7 @@ def init_ros():
     _cmd_pub  = _cmd_node.create_publisher(Twist, "/stretch/cmd_vel", 10)
     _cmd_node.create_subscription(Twist,        "/stretch/cmd_vel",           _cmdvel_callback,       10)
     _cmd_node.create_subscription(BatteryState, "/battery",                   _battery_callback,      10)
+    _cmd_node.create_subscription(ROSString,    "/people_tracker/people",     _people_callback,       10)
     _cmd_node.create_subscription(ROSString,    "/obstacle_pusher/objects",   _obstacle_objects_cb,   10)
     _cmd_node.create_subscription(ROSString,    "/obstacle_pusher/decision",  _obstacle_decision_cb,  10)
     # AMCL 위치 — QoS 이중 구독: 퍼블리셔가 transient_local(latched)이든
@@ -1471,6 +1472,7 @@ def readiness():
         nav2=_readiness_polled("nav2", "nav2"),
         gripper_camera=_readiness_polled("gripper_camera", "그리퍼캠"),
         elev_app=_readiness_polled("elev_app", "엘베앱"),
+        people_tracker=_readiness_people(),
     )
 
 @app.route("/robot_speed", methods=["GET", "POST"])
@@ -1540,6 +1542,59 @@ def _read_social_nav_flag() -> bool:
 
 
 _social_nav_enabled = _read_social_nav_flag()   # 기본 비활성, 단 파일이 있으면 그걸 따른다
+
+# 🔴 2026-10-12 — 사람 추적 상태를 대시보드도 본다.
+#   종전에는 `/people_tracker/people` 을 **interface 쪽만** 구독했고, 대시보드는 그게
+#   떠 있는지조차 몰랐다. 그래서 사용자가 "사회적 회피" 토글만 켜고 주행했는데
+#   people_tracker 가 안 떠 있으면 **아무 일도 안 일어나고 아무 표시도 없었다.**
+#   2026-10-12 실측: 12:50:39 에 토글 ON 기록이 남았는데 경유지가 끼워진 건 **0건**이고,
+#   사람이 없어서인지 추적기가 안 떠서인지 **기록으로 가릴 수 없었다.**
+#   → (a) readiness 에 표시하고 (b) 여정 블랙박스에 1Hz 로 남긴다.
+_people_state: dict = {"n": None, "ts": 0.0, "people": [], "classes": {}}
+_people_lock = threading.Lock()
+
+
+def _people_callback(msg):
+    try:
+        d = json.loads(msg.data or "{}")
+        ppl = d.get("people") or []
+    except Exception:
+        return
+    cls: dict = {}
+    for q in ppl:
+        k = str(q.get("classification") or "?")
+        cls[k] = cls.get(k, 0) + 1
+    with _people_lock:
+        _people_state["n"]      = len(ppl)
+        _people_state["ts"]     = time.time()
+        _people_state["people"] = ppl[:12]     # 기록 폭주 방지 — 12명까지만
+        _people_state["classes"] = cls
+
+
+def _readiness_people():
+    """사람 추적(people_tracker) 상태. 🔴 "사회적 회피가 켜져 있는데 추적기가 없다" 를
+    **화면에 보이게** 하는 것이 목적이다 — 그 조합이면 토글은 켜져 있어도 아무 일도
+    안 일어난다. 2026-10-12 에 정확히 그 상태로 주행했고 아무 표시가 없었다.
+    사회적 회피가 꺼져 있으면 추적기가 없어도 문제가 아니므로 등급을 낮춘다."""
+    n, age, _ = _people_snapshot()
+    on = _read_social_nav_flag()
+    if n is None:
+        return {"status": ("bad" if on else "unknown"), "age_sec": None,
+                "detail": ("🔴 사회적 회피가 **켜져 있는데** 사람 추적이 한 번도 수신되지 "
+                           "않았습니다 — people_tracker/run.sh 를 띄워야 회피가 동작합니다"
+                           if on else "미기동 (사회적 회피 OFF 라 지금은 무관)")}
+    if age is not None and age > 10:
+        return {"status": "bad", "age_sec": age,
+                "detail": f"사람 추적이 {age:.0f}초째 끊겼습니다"}
+    return {"status": "ok", "age_sec": age,
+            "detail": f"정상 — 현재 {n}명" + ("" if on else " (사회적 회피는 OFF)")}
+
+
+def _people_snapshot():
+    """(사람 수, 나이(초), 분류별 수). 한 번도 못 받았으면 n=None."""
+    with _people_lock:
+        n, ts, cls = _people_state["n"], _people_state["ts"], dict(_people_state["classes"])
+    return n, (None if not ts else round(time.time() - ts, 1)), cls
 
 @app.route("/social_nav")
 def social_nav_state():
@@ -4405,9 +4460,19 @@ def _jr_pose():
 
 def _jr_sample():
     """1Hz 샘플 — 여정 스레드가 아니라 샘플러 스레드에서 불린다."""
+    # 🔴 2026-10-12 — 사람 추적을 같이 남긴다(메모: "사회적 이동이 제대로 됐는지 나중에 확인").
+    #   종전에는 **경유지를 실제로 끼웠을 때만** interface 쪽 로그에 `[Modifier]` 한 줄이
+    #   남았다. 그래서 "사람이 없어서 안 비켰다" 와 "추적기가 안 떠서 못 비켰다" 를
+    #   **사후에 가를 수 없었다**(2026-10-12 12:50 주행: 토글 ON 기록은 있는데 경유지 0건).
+    #   여기 같은 파일·같은 시계에 남기면 여정 단계와 바로 대조된다.
+    _pn, _page, _pcls = _people_snapshot()
     return {"pose": _jr_pose(), "step": _AUTO.get("step"), "phase": _AUTO.get("phase"),
             "waiting": _AUTO.get("waiting"), "floor": _current_floor,
-            "lease_held": _elev_lease_held}
+            "lease_held": _elev_lease_held,
+            # people_n=None 은 "한 번도 못 받았다"(추적기 미기동)이고 0 은 "봤는데 없었다"다.
+            # 둘을 반드시 구분해서 적는다 — 이 구분이 없어서 오늘 원인을 못 가렸다.
+            "people_n": _pn, "people_age_s": _page, "people_cls": _pcls or None,
+            "social_nav": _social_nav_enabled}
 
 
 def _jr_procs():
@@ -4444,10 +4509,16 @@ def _jr_begin(dest, remote_addr=None):
                           "handle": _readiness_signal("handle", "손잡이"),
                           "nav2": _readiness_polled("nav2", "nav2"),
                           "gripper_camera": _readiness_polled("gripper_camera", "그리퍼캠"),
-                          "elev_app": _readiness_polled("elev_app", "엘베앱")},
+                          "elev_app": _readiness_polled("elev_app", "엘베앱"),
+                          "people_tracker": _readiness_people()},
         }, deferred={
             "dest_floor": lambda: (_loc(dest) or {}).get("floor"),   # yaml 읽기 — writer 에서
             "procs": _jr_procs,
+            # 🔴 이 주행이 "사회적 회피를 켜고 돌린 것"인지 **시작 시점에 못 박는다.**
+            #   실제 효력은 /tmp/social_nav_enabled 파일에 있으므로 메모리가 아니라
+            #   파일을 읽는다. 없으면 OFF(interface 와 같은 fail-closed).
+            "social_nav": _read_social_nav_flag(),
+            "people_tracker": (_people_snapshot()[0] is not None),
         }, sample_fn=_jr_sample)
     except Exception:
         pass
