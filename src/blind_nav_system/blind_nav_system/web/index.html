@@ -899,7 +899,16 @@ function stowArm() {
   fetch('/stow_arm', {method:'POST'}).catch(() => {});
 }
 
-let socialNavOn = false;   // 기본 비활성 (서버 디폴트와 일치)
+let socialNavOn = false;
+// 🔴 2026-10-12 — 페이지를 열 때 **서버에서 실제 값을 읽어** 토글을 맞춘다.
+//   종전에는 여기서 false 로 시작하고 끝이었다. 그래서 켜 둔 채 대시보드를
+//   재시작하면 화면은 OFF 인데 실제는 ON 이었고, 그 상태에서 누르면 사람이
+//   의도한 것과 반대로 움직였다(두 번 누르면 꺼진다).
+fetch('/social_nav').then(r => r.json()).then(d => {
+  socialNavOn = !!d.enabled;
+  const t = document.getElementById('social-nav-toggle');
+  if (t) t.checked = socialNavOn;
+}).catch(() => {});
 function toggleSocialNav() {
   fetch('/toggle_social_nav', {method:'POST'}).then(r => r.json()).then(d => {
     socialNavOn = d.enabled;

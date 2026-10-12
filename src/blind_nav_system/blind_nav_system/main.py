@@ -1522,12 +1522,40 @@ def web_pull():
     _log("WEB", "당김 트리거 (웹)")
     return jsonify(ok=True)
 
-_social_nav_enabled = False   # 기본 비활성 (2026-07-24 사용자 요청)
+# 🔴 2026-10-12 — **파일에서 읽어 시작한다.** 종전에는 무조건 False 로 시작했다.
+#   이 값의 **실제 효력은 `/tmp/social_nav_enabled` 파일**에 있다(interface 쪽
+#   `navigation_client._social_nav_enabled()` 가 그 파일을 읽는다). 그런데 대시보드는
+#   재시작할 때마다 메모리를 False 로 리셋하면서 **파일은 안 읽었다.**
+#   → 켜 둔 채 대시보드를 재시작하면 **화면은 OFF, 실제는 ON** 으로 갈라진다.
+#     그 상태에서 토글을 누르면 "켠다"고 생각한 조작이 실제로는 아무것도 안 바꾸거나
+#     (False→True, 파일 "1"→"1") 두 번 누르면 **꺼진다.**
+#   2026-10-12 실측: 대시보드를 네 번 재시작한 뒤 파일이 "0" 이 돼 있었고, 사용자는
+#   켜 뒀다고 기억했다. 어느 쪽이 맞는지 **기록으로 가릴 수 없었다** — 그게 더 나쁘다.
+#   논문 데이터로 쓸 값이라 "켜고 돌렸는지"가 애매하면 그 주행 전체가 애매해진다.
+def _read_social_nav_flag() -> bool:
+    try:
+        return Path("/tmp/social_nav_enabled").read_text().strip() == "1"
+    except Exception:
+        return False   # 파일 없음 = OFF. interface 쪽과 **같은 fail-closed** 규약이다.
+
+
+_social_nav_enabled = _read_social_nav_flag()   # 기본 비활성, 단 파일이 있으면 그걸 따른다
+
+@app.route("/social_nav")
+def social_nav_state():
+    """지금 **실제로** 켜져 있나. UI 가 페이지를 열 때 이걸 읽어 토글을 맞춘다.
+    메모리가 아니라 **파일**을 본다 — 효력을 가진 쪽이 파일이기 때문이다."""
+    global _social_nav_enabled
+    _social_nav_enabled = _read_social_nav_flag()
+    return jsonify(ok=True, enabled=_social_nav_enabled)
+
 
 @app.route("/toggle_social_nav", methods=["POST"])
 def toggle_social_nav():
     global _social_nav_enabled
-    _social_nav_enabled = not _social_nav_enabled
+    # 🔴 메모리가 아니라 **파일 현재값**을 뒤집는다. 메모리는 재시작으로 리셋되므로
+    #    그걸 기준으로 뒤집으면 실제 상태와 어긋난 채로 토글된다.
+    _social_nav_enabled = not _read_social_nav_flag()
     Path("/tmp/social_nav_enabled").write_text("1" if _social_nav_enabled else "0")
     _log("WEB", f"사회적 내비게이션: {'ON' if _social_nav_enabled else 'OFF'}")
     return jsonify(ok=True, enabled=_social_nav_enabled)
