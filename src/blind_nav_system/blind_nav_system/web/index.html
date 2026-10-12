@@ -210,7 +210,12 @@
   .readiness-bar { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 20px; background: var(--panel); border-bottom: 1px solid var(--border); }
   .readiness-pill { display: flex; align-items: baseline; gap: 5px; padding: 3px 10px; border-radius: 14px; font-size: 0.75rem; border: 1px solid transparent; }
   .readiness-label { font-weight: 700; }
-  .readiness-detail { opacity: 0.85; }
+  /* 🔴 2026-10-12 — 넘침 가드. 종전에는 제약이 없어서 **긴 detail 문자열 하나가
+     readiness 바를 통째로 늘렸다**(320px 에서 깨짐 확인). 전체 문구는 pill 의
+     title 로 그대로 남으므로 잘려도 읽을 수 있다. */
+  .readiness-detail { opacity: 0.85; overflow: hidden; text-overflow: ellipsis;
+                      white-space: nowrap; }
+  .readiness-pill   { min-width: 0; max-width: 100%; }
   /* 배경은 은은한 tint만 — 색약 대비를 위해 detail 문자열 앞에 기호(✓/✕/⚠)도 병기함.
      기본값은 unknown(회색) + 점선 테두리 — 흰 배경에서 "비활성처럼" 안 읽히게 */
   .readiness-pill.status-unknown { background: var(--unknown-bg); color: var(--unknown); border: 1px dashed var(--text-faint); }
@@ -744,9 +749,16 @@ function _autoAdvApply(on) {
         return;
       }
       if (!note) return;
+      // 🔴 문구는 두 줄 안에. 좁은 화면(320px)에서 123자는 4~5줄이 된다.
+      //    자세한 조건은 토글의 title(툴팁)에 둔다.
       note.textContent = d.on
-        ? "켜짐 — 센서가 확인한 단계는 자동. 단 ①③⑤ 실패 때와 '이동중→하차'는 그대로 묻습니다"
+        ? "켜짐 — '이동중→하차'만 직접 누릅니다"
         : "꺼짐 — 단계마다 '다음'을 누릅니다";
+      const _lb = document.querySelector('#auto-adv-row .toggle-switch');
+      if (_lb) _lb.title = d.on
+        ? "센서가 확인한 단계는 자동으로 넘어갑니다. 단 ①③⑤ 가 실패하거나 시간초과면 "
+          + "그 자리에서 묻고, '이동중→하차'는 엘리베이터 도착을 귀로 판단해야 하므로 항상 묻습니다."
+        : "단계마다 '다음'을 눌러 진행합니다.";
     })
     .catch(() => {
       document.getElementById('auto-adv').checked = !on;

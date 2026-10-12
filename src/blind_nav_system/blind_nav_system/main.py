@@ -1579,15 +1579,17 @@ def _readiness_people():
     n, age, _ = _people_snapshot()
     on = _read_social_nav_flag()
     if n is None:
+        # 🔴 문구는 **짧게.** readiness 는 알약(pill) 한 줄이고 좁은 화면에서 바가 터진다
+        #    (2026-10-12: 여기 60자짜리를 넣었다가 320px 에서 깨지는 걸 확인했다).
+        #    자세한 사유는 같은 문자열이 title 로도 들어가므로 길게 쓸 자리가 아니다.
         return {"status": ("bad" if on else "unknown"), "age_sec": None,
-                "detail": ("🔴 사회적 회피가 **켜져 있는데** 사람 추적이 한 번도 수신되지 "
-                           "않았습니다 — people_tracker/run.sh 를 띄워야 회피가 동작합니다"
-                           if on else "미기동 (사회적 회피 OFF 라 지금은 무관)")}
+                "detail": ("미기동 — 회피 안 됨 (run.sh 필요)" if on
+                           else "미기동 (회피 OFF 라 무관)")}
     if age is not None and age > 10:
         return {"status": "bad", "age_sec": age,
                 "detail": f"사람 추적이 {age:.0f}초째 끊겼습니다"}
     return {"status": "ok", "age_sec": age,
-            "detail": f"정상 — 현재 {n}명" + ("" if on else " (사회적 회피는 OFF)")}
+            "detail": f"{n}명" + ("" if on else " (회피 OFF)")}
 
 
 def _people_snapshot():
