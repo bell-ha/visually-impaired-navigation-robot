@@ -332,6 +332,7 @@
   <div class="readiness-pill status-unknown" id="ready-nav2"><span class="readiness-label">주행</span><span class="readiness-detail">모름</span></div>
   <div class="readiness-pill status-unknown" id="ready-gripper_camera"><span class="readiness-label">그리퍼캠</span><span class="readiness-detail">모름</span></div>
   <div class="readiness-pill status-unknown" id="ready-elev_app"><span class="readiness-label">엘베앱</span><span class="readiness-detail">모름</span></div>
+  <div class="readiness-pill status-unknown" id="ready-people_tracker"><span class="readiness-label">사람추적</span><span class="readiness-detail">모름</span></div>
 </div>
 <div class="layout">
   <div class="log-container">
@@ -490,10 +491,9 @@
         </div>
       </div>
       <div id="kbd-help" style="margin-top:10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:0.72rem;color:var(--text-dim);line-height:1.7">
-        ⌨️ <b style="color:var(--text)">키보드 단축키</b><br>
-        방향키 ↑↓←→ : 이동 토글 (같은 키 다시 누르면 정지)<br>
-        키패드 + / − : 속도 조절 (±5)<br>
-        숫자 1~4 : 기능 설정 토글 · Shift+1~5 : 시스템 프로세스
+        ⌨️ <b style="color:var(--text)">키보드</b><br>
+        방향키 ↑↓←→ : 이동 토글 (같은 키 다시 누르면 정지) — <b>수동 모드에서만</b><br>
+        <span style="opacity:.75">그 외 단축키는 2026-10-12 에 없앴습니다. 버튼으로만 조작합니다.</span>
       </div>
     </div>
 
@@ -524,11 +524,11 @@
       <h2>기능 설정</h2>
       <div style="margin-top:4px">
         <div class="toggle-row">
-          <span class="toggle-label">🦾 팔 수납<span class="kbd">1</span></span>
+          <span class="toggle-label">🦾 팔 수납</span>
           <button id="stow-btn" onclick="stowArm()" style="background:var(--neutral-bg);color:var(--text);border:none;border-radius:6px;padding:5px 16px;cursor:pointer;font-size:0.82rem;">수납</button>
         </div>
         <div class="toggle-row">
-          <span class="toggle-label">사회적 회피<span class="kbd">2</span></span>
+          <span class="toggle-label">사회적 회피</span>
           <label class="toggle-switch">
             <input type="checkbox" id="social-nav-toggle" onchange="toggleSocialNav()">
             <span class="toggle-slider"></span>
@@ -536,7 +536,7 @@
         </div>
         <!-- 장애물 밀기 토글 제거 (2026-07-24 사용자 결정) — 백엔드 코드는 휴면 상태로 보존 -->
         <div class="toggle-row">
-          <span class="toggle-label">🛗 엘리베이터 앱 실행<span class="kbd">5</span></span>
+          <span class="toggle-label">🛗 엘리베이터 앱 실행</span>
           <label class="toggle-switch">
             <input type="checkbox" id="elev-app-toggle" onchange="toggleElevatorApp()">
             <span class="toggle-slider"></span>
@@ -638,27 +638,27 @@
       <div id="sys-proc-list" style="margin-top:6px">
         <div class="sys-proc-row" id="sysrow-launch">
           <span class="sys-dot" id="sysdot-launch"></span>
-          <span class="sys-proc-label">ROS2 Launch<span class="kbd">⇧1</span></span>
+          <span class="sys-proc-label">ROS2 Launch</span>
           <button class="btn btn-primary btn-sm" id="sysbtn-launch" onclick="toggleSysProc('launch')">시작</button>
         </div>
         <div class="sys-proc-row" id="sysrow-rviz">
           <span class="sys-dot" id="sysdot-rviz"></span>
-          <span class="sys-proc-label">RViz2<span class="kbd">⇧2</span></span>
+          <span class="sys-proc-label">RViz2</span>
           <button class="btn btn-primary btn-sm" id="sysbtn-rviz" onclick="toggleSysProc('rviz')">시작</button>
         </div>
         <div class="sys-proc-row" id="sysrow-battery">
           <span class="sys-dot" id="sysdot-battery"></span>
-          <span class="sys-proc-label">배터리 확인<span class="kbd">⇧3</span></span>
+          <span class="sys-proc-label">배터리 확인</span>
           <button class="btn btn-neutral btn-sm" id="sysbtn-battery" onclick="toggleSysProc('battery')">실행</button>
         </div>
         <div class="sys-proc-row" id="sysrow-free">
           <span class="sys-dot" id="sysdot-free"></span>
-          <span class="sys-proc-label">프로세스 정리<span class="kbd">⇧4</span></span>
+          <span class="sys-proc-label">프로세스 정리</span>
           <button class="btn btn-neutral btn-sm" id="sysbtn-free" onclick="toggleSysProc('free')">실행</button>
         </div>
         <div class="sys-proc-row" id="sysrow-home">
           <span class="sys-dot" id="sysdot-home"></span>
-          <span class="sys-proc-label">홈 위치<span class="kbd">⇧5</span></span>
+          <span class="sys-proc-label">홈 위치</span>
           <button class="btn btn-neutral btn-sm" id="sysbtn-home" onclick="toggleSysProc('home')">실행</button>
         </div>
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
@@ -1668,72 +1668,45 @@ function killAllRobot() {
     });
 }
 
-// 키보드 지원
-//   방향키      : 이동 토글 (같은 키 다시 = 정지)  [수동 모드]
-//   키패드 +,-  : 속도 조절                        [수동 모드]
-//   1~4         : 기능 설정 토글                   [항상]
-//   Shift+1~5   : 시스템 프로세스                  [항상, 종료 시 confirm]
+// 키보드 지원 — **방향키(수동 모드)뿐이다.** 나머지는 2026-10-12 에 제거(아래 핸들러 주석).
 const keyToDir = {'ArrowUp':['fwd',1,0],'ArrowDown':['bwd',-0.5,0],
                   'ArrowLeft':['left',0,1],'ArrowRight':['right',0,-1]};
-const FEATURE_KEYS = {1:'stow-btn', 2:'social-nav-toggle',
-                      5:'elev-app-toggle'};   // 3(장애물 밀기)·4(온라인 모드) 제거 (2026-07-24/2026-08-28)
-const SYS_KEYS   = {1:'launch', 2:'rviz', 3:'battery', 4:'free', 5:'home'};
 const SYS_LABELS = {launch:'ROS2 Launch', rviz:'RViz2', battery:'배터리 확인',
                     free:'프로세스 정리', home:'홈 위치'};
 
 // e.code 기반이라 한/영 상태와 무관하게 동작 (Digit1/Numpad1 → '1')
-function digitOf(e) {
-  const m = e.code.match(/^(?:Digit|Numpad)([1-9])$/);
-  return m ? m[1] : null;
-}
 
+// 🔴 2026-10-12 — **단축키를 걷어냈다.** 남긴 것은 수동 모드의 방향키뿐이다.
+//   뺀 것: 숫자(기능 토글) · Shift+숫자(시스템 프로세스) · `+`/`-`(주행 속도)
+//
+//   왜 뺐나 — 실측 근거:
+//   · `+`/`-` 가 주행 속도를 바꿨다. 블랙박스 전수에서 **"로봇 속도 변경" 거부 11회**가
+//     있었고 **11회 전부 ⑤ 층선택**에서다. 그 자리에서 주행 속도를 바꿀 이유가 없다 —
+//     엘베UI 의 조준 트림/lift 가 `+`/`-` 라서, **거기 누를 것을 이 창에 누른 것**으로 본다.
+//     의도하지 않은 조작이 의도한 조작처럼 먹으면 안 된다.
+//   · Shift 하나 차이로 **"팔 접기"(숫자 1)와 "ROS2 Launch 전체 재시작"(Shift+1)** 이 갈렸다.
+//     실수 비용이 너무 다른 두 동작에 인접한 키를 주면 안 된다.
+//   · 사용자 결정(2026-10-12): "단축키는 거의 없어도 될 것 같고, 아예 빼도 될 것 같음".
+//   버튼은 전부 그대로 있다 — 없어진 것은 **키보드 경로뿐**이다.
 document.addEventListener('keydown', e => {
   if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && e.target.type !== 'range'
       && e.target.type !== 'checkbox') return;
-
-  const digit = digitOf(e);
-
-  // Shift+숫자 : 시스템 프로세스
-  if (e.shiftKey && digit && SYS_KEYS[digit]) {
-    if (e.repeat) return;
-    const name = SYS_KEYS[digit];
-    const _b = document.getElementById('sysbtn-' + name);
-    if (_b && _b.disabled) { sysNote('⚠ ' + (_b.title || '지금은 조작할 수 없습니다'), 6000); return; }
-    // 외부(인수 대상)는 toggleSysProc 이 더 자세한 확인을 띄운다 — 여기서 또 묻지 않는다
-    if (sysState[name] && !sysExternal[name]
-        && !confirm(`${SYS_LABELS[name]}을(를) 종료할까요?`)) return;
-    toggleSysProc(name);
-    e.preventDefault();
-    return;
-  }
-
-  // 숫자 : 기능 설정 토글
-  if (!e.shiftKey && digit && FEATURE_KEYS[digit]) {
-    if (e.repeat) return;
-    const cb = document.getElementById(FEATURE_KEYS[digit]);
-    if (cb) cb.click();  // checked 토글 + onchange 핸들러 실행
-    e.preventDefault();
-    return;
-  }
-
-  // 이하 수동 모드 전용
+  // 수동 모드의 방향키만 남긴다. 수동 주행은 키로 하는 것이 자연스럽고,
+  // manualMode 가 아니면 아무 일도 안 하므로 여정 중에 끼어들 수 없다.
   if (!manualMode) return;
   if (keyToDir[e.key]) {
     if (e.repeat) return;  // 키를 꾹 눌러도 토글이 반복되지 않게
     const [dir, lx, az] = keyToDir[e.key];
     toggleCmd(dir, lx, az);
     e.preventDefault();
-  } else if (e.key === '+') {
-    setSpeed(parseFloat(document.getElementById('speed').value) + 0.02);
-    e.preventDefault();
-  } else if (e.key === '-') {
-    setSpeed(parseFloat(document.getElementById('speed').value) - 0.02);
-    e.preventDefault();
   }
 });
 
 // ── 준비상태 바 (2b) — 관측 전용, 백엔드 /readiness 폴링 ─────────────────────────
-const READINESS_KEYS = ['amcl', 'battery', 'handle', 'nav2', 'gripper_camera', 'elev_app'];
+// 🔴 people_tracker 추가(2026-10-12) — 사회적 회피가 켜져 있는데 추적기가 없으면
+//   토글만 켜고 아무 일도 안 일어난다. 서버가 그 조합일 때만 bad 로 올린다.
+const READINESS_KEYS = ['amcl', 'battery', 'handle', 'nav2', 'gripper_camera', 'elev_app',
+                        'people_tracker'];
 
 // 라이트 배경에선 색만으로 상태가 안 읽혀서(3단계) 기호도 병기 — 3상태 판정 로직 자체는 불변
 const READINESS_SYMBOL = {ok: '✓', bad: '✕', unknown: '⚠'};
