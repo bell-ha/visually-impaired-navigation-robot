@@ -1170,17 +1170,24 @@ _syncElevAuthority();
 setInterval(_syncElevAuthority, 3000);
 
 // ── 자동 여정 (반자동 엘베 오케스트레이터) ──────────────────────────────────
-// 목적지 드롭다운 채우기 (엘베 탑승/하차 지점은 제외)
+// 목적지 드롭다운 채우기
+// 🔴 엘베 **내부 경유지 3곳은 전부 뺀다** — 탑승지점·하차지점은 원래 빠져 있었는데
+//   '엘리베이터 문앞' 이 남아 있어서 **목록 첫 항목 = 기본 목적지**가 돼 있었다.
+//   셋 다 여정이 알아서 거쳐 가는 자리이고 사람이 고를 목적지가 아니다.
+// 기본 선택은 아래 _DEST_DEFAULT. 못 찾으면 첫 항목 그대로 둔다.
+const _DEST_DEFAULT = '118호';
 fetch('/locations').then(r => r.json()).then(d => {
   const sel = document.getElementById('auto-dest');
   if (!sel) return;
   (d.locations || []).forEach(loc => {
-    if (loc.name.includes('탑승지점') || loc.name.includes('하차지점')) return;
+    if (loc.name.includes('탑승지점') || loc.name.includes('하차지점')
+        || loc.name.includes('문앞')) return;
     const o = document.createElement('option');
     o.value = loc.name;
     o.textContent = loc.name + (loc.floor ? ` (${loc.floor}층)` : '');
     sel.appendChild(o);
   });
+  if ([...sel.options].some(o => o.value === _DEST_DEFAULT)) sel.value = _DEST_DEFAULT;
 }).catch(() => {});
 
 function autoGoto() {
