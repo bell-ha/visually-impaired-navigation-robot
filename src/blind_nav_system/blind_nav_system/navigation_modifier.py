@@ -55,18 +55,55 @@ class NavigationModifier:
 
     # ── 공개 API ───────────────────────────────────────────────────────────────
 
+    def _is_ahead(self, p: dict) -> bool:
+        """로봇 **앞쪽**에 있나. 뒤에 있는 사람은 회피·동행 계산에서 뺀다.
+
+        🔴 2026-10-14 사용자 확인: **안내받는 시각장애인은 로봇 뒤에 서서 손잡이를
+        잡고 걷는다.** 그 사람은 정의상 로봇과 같은 방향으로 움직이므로 완벽한
+        '동행자'로 분류되는데, 그러면 로봇이 **자기가 데려가는 사람의 방향을 따라
+        경로를 휘는** 되먹임이 된다. 뒤따라오는 사람은 길을 알려 주지 않는다.
+        접근자도 같다 — 뒤에서 반대 방향으로 가는 사람은 우리에게서 **멀어지는**
+        중이라 피할 대상이 아닌데, 종전에는 그들도 재계획을 깨웠다.
+
+        ⚠ 로봇 자세를 모르면(추적기가 TF 를 못 얻어 distance 를 -1 로 보낸 경우)
+        **앞쪽으로 친다**(fail-open). 모른다고 회피를 조용히 꺼 버리는 것이 더 나쁘다."""
+        d = p.get('distance')
+        if d is None or d < 0:
+            return True                      # 로봇 자세 미상 — 거르지 않는다
+        yaw = math.radians(self._robot_yaw)
+        dx = (p.get('x') or 0.0) - self._robot_x
+        dy = (p.get('y') or 0.0) - self._robot_y
+        return (dx * math.cos(yaw) + dy * math.sin(yaw)) > 0.0
+
+    def approaching_in_range(self) -> list[dict]:
+        """회피 대상이 되는 접근자. **재계획 트리거와 경유지 생성이 같은 조건을
+        쓰게 하는 단일 출처다.**
+
+        🔴 2026-10-14 사고: 트리거(navigation_client._replan_check)가 거리 조건을
+        안 보고 `classification == 'approaching'` 만 봤다. 그래서 7m 밖 접근자
+        하나로 **매 초 goal 을 취소·재전송하면서 경유지는 만들지 않았다**
+        — 얻는 것 없이 로봇만 섰다. 실측:
+            15:19:00.275 [NAV] 접근자 경유지 갱신 → 경로 재계획
+            15:19:00.275 [NAV] 직행 경로 전송      ← 경유지 0개
+            15:19:00.299 [NAV] 목표 실패 status=6 aborted
+        그 뒤 승차지점까지 20.7m 를 남긴 채 멈춰 있었다.
+        조건을 바꿀 일이 생기면 **여기만** 고친다."""
+        return [p for p in self._people
+                if p['classification'] == 'approaching'
+                and p['distance'] < APPROACH_DIST_MAX
+                and self._is_ahead(p)]
+
     def compute_waypoints(self, goal_x: float, goal_y: float) -> list[tuple[float, float]]:
         """
         목표 (goal_x, goal_y)로 가는 경유지 목록 반환.
         마지막 원소는 항상 원래 목표. 경유지가 없으면 [(goal_x, goal_y)].
         """
         try:
-            approaching = [p for p in self._people
-                           if p['classification'] == 'approaching'
-                           and p['distance'] < APPROACH_DIST_MAX]
+            approaching = self.approaching_in_range()
             companions  = [p for p in self._people
                            if p['classification'] == 'companion'
-                           and p['distance'] < COMPANION_DIST_MAX]
+                           and p['distance'] < COMPANION_DIST_MAX
+                           and self._is_ahead(p)]
 
             waypoints: list[tuple[float, float]] = []
 
@@ -141,9 +178,21 @@ class NavigationModifier:
             return None
         goal_dx, goal_dy = dx / dist, dy / dist
 
-        # 목표 방향 (1-blend) + 동행자 방향 blend
-        bx = (1 - COMPANION_BLEND) * goal_dx + COMPANION_BLEND * comp_dx
-        by = (1 - COMPANION_BLEND) * goal_dy + COMPANION_BLEND * comp_dy
+        # 🔴 2026-10-14 — **정합도로 감쇠한다.** 종전에는 동행자가 어디로 가든
+        #   무조건 40% 를 섞었다. 그런데 '동행자' 판정은 **로봇이 바라보는 방향
+        #   ±90°**(= 180° 부채꼴)라서, 목표와 89° 어긋난 사람도 동행자다. 그 40%
+        #   가 그대로 들어가면 경로가 33.4° 휘고 1.5m 앞에서 **83cm** 벗어난다
+        #   (복도에서는 벽에 붙는 거리다). 실제로 따라갈 가치는 '그 사람이 우리
+        #   목표 쪽으로 가고 있는 정도'에 비례하므로 cos 을 곱한다.
+        #     θ=0° → 0.40 (종전과 동일)   45° → 0.28   75° → 0.10   90°↑ → 따라가지 않음
+        #   임계로 끊지 않고 연속 감쇠인 이유: 경계에서 켜졌다 꺼졌다 하면
+        #   now_has_wp 가 매 초 뒤집혀 재계획이 폭주한다(위 트리거와 같은 사고).
+        align = goal_dx * comp_dx + goal_dy * comp_dy      # = cos θ (둘 다 단위벡터)
+        if align <= 0:
+            return None        # 목표와 90° 이상 어긋난 동행자는 따라가지 않는다
+        blend = COMPANION_BLEND * align
+        bx = (1 - blend) * goal_dx + blend * comp_dx
+        by = (1 - blend) * goal_dy + blend * comp_dy
         bs = (bx**2 + by**2) ** 0.5
         if bs < 0.01:
             return None

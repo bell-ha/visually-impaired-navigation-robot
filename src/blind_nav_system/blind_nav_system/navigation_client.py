@@ -19,6 +19,7 @@ import math
 from navigation_modifier import NavigationModifier
 
 SOCIAL_NAV_FLAG  = '/tmp/social_nav_enabled'
+SOCIAL_NAV_SUSPEND = '/tmp/social_nav_suspend'   # 여정이 구간별로 잠시 끈다(대시보드가 씀)
 OBSTACLE_TOPIC   = '/obstacle_pusher/decision'
 
 REPLAN_INTERVAL  = 1.0   # 재평가 주기 (초)
@@ -205,10 +206,11 @@ class NavigationClient(Node):
         # 접근자가 있으면 매 주기 경유지 갱신 (사람이 다가올수록 회피 방향 재계산).
         # social OFF면 애초에 회피 자체를 안 하므로 접근자 유무로 강제 재계획하면
         # 안 됨(게이트 우회 — social 끄고도 매초 재계획 로그가 찍히던 버그).
-        approaching_present = social_on and any(
-            p.get('classification') == 'approaching'
-            for p in self._modifier._people
-        )
+        # 🔴 2026-10-14 — **경유지 생성과 같은 조건을 쓴다**(approaching_in_range).
+        #   종전에는 여기만 거리 조건이 없어서, 7m 밖 접근자 하나로 재계획을
+        #   강제하면서 정작 경유지는 안 만들었다. 트리거와 결과가 어긋나면
+        #   '멈추기만 하고 얻는 것이 없는' 구간이 생긴다.
+        approaching_present = social_on and bool(self._modifier.approaching_in_range())
 
         if now_has_wp == self._last_had_wp and not approaching_present:
             return
@@ -217,13 +219,18 @@ class NavigationClient(Node):
         reason = "접근자 경유지 갱신" if approaching_present else "사람 상황 변화 감지"
         print(f"[NAV] {reason} → 경로 재계획", flush=True)
 
-        # 현재 goal 취소 후 재전송
-        if self.goal_handle:
-            self.goal_handle.cancel_goal_async()
-            self.goal_handle = None
-
+        # 🔴 2026-10-14 — **취소하지 않고 그냥 보낸다.** nav2 가 새 goal 로 선점하고,
+        #   밀려난 goal 의 결과는 _goal_gen 가드와 STATUS_CANCELED 분기가 이미 걸러낸다.
+        #   종전에는 cancel_goal_async() 직후 곧바로 보냈는데, bt_navigator 가 아직
+        #   이전 BT 를 정리하는 중이라 **새 goal 이 24ms 만에 ABORTED 로 죽었다**:
+        #       15:19:00.275 취소 → 직행 전송 / 15:19:00.299 status=6 aborted
+        #   그 뒤 살아있는 goal 이 없어 로봇은 20.7m 를 남긴 채 그대로 섰다.
+        #   같은 파일의 _obstacle_cb 는 처음부터 취소 없이 재전송했다 — 그 패턴을 따른다.
         if not self._send_to_nav2(waypoints):
-            self._nav_failed(-1, "resend_failed")
+            if self.goal_handle is None:      # 살아있는 goal 없음 = 진짜 막다른 길
+                self._nav_failed(-1, "resend_failed")
+            else:                             # 기존 goal 유효 → 경로 갱신만 실패, 계속 주행
+                print("[NAV] 재전송 실패 — 기존 goal 유지, 계속 주행", flush=True)
 
     # ── 헬퍼 ──────────────────────────────────────────────────────────────────
 
@@ -231,6 +238,14 @@ class NavigationClient(Node):
         """'/tmp/social_nav_enabled' 파일로 ON/OFF 확인. 없거나 읽기 실패하면
         OFF(fail-closed) — ON을 기본으로 두면 대시보드 없이 뜨거나 /tmp 청소
         직후에 UI 표시 없이 회피가 몰래 켜진다. 도배 방지로 로그는 1회만."""
+        # 🔴 2026-10-14 — 여정이 엘리베이터 구간에 들어가면 대시보드가 suspend 를 켠다.
+        #   사용자 토글(SOCIAL_NAV_FLAG)은 **건드리지 않는다** — 토글을 직접 뒤집으면
+        #   화면과 파일이 또 갈라진다(674683f 에서 고친 사고). 파일 없음 = 중단 아님.
+        try:
+            if FilePath(SOCIAL_NAV_SUSPEND).read_text().strip() == '1':
+                return False
+        except Exception:
+            pass
         try:
             return FilePath(SOCIAL_NAV_FLAG).read_text().strip() == '1'
         except Exception:
