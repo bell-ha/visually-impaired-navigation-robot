@@ -1,0 +1,29 @@
+{
+ "tag": "B_push",
+ "ts": 1791959069.820783,
+ "time": "2026-10-14T15:24:29",
+ "scene": 4,
+ "target": "1",
+ "press_status": "4/6 누르는 중… →0.310m",
+ "lift": 0.8731699992427582,
+ "arm_ext": 0.2928102419158115,
+ "frame_source": "raw_full(rotated)",
+ "rot_grip": 0,
+ "letterbox": {
+  "scale": 0.7547169811320755,
+  "off_x": 0,
+  "off_y": 59
+ },
+ "roi_ocr": null,
+ "jpeg_quality": 55,
+ "missing": [],
+ "roi_raw": null,
+ "push_cmd_m": 0.30981044127683594,
+ "note": "팔 최대 전진 — 가림 정도 기록용, 판정 안 씀",
+ "image": "B_push.jpg",
+ "frame_hw": [
+  480,
+  848
+ ],
+ "frame_mean": 107.017
+}
