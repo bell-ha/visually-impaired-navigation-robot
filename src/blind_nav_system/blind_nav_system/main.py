@@ -5446,7 +5446,17 @@ def sys_proc_ctrl(name):
     p       = _sys_procs.get(name)
     running = bool(p and p.poll() is None)
 
-    if action == "stop" or (action == "toggle" and running):
+    # 🔴 2026-10-14 — **외부 프로세스도 toggle 로 끌 수 있어야 한다.**
+    #   running 은 _sys_procs(내가 띄운 Popen 핸들)로만 판정하므로 외부 것은 항상
+    #   False 다. 그대로 두면 toggle 이 종료가 아니라 **시작** 분기로 가서
+    #   '시작 거부 — 실행 중(외부)' 로 끝난다 — 버튼은 '외부 종료' 인데 아무 일도
+    #   안 일어난다(17:22:33 실측). UI 쪽에서 'stop' 을 명시하게도 고쳤지만,
+    #   **여기서도 막아야** 오래된 페이지·curl·UI 상태 지연에서 같은 일이 안 난다.
+    ext_running = False
+    if not running and name in _SYS_EXT_GATE:
+        _sh, _gt = _scan_sys_ext()
+        ext_running = bool((_gt or {}).get(name))
+    if action == "stop" or (action == "toggle" and (running or ext_running)):
         # 내가 띄운 게 아니면 여기서 끝낸다. p가 None인 채로 내려가면
         # _kill_proc_group(None, ...)이 곧바로 True를 돌려주고, 그 뒤 pgrep으로
         # 잡힌 '외부 런치의' rplidar에 SIGKILL + 모터 정지까지 나간다 — 남의
