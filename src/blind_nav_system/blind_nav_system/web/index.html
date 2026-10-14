@@ -575,6 +575,12 @@
           <button id="stow-btn" onclick="stowArm()" style="background:var(--neutral-bg);color:var(--text);border:none;border-radius:6px;padding:5px 16px;cursor:pointer;font-size:0.82rem;">수납</button>
         </div>
         <div class="toggle-row">
+          <span class="toggle-label">⏺ 화면 녹화</span>
+          <button id="rec-btn" onclick="toggleRecord()" style="background:var(--neutral-bg);color:var(--text);border:none;border-radius:6px;padding:5px 16px;cursor:pointer;font-size:0.82rem;">시작</button>
+        </div>
+        <div id="rec-note" style="font-size:0.74rem;opacity:0.75;margin:-4px 0 8px 2px;
+             overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <div class="toggle-row">
           <span class="toggle-label">보행 흐름 주행</span>
           <label class="toggle-switch">
             <input type="checkbox" id="social-nav-toggle" onchange="toggleSocialNav()">
@@ -1594,6 +1600,39 @@ function pollSocial() {
   }).catch(() => {});
 }
 setInterval(pollSocial, 1000);
+
+// ── 화면 녹화 ────────────────────────────────────────────────────────────────
+function _recApply(d) {
+  const b = document.getElementById('rec-btn'), n = document.getElementById('rec-note');
+  if (!b || !n) return;
+  if (d.recording) {
+    b.textContent = '■ 중지';
+    b.style.background = 'var(--bad)'; b.style.color = '#fff'; b.style.fontWeight = '700';
+    const mm = String(Math.floor(d.elapsed_s / 60)).padStart(2, '0');
+    const ss = String(d.elapsed_s % 60).padStart(2, '0');
+    // 크기는 0보다 클 때만 — ffmpeg 가 끝날 때 몰아 쓰므로 녹화 중엔 대개 0 이고,
+    // 0.0MB 가 떠 있으면 고장난 것처럼 보인다(2026-10-14 실측).
+    const sz = (d.size_mb > 0) ? ` · ${d.size_mb.toFixed(1)}MB` : '';
+    n.textContent = `● 녹화 중 ${mm}:${ss}${sz} · ${d.file || ''}`;
+  } else {
+    b.textContent = '시작';
+    b.style.background = 'var(--neutral-bg)'; b.style.color = 'var(--text)'; b.style.fontWeight = '';
+    n.textContent = d.last ? `마지막: ${d.last}` : '~/Videos/flow-test 에 저장됩니다';
+  }
+}
+function toggleRecord() {
+  const b = document.getElementById('rec-btn');
+  if (b) b.disabled = true;                       // 연타로 두 번 들어가지 않게
+  fetch('/record', {method: 'POST'})
+    .then(r => r.json()).then(d => {
+      if (d.ok === false) alert('녹화 실패: ' + (d.error || '알 수 없음'));
+      _recApply(d);
+    })
+    .catch(() => {})
+    .finally(() => { if (b) b.disabled = false; });
+}
+setInterval(() => fetch('/record_status').then(r => r.json()).then(_recApply).catch(() => {}), 2000);
+fetch('/record_status').then(r => r.json()).then(_recApply).catch(() => {});
 
 // 로그 SSE + 탭 필터
 const logPanel = document.getElementById('log-panel');

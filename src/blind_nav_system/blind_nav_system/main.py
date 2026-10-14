@@ -10,6 +10,7 @@ import collections
 import json
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -219,6 +220,7 @@ def _shutdown_children(why="종료"):
       `/elevator_app{running:false}` 가 **제어권 회수 → 정지 → SIGTERM** 순서로 정리한다.
       여기서 막 죽이면 그 순서가 깨져 팔·바퀴가 중간 상태로 남는다.
     """
+    _rec_stop("대시보드 종료")   # 녹화 ffmpeg 도 같이 — 고아로 남으면 화면을 계속 인코딩한다
     for name, pr in list(_procs.items()):
         if name == "elevator" or pr is None:
             continue
@@ -1676,6 +1678,95 @@ def social_nav_state():
     global _social_nav_enabled
     _social_nav_enabled = _read_social_nav_flag()
     return jsonify(ok=True, enabled=_social_nav_enabled)
+
+
+# ── 화면 녹화 (2026-10-14 사용자 요청) ────────────────────────────────────────
+#   시연·실험 기록용. 조각 mp4(+frag_keyframe+empty_moov)로 쓰므로 중간에 끊겨도
+#   거기까지는 재생된다 — 종전 방식은 정상 종료해야만 파일이 열렸다.
+_REC_DIR = Path.home() / "Videos" / "flow-test"
+_rec: dict = {"proc": None, "path": None, "t0": 0.0, "last": None}
+
+
+def _rec_env() -> dict:
+    """ffmpeg 가 X 화면을 잡으려면 DISPLAY **와** XAUTHORITY 가 둘 다 필요하다.
+    대시보드가 그걸 안 물려받은 채 떠 있을 수 있어 여기서 보충한다
+    (2026-10-14: XAUTHORITY 없이 띄웠다가 프레임을 **0장** 잡았다)."""
+    env = dict(os.environ)
+    env.setdefault("DISPLAY", ":0")
+    if not env.get("XAUTHORITY"):
+        for c in (f"/run/user/{os.getuid()}/gdm/Xauthority", str(Path.home() / ".Xauthority")):
+            if Path(c).exists():
+                env["XAUTHORITY"] = c
+                break
+    return env
+
+
+def _rec_stop(why: str = "중지") -> bool:
+    """SIGINT 로 멈춘다 — ffmpeg 는 그래야 파일을 마무리한다(SIGKILL 이면 깨진다)."""
+    pr = _rec.get("proc")
+    if pr is None or pr.poll() is not None:
+        _rec["proc"] = None
+        return False
+    try:
+        pr.send_signal(signal.SIGINT)
+        try:
+            pr.wait(timeout=6)
+        except Exception:
+            pr.terminate()
+    except Exception:
+        pass
+    _rec["proc"] = None
+    _rec["last"] = Path(_rec["path"]).name if _rec.get("path") else None
+    _log("MAIN", f"화면 녹화 {why} — {_rec.get('path')}")
+    return True
+
+
+def _rec_state() -> dict:
+    pr = _rec.get("proc")
+    on = bool(pr and pr.poll() is None)
+    size_mb = 0.0
+    if on and _rec.get("path"):
+        try:
+            size_mb = round(Path(_rec["path"]).stat().st_size / 1e6, 1)
+        except Exception:
+            pass
+    return {"ok": True, "recording": on,
+            "elapsed_s": (round(time.time() - _rec["t0"]) if on else 0),
+            "size_mb": size_mb,
+            "file": (Path(_rec["path"]).name if on and _rec.get("path") else None),
+            "last": _rec.get("last")}
+
+
+@app.route("/record_status")
+def record_status():
+    return jsonify(_rec_state())
+
+
+@app.route("/record", methods=["POST"])
+def record_toggle():
+    """누를 때마다 시작/중지. 돌고 있으면 멈추고, 아니면 시작한다."""
+    if _rec_stop("사용자 중지"):
+        return jsonify(_rec_state())
+    if not shutil.which("ffmpeg"):
+        return jsonify(ok=False, recording=False, error="ffmpeg 없음"), 500
+    try:
+        _REC_DIR.mkdir(parents=True, exist_ok=True)
+        path = _REC_DIR / (time.strftime("%Y%m%d_%H%M%S") + "_녹화.mp4")
+        # 1280 으로 줄여 인코딩한다 — 유휴 CPU 가 10%대라 풀해상도는 주행에 영향을 준다.
+        pr = subprocess.Popen(
+            ["ffmpeg", "-nostdin", "-loglevel", "warning", "-y",
+             "-f", "x11grab", "-framerate", "10", "-i", os.environ.get("DISPLAY", ":0"),
+             "-vf", "scale=1280:-2", "-c:v", "libx264", "-preset", "ultrafast",
+             "-crf", "28", "-pix_fmt", "yuv420p",
+             "-movflags", "+frag_keyframe+empty_moov", str(path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=_rec_env(), start_new_session=True)
+        _rec.update(proc=pr, path=str(path), t0=time.time())
+        _log("MAIN", f"화면 녹화 시작 — {path}")
+    except Exception as e:
+        _log("MAIN", f"화면 녹화 시작 실패: {e!r}")
+        return jsonify(ok=False, recording=False, error=repr(e)), 500
+    return jsonify(_rec_state())
 
 
 @app.route("/people")
