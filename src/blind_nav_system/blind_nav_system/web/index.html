@@ -367,7 +367,7 @@
       <button class="view-btn active" id="view-log"  onclick="setView('log')">관제 로그</button>
       <button class="view-btn"        id="view-elev" onclick="setView('elev')">엘리베이터 화면</button>
       <button class="view-btn"        id="view-journey" onclick="setView('journey')">여정</button>
-      <button class="view-btn"        id="view-social" onclick="setView('social')">사회적 회피</button>
+      <button class="view-btn"        id="view-social" onclick="setView('social')">보행 흐름 주행</button>
     </div>
     <!-- 👉 다른 탭을 보고 있을 때의 안전장치(U10-3). 확인 버튼은 여정 화면 한 자리에만 있으므로,
          로그·엘리베이터 화면을 보는 사이에 확인 대기가 걸리면 누를 수단이 화면에 없다.
@@ -575,7 +575,7 @@
           <button id="stow-btn" onclick="stowArm()" style="background:var(--neutral-bg);color:var(--text);border:none;border-radius:6px;padding:5px 16px;cursor:pointer;font-size:0.82rem;">수납</button>
         </div>
         <div class="toggle-row">
-          <span class="toggle-label">사회적 회피</span>
+          <span class="toggle-label">보행 흐름 주행</span>
           <label class="toggle-switch">
             <input type="checkbox" id="social-nav-toggle" onchange="toggleSocialNav()">
             <span class="toggle-slider"></span>
@@ -1590,7 +1590,7 @@ function pollSocial() {
     }
     _svPlan(ppl, d.robot);
     document.getElementById('sv-note').textContent =
-      d.note ? `최근 회피 판단: ${d.note}` + (d.note_age_s != null ? ` (${d.note_age_s}s 전)` : '') : '';
+      d.note ? `최근 판단: ${d.note}` + (d.note_age_s != null ? ` (${d.note_age_s}s 전)` : '') : '';
   }).catch(() => {});
 }
 setInterval(pollSocial, 1000);

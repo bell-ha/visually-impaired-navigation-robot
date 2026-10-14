@@ -1580,6 +1580,12 @@ _social_nav_enabled = _read_social_nav_flag()   # 기본 비활성, 단 파일�
 #   사용자 토글(/tmp/social_nav_enabled)은 **건드리지 않는다** — 그걸 직접 뒤집으면
 #   화면과 파일이 갈라지는 사고가 다시 난다(674683f). 별도 파일로 '구간만' 끈다.
 #   같은 파일을 people_tracker 도 읽어 YOLO 추론을 쉰다(CPU 회수).
+# 🔴 이름(2026-10-14 사용자 결정): 화면·로그에는 **"보행 흐름 주행"** 으로 쓴다.
+#   코드 안의 social_nav / SOCIAL_* 식별자와 /tmp/social_nav_* 파일은 **같은 기능**이고
+#   일부러 그대로 뒀다 — 그 파일은 대시보드·navigation_client(interface 안)·
+#   people_tracker 세 프로세스가 공유하는 계약이라, 이름을 바꾸면 셋을 동시에
+#   재시작해야 하고 하나라도 옛 이름을 보면 **무증상으로 꺼진 채** 돈다.
+#   리팩터는 실험 데이터를 다 모은 뒤에.
 _SOCIAL_NAV_PHASES   = ("board", "drive")
 _SOCIAL_SUSPEND_FILE = "/tmp/social_nav_suspend"
 _social_suspend_cur  = None     # 마지막으로 쓴 값 — 같은 값 재기록·로그 도배 방지
@@ -1593,10 +1599,10 @@ def _social_nav_suspend(on: bool, why: str = ""):
     try:
         Path(_SOCIAL_SUSPEND_FILE).write_text("1" if on else "0")
     except Exception as e:
-        _log("MAIN", f"사회적 회피 구간 게이트 기록 실패: {e!r}")
+        _log("MAIN", f"보행 흐름 주행 구간 게이트 기록 실패: {e!r}")
         return
     _social_suspend_cur = on
-    _log("MAIN", f"사회적 회피 {'일시중단' if on else '재개'}" + (f" ({why})" if why else ""))
+    _log("MAIN", f"보행 흐름 주행 {'일시중단' if on else '재개'}" + (f" ({why})" if why else ""))
 
 
 _social_nav_suspend(False, "대시보드 기동")   # 🔴 이전 실행이 켠 채 죽었을 수 있다
@@ -1644,8 +1650,8 @@ def _readiness_people():
         #    (2026-10-12: 여기 60자짜리를 넣었다가 320px 에서 깨지는 걸 확인했다).
         #    자세한 사유는 같은 문자열이 title 로도 들어가므로 길게 쓸 자리가 아니다.
         return {"status": ("bad" if on else "unknown"), "age_sec": None,
-                "detail": ("미기동 — 회피 안 됨 (run.sh 필요)" if on
-                           else "미기동 (회피 OFF 라 무관)")}
+                "detail": ("미기동 — 흐름주행 안 됨 (run.sh 필요)" if on
+                           else "미기동 (흐름주행 OFF 라 무관)")}
     # 구간 게이트로 **일부러** 쉬는 중이면 고장이 아니다 — 빨간 ✕ 를 띄우면
     # 운영자가 엘베 구간마다 거짓 경보를 보게 된다(2026-10-14).
     if _social_suspend_cur:
@@ -1654,7 +1660,7 @@ def _readiness_people():
         return {"status": "bad", "age_sec": age,
                 "detail": f"사람 추적이 {age:.0f}초째 끊겼습니다"}
     return {"status": "ok", "age_sec": age,
-            "detail": f"{n}명" + ("" if on else " (회피 OFF)")}
+            "detail": f"{n}명" + ("" if on else " (흐름주행 OFF)")}
 
 
 def _people_snapshot():
@@ -1705,7 +1711,7 @@ def toggle_social_nav():
     #    그걸 기준으로 뒤집으면 실제 상태와 어긋난 채로 토글된다.
     _social_nav_enabled = not _read_social_nav_flag()
     Path("/tmp/social_nav_enabled").write_text("1" if _social_nav_enabled else "0")
-    _log("WEB", f"사회적 내비게이션: {'ON' if _social_nav_enabled else 'OFF'}")
+    _log("WEB", f"보행 흐름 주행: {'ON' if _social_nav_enabled else 'OFF'}")
     return jsonify(ok=True, enabled=_social_nav_enabled)
 
 @app.route("/obstacle_status")
