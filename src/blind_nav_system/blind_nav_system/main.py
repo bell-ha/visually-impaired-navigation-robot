@@ -5104,6 +5104,9 @@ _SYS_PROC_DEFS = {
         "log_tag": "ROS2",
         "kill_timeout": 20,    # ros2 launch의 모든 노드 graceful shutdown 완료 대기
         "auto_free_lock": True, # 만약 SIGKILL로 강제 종료됐을 때 Stretch filelock 안전망
+        # 🔴 라이다를 띄우는 것은 **런치뿐이다.** 종료 뒤 rplidar 정리·모터 정지를
+        #   돌려도 되는 유일한 항목이라는 표시다(2026-10-14, 아래 _do_kill 참조).
+        "owns_lidar": True,
     },
     "rviz": {
         "label": "RViz2",
@@ -5488,7 +5491,17 @@ def sys_proc_ctrl(name):
 
             # rplidar_composition 처리: ros2 launch가 0s 만에 종료해도 rplidar는 고아로 남을 수 있음
             # → 소멸자(destructor)가 모터를 멈출 시간을 주고, 안 되면 강제 종료 + 시리얼 정지
-            r = subprocess.run(["pgrep", "-a", "rplidar"], capture_output=True, text=True)
+            # 🔴 2026-10-14 — **라이다 정리는 소유자(런치)를 끌 때만 한다.**
+            #   종전에는 어느 항목을 끄든 이 블록이 돌았다. 그래서 RViz 를 껐을 뿐인데
+            #   pgrep 이 **런치의** rplidar 를 잡아 SIGKILL + 모터 정지까지 나갔다:
+            #       17:22:56 RViz2 종료 완료 → rplidar 고아 감지 [27525]
+            #       17:23:01 rplidar 종료 안 됨 → SIGKILL → LiDAR 모터 정지
+            #   27525 는 런치(27484)의 자식이었고, 런치는 살아 있는데 /scan 과
+            #   /amcl_pose 만 끊겨 **주행 불가**가 됐다. 바로 위 5449 줄 주석이
+            #   경고하던 '남의 프로세스를 죽이지 않는다'는 불변식이 깨진 자리다.
+            _owns_lidar = bool(defn.get("owns_lidar"))
+            r = (subprocess.run(["pgrep", "-a", "rplidar"], capture_output=True, text=True)
+                 if _owns_lidar else subprocess.CompletedProcess([], 0, "", ""))
             rplidar_pids = []
             for line in r.stdout.strip().splitlines():
                 try:
@@ -5518,6 +5531,8 @@ def sys_proc_ctrl(name):
                 # "빨리 죽음 = 소멸자 실행 = 모터 정지"로 추론하지 말고 무조건 시리얼 정지.
                 _t.sleep(0.4)  # 포트 해제 대기
                 _stop_lidar_motor()
+            elif not _owns_lidar:
+                pass            # 내 소유가 아니다 — 남의 라이다·모터를 건드리지 않는다
             elif graceful:
                 _log("SYS", "rplidar 프로세스 없음 (launch가 정상 정리)")
             else:

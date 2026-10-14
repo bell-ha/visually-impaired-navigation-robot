@@ -1748,7 +1748,12 @@ function toggleSysProc(name, external) {
   fetch(`/sys_proc/${name}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({action: 'toggle'})
+    // 🔴 외부 프로세스는 **반드시 'stop' 을 명시한다.** 서버의 running 판정은
+    //    _sys_procs(내가 띄운 Popen 핸들)로 하는데, 외부 것은 핸들이 없어 running=False
+    //    가 된다. 그 상태로 'toggle' 을 보내면 종료가 아니라 **시작**으로 가서
+    //    '시작 거부 — 실행 중(외부)' 로 끝난다 — 버튼은 '외부 종료' 인데 아무 일도
+    //    일어나지 않는다(2026-10-14 17:22:33 실측).
+    body: JSON.stringify({action: external ? 'stop' : 'toggle'})
   }).then(r => r.json()).then(d => {
     // fetch는 409에 reject하지 않는다 — 여기서 d.ok를 안 보면 거부가 침묵한다.
     if (!d.ok) { sysNote('⚠ ' + (d.error || '실패'), 8000); pollSysProcStatus(); return; }
