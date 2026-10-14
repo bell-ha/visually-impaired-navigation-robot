@@ -113,6 +113,13 @@ class NavigationModifier:
                     waypoints.append(wp)
                     self._node.get_logger().info(
                         f"[Modifier] 접근자 {len(approaching)}명 감지 → 회피 경유지 ({wp[0]:.2f}, {wp[1]:.2f})")
+                else:
+                    # 🔴 **조용히 버리지 않는다.** 이 자리가 로그를 안 남겨서, 트리거는
+                    #   걸리는데 경유지가 안 생기는 상태를 몇 주 동안 못 봤다.
+                    self._node.get_logger().warn(
+                        f"[Modifier] 접근자 {len(approaching)}명인데 회피 경유지 폐기 — "
+                        + ("계산 실패" if not wp
+                           else f"({wp[0]:.2f}, {wp[1]:.2f}) 비용 {self._costmap_cost(*wp)}"))
 
             # 접근자 처리 중에는 동행자 힌트 생략 (경유지 충돌 방지)
             if companions and not waypoints:
@@ -121,6 +128,11 @@ class NavigationModifier:
                     waypoints.append(wp)
                     self._node.get_logger().info(
                         f"[Modifier] 동행자 {len(companions)}명 감지 → 경로 힌트 ({wp[0]:.2f}, {wp[1]:.2f})")
+                else:
+                    self._node.get_logger().warn(
+                        f"[Modifier] 동행자 {len(companions)}명인데 경로 힌트 폐기 — "
+                        + ("계산 실패(정지·목표 근접·90°↑ 어긋남)" if not wp
+                           else f"({wp[0]:.2f}, {wp[1]:.2f}) 비용 {self._costmap_cost(*wp)}"))
 
             waypoints.append((goal_x, goal_y))
             return waypoints
@@ -200,16 +212,56 @@ class NavigationModifier:
         return (self._robot_x + (bx / bs) * COMPANION_LOOKAHEAD,
                 self._robot_y + (by / bs) * COMPANION_LOOKAHEAD)
 
+    def _to_costmap_frame(self, x: float, y: float):
+        """map 좌표를 코스트맵 프레임으로 옮긴다. 못 옮기면 None.
+
+        🔴 2026-10-14 — **여기가 보행 흐름 주행이 한 번도 작동하지 않은 이유였다.**
+        local_costmap 은 `global_frame: odom` 에 rolling_window 라 header.frame_id 가
+        odom 인데, 경유지 좌표는 map 프레임이다(사람추적이 map 으로 보낸다).
+        변환 없이 넣으면 셀 번호가 음수가 되어 '범위 밖' 으로 떨어졌다. 실측:
+            costmap origin odom(-20.65, -6.90) · 경유지 map(-41, +3)
+            cx = (-41 - (-20.65)) / 0.05 = -407  → 범위 밖 → 100(점령) → 폐기
+        9/04~10/14 Nav2 목표 72건이 **전부** '직행' 이었던 진짜 원인이다.
+        트리거는 제대로 걸렸고(로그에 '접근자 경유지 갱신'이 11번) 마지막 관문에서
+        **로그 한 줄 없이** 버려졌다."""
+        cm = self._costmap
+        if cm is None:
+            return None
+        frame = (cm.header.frame_id or "map").lstrip("/")
+        if frame == "map":
+            return (x, y)
+        try:
+            import rclpy.time
+            tr = self._node._tf_buf.lookup_transform(frame, "map", rclpy.time.Time())
+        except Exception:
+            return None                      # TF 미준비 — 모른다(아래에서 fail-open)
+        t, q = tr.transform.translation, tr.transform.rotation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        cs, sn = math.cos(yaw), math.sin(yaw)
+        return (t.x + x * cs - y * sn, t.y + x * sn + y * cs)
+
     def _costmap_cost(self, x: float, y: float) -> int:
-        """map 좌표 (x, y)의 costmap 비용값 반환. costmap 없으면 0."""
-        if self._costmap is None:
+        """map 좌표 (x, y)의 costmap 비용값. **모르면 0(통행 가능)으로 친다.**
+
+        🔴 fail-open 이다. 종전에는 범위 밖을 100(점령)으로 쳤는데, 이 함수는
+        '경유지를 둘 자리인가' 라는 **힌트**를 묻는 자리지 안전 게이트가 아니다
+        (벽으로 돌진하는 것은 Nav2 가 막는다). 모름을 점령으로 치면 코스트맵이
+        없거나·프레임을 못 옮기거나·7m 창 밖인 모든 경우에 회피가 통째로 죽는다 —
+        실제로 그렇게 죽어 있었다."""
+        cm = self._costmap
+        if cm is None:
             return 0
-        info = self._costmap.info
-        cx = int((x - info.origin.position.x) / info.resolution)
-        cy = int((y - info.origin.position.y) / info.resolution)
+        pt = self._to_costmap_frame(x, y)
+        if pt is None:
+            return 0                         # 변환 불가 — 막지 않는다
+        info = cm.info
+        cx = int((pt[0] - info.origin.position.x) / info.resolution)
+        cy = int((pt[1] - info.origin.position.y) / info.resolution)
         if not (0 <= cx < info.width and 0 <= cy < info.height):
-            return 100  # 범위 밖 = 점령
-        return int(self._costmap.data[cy * info.width + cx])
+            return 0                         # 7m 창 밖 = 정보 없음 ≠ 점령
+        v = int(cm.data[cy * info.width + cx])
+        return 0 if v < 0 else v             # -1(미지)도 막지 않는다
 
     def _is_navigable(self, x: float, y: float) -> bool:
         return self._costmap_cost(x, y) < OCCUPIED_THRESHOLD

@@ -16,6 +16,8 @@ import os
 import time
 import math
 
+from tf2_ros import Buffer, TransformListener
+
 from navigation_modifier import NavigationModifier
 
 SOCIAL_NAV_FLAG  = '/tmp/social_nav_enabled'
@@ -46,6 +48,13 @@ class NavigationClient(Node):
         self.is_arrived  = False
         self.yaml_path   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../config/location.yaml")
 
+        # 🔴 2026-10-14 — local_costmap 은 **odom 프레임**인데(global_frame: odom,
+        #   rolling_window) 경유지 좌표는 **map 프레임**이다. 그대로 조회하면 셀 번호가
+        #   음수가 되어 '범위 밖 = 점령'으로 떨어졌고, 회피 경유지가 **매번 조용히
+        #   폐기**됐다. 9/04~10/14 Nav2 목표 72건이 전부 '직행'이었던 진짜 원인이다.
+        #   변환에 쓸 TF 버퍼. map→odom 은 AMCL 이 늘 쏜다.
+        self._tf_buf      = Buffer()
+        self._tf_listener = TransformListener(self._tf_buf, self)
         self._modifier          = NavigationModifier(self)
         self._goal_x            = 0.0
         self._goal_y            = 0.0
