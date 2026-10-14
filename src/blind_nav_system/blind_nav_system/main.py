@@ -274,6 +274,13 @@ def _install_shutdown():
 
 _NOISE_PREFIXES = ("ALSA lib", "Cannot open device", "Unknown PCM", "Invalid field", "Invalid card", "Found no matching", "Expression '")
 
+# ── 사회적 회피 탭이 보는 '지금 경로가 어떻게 나갔나' (2026-10-14) ───────────────
+#   navigation_client 가 찍는 줄을 _capture 에서 집어 둔다. 🔴 대시보드가 **다시
+#   판정하지 않는다** — 판정한 쪽(navigation_client)의 말을 그대로 옮기기만 한다.
+#   오늘(10/14) 회피가 됐는지를 로그를 뒤져서야 알았다. 화면에 있어야 할 값이다.
+_nav_route: dict = {"kind": None, "n": 0, "ts": 0.0, "note": None, "note_ts": 0.0}
+
+
 def _capture(proc: subprocess.Popen, name: str):
     global _nav_fail_seen
     for line in proc.stdout:
@@ -284,6 +291,17 @@ def _capture(proc: subprocess.Popen, name: str):
         # 도착 게이트가 `"0"` 의 성공/실패를 가르는 데 쓴다(위 _nav_fail_seen 주석).
         if "[NAV] 목표 실패" in line:
             _nav_fail_seen = time.monotonic()
+        # 경로 종류 — '직행'인지 '경유지 N개'인지. 문자열은 navigation_client 가 주인이다.
+        if "[NAV] 직행 경로 전송" in line:
+            _nav_route.update(kind="direct", n=0, ts=time.time())
+        elif "개 포함 경로 전송" in line:
+            try:
+                _wn = int(line.split("경유지")[1].split("개")[0].strip())
+            except Exception:
+                _wn = 1
+            _nav_route.update(kind="waypoints", n=_wn, ts=time.time())
+        elif "[Modifier]" in line:
+            _nav_route.update(note=line.strip()[-140:], note_ts=time.time())
         _log(name, line)
 
 @_jr_traced("write")   # /goto·/cancel·/say — "Nav2 목표를 끊었나"(A1)를 기록으로 증명하려고
@@ -1553,6 +1571,36 @@ def _read_social_nav_flag() -> bool:
 
 _social_nav_enabled = _read_social_nav_flag()   # 기본 비활성, 단 파일이 있으면 그걸 따른다
 
+# ── 사회적 회피 구간 게이트 (2026-10-14, 사용자 결정) ──────────────────────────
+#   "사회적 회피는 주행 단계에서만. 엘리베이터 단계부터는 없어도 된다."
+#   Nav2 로 길을 가는 구간은 셋뿐이다 — board(승차지점 주행) · front(② 문앞정렬) ·
+#   drive(목적지 주행). ③~⑥ 은 /stretch/cmd_vel 을 직접 쏘므로 회피가 끼어들 자리가
+#   애초에 없다. 🔴 front 를 **뺀** 이유: ② 는 정밀 정렬 구간이라 경유지가 끼어들면
+#   목표 자세에서 밀려나고, 문 앞에 엘리베이터를 기다리는 사람이 서 있는 것이 정상이다.
+#   사용자 토글(/tmp/social_nav_enabled)은 **건드리지 않는다** — 그걸 직접 뒤집으면
+#   화면과 파일이 갈라지는 사고가 다시 난다(674683f). 별도 파일로 '구간만' 끈다.
+#   같은 파일을 people_tracker 도 읽어 YOLO 추론을 쉰다(CPU 회수).
+_SOCIAL_NAV_PHASES   = ("board", "drive")
+_SOCIAL_SUSPEND_FILE = "/tmp/social_nav_suspend"
+_social_suspend_cur  = None     # 마지막으로 쓴 값 — 같은 값 재기록·로그 도배 방지
+
+
+def _social_nav_suspend(on: bool, why: str = ""):
+    """구간 중단을 켜고 끈다. 실패해도 여정을 막지 않는다(표시·최적화용)."""
+    global _social_suspend_cur
+    if _social_suspend_cur == on:
+        return
+    try:
+        Path(_SOCIAL_SUSPEND_FILE).write_text("1" if on else "0")
+    except Exception as e:
+        _log("MAIN", f"사회적 회피 구간 게이트 기록 실패: {e!r}")
+        return
+    _social_suspend_cur = on
+    _log("MAIN", f"사회적 회피 {'일시중단' if on else '재개'}" + (f" ({why})" if why else ""))
+
+
+_social_nav_suspend(False, "대시보드 기동")   # 🔴 이전 실행이 켠 채 죽었을 수 있다
+
 # 🔴 2026-10-12 — 사람 추적 상태를 대시보드도 본다.
 #   종전에는 `/people_tracker/people` 을 **interface 쪽만** 구독했고, 대시보드는 그게
 #   떠 있는지조차 몰랐다. 그래서 사용자가 "사회적 회피" 토글만 켜고 주행했는데
@@ -1560,7 +1608,8 @@ _social_nav_enabled = _read_social_nav_flag()   # 기본 비활성, 단 파일�
 #   2026-10-12 실측: 12:50:39 에 토글 ON 기록이 남았는데 경유지가 끼워진 건 **0건**이고,
 #   사람이 없어서인지 추적기가 안 떠서인지 **기록으로 가릴 수 없었다.**
 #   → (a) readiness 에 표시하고 (b) 여정 블랙박스에 1Hz 로 남긴다.
-_people_state: dict = {"n": None, "ts": 0.0, "people": [], "classes": {}}
+_people_state: dict = {"n": None, "ts": 0.0, "people": [], "classes": {},
+                       "robot": None}   # 평면도용 로봇 자세(추적기가 같이 보내 준다)
 _people_lock = threading.Lock()
 
 
@@ -1579,6 +1628,8 @@ def _people_callback(msg):
         _people_state["ts"]     = time.time()
         _people_state["people"] = ppl[:12]     # 기록 폭주 방지 — 12명까지만
         _people_state["classes"] = cls
+        _people_state["robot"] = {"x": d.get("robot_x"), "y": d.get("robot_y"),
+                                  "yaw": d.get("robot_yaw")}
 
 
 def _readiness_people():
@@ -1595,6 +1646,10 @@ def _readiness_people():
         return {"status": ("bad" if on else "unknown"), "age_sec": None,
                 "detail": ("미기동 — 회피 안 됨 (run.sh 필요)" if on
                            else "미기동 (회피 OFF 라 무관)")}
+    # 구간 게이트로 **일부러** 쉬는 중이면 고장이 아니다 — 빨간 ✕ 를 띄우면
+    # 운영자가 엘베 구간마다 거짓 경보를 보게 된다(2026-10-14).
+    if _social_suspend_cur:
+        return {"status": "unknown", "age_sec": age, "detail": "엘베 구간 일시정지"}
     if age is not None and age > 10:
         return {"status": "bad", "age_sec": age,
                 "detail": f"사람 추적이 {age:.0f}초째 끊겼습니다"}
@@ -1615,6 +1670,32 @@ def social_nav_state():
     global _social_nav_enabled
     _social_nav_enabled = _read_social_nav_flag()
     return jsonify(ok=True, enabled=_social_nav_enabled)
+
+
+@app.route("/people")
+def people_view_state():
+    """사회적 회피 탭 — 지금 누가 보이고, 회피가 **실제로** 켜져 있나.
+
+    세 가지를 한 화면에 모은다: 토글(사용자 의도) · 구간 게이트(여정이 끈 것) ·
+    마지막으로 나간 경로(직행/경유지). 셋이 어긋나는 것이 여태 사고의 모양이었다."""
+    with _people_lock:
+        ppl   = list(_people_state["people"])
+        ts    = _people_state["ts"]
+        robot = dict(_people_state["robot"]) if _people_state["robot"] else None
+    r = dict(_nav_route)
+    _now = time.time()
+    return jsonify(
+        ok=True,
+        people=ppl, robot=robot,
+        age_sec=(None if not ts else round(_now - ts, 1)),
+        toggle=_read_social_nav_flag(),
+        suspended=bool(_social_suspend_cur),
+        phase=_AUTO.get("phase"),
+        route={"kind": r["kind"], "n": r["n"],
+               "age_sec": (None if not r["ts"] else round(_now - r["ts"], 1))},
+        note=r["note"],
+        note_age_s=(None if not r["note_ts"] else round(_now - r["note_ts"], 1)),
+    )
 
 
 @app.route("/toggle_social_nav", methods=["POST"])
@@ -1991,6 +2072,9 @@ def _auto_set(step, msg, wait=False, phase=None):
         _AUTO["step"] = step; _AUTO["msg"] = msg; _AUTO["waiting"] = wait
         if phase is not None:
             _AUTO["phase"] = phase
+    # 구간 게이트 — phase 가 지나가는 **유일한 통로**라 여기서 건다(락 밖: 파일 I/O).
+    if phase is not None:
+        _social_nav_suspend(phase not in _SOCIAL_NAV_PHASES, f"phase={phase}")
     _jr("step", step, msg, wait, phase)
     _log("AUTO", f"[{step}] {msg}" + ("  — 확인 대기" if wait else ""))
 
@@ -4541,7 +4625,12 @@ def _jr_begin(dest, remote_addr=None):
 
 
 def _jr_end():
-    """run_end — `_auto_run` finally 맨 끝. 물리 상태는 '실패한 단계부터 재개'의 입력이 된다."""
+    """run_end — `_auto_run` finally 맨 끝. 물리 상태는 '실패한 단계부터 재개'의 입력이 된다.
+
+    🔴 구간 게이트도 여기서 반드시 푼다. 여정이 어떻게 끝나든(성공·취소·예외)
+    이 자리는 지나므로, 엘베 구간에서 중단된 채 끝나도 사람 추종이 영구히
+    꺼진 상태로 남지 않는다."""
+    _social_nav_suspend(False, "여정 종료")
     if _JR is None:
         return
     try:

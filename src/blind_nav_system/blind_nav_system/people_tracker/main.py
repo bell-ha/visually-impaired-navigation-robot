@@ -4,6 +4,15 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import argparse
 import threading
+import time
+
+# 🔴 구간 게이트 (2026-10-14) — 대시보드가 엘리베이터 구간 동안 이 파일에 '1' 을 쓴다.
+#   그 동안 YOLO 추론을 쉬어 CPU 를 돌려준다. 엘베 OCR·nav2 가 같은 CPU 를 쓰는데
+#   추적기까지 돌면 유휴가 12% 까지 떨어졌다(2026-10-14 실측, ②·⑤ 단계가 10초 넘게 느려짐).
+#   프로세스는 **죽이지 않는다** — 재기동에 YOLO 모델 로드로 20~30초가 들고,
+#   하필 그 사이가 회피가 필요한 마지막 주행 구간이다.
+SUSPEND_FLAG = "/tmp/social_nav_suspend"
+SUSPEND_POLL_SEC = 0.5
 
 import cv2
 import numpy as np
@@ -202,12 +211,27 @@ def main() -> None:
           ("   시크바로 구간 이동 가능" if is_video else ""))
 
     paused = False
+    gate_paused = False        # 파일 플래그(구간 게이트)에 의한 일시정지
+    gate_next_check = 0.0
     last_bar_pos = 0
     last_rendered = None
     rotate_step = args.rotate  # 현재 회전 누적값 (0/90/180/270)
 
     while True:
-        wait_ms = 30 if paused else 1
+        # 구간 게이트는 0.5초마다만 본다 — 30fps 루프에서 매 프레임 읽을 이유가 없다.
+        _now = time.monotonic()
+        if _now >= gate_next_check:
+            gate_next_check = _now + SUSPEND_POLL_SEC
+            try:
+                _g = open(SUSPEND_FLAG).read().strip() == "1"
+            except Exception:
+                _g = False          # 파일 없음 = 중단 아님 (평상시)
+            if _g != gate_paused:
+                gate_paused = _g
+                print("[INFO]", "구간 일시정지 — YOLO 쉼(엘베 구간)" if _g
+                      else "구간 재개 — YOLO 재개", flush=True)
+
+        wait_ms = 30 if (paused or gate_paused) else 1
         key = cv2.waitKey(wait_ms) & 0xFF
 
         if key in (ord("q"), 27):
@@ -227,7 +251,7 @@ def main() -> None:
                 estimator.cleanup(set())
             last_bar_pos = bar_pos
 
-        if paused:
+        if paused or gate_paused:
             if last_rendered is not None:
                 cv2.imshow(WINDOW, last_rendered)
             continue

@@ -56,6 +56,28 @@
   /* 로그 패널 */
   #log-panel { padding: 12px; overflow-y: auto; font-family: var(--font-mono); font-size: 0.8rem; background: var(--bg); flex: 1; min-height: 0; }
   /* 엘리베이터 화면 뷰 (iframe) — 뷰 이탈 시 src 제거로 자원 회수(연결예산·과부하 방지) */
+  /* 사회적 회피 탭 — 토글(의도) · 구간 게이트(여정이 끈 것) · 실제 나간 경로를
+     한 화면에 모은다. 셋이 어긋나는 것이 여태 사고의 모양이었다(2026-10-14). */
+  #social-view { display: none; flex: 1; flex-direction: column; gap: 12px;
+                 padding: 14px 20px; overflow-y: auto; }
+  .sv-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .sv-chip { display: flex; align-items: baseline; gap: 6px; padding: 5px 12px;
+             border-radius: 14px; font-size: 0.8rem; border: 1px solid transparent; }
+  .sv-chip b { font-weight: 700; }
+  .sv-chip span { opacity: 0.85; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sv-on   { background: var(--ok-bg);      color: var(--ok);      border-color: var(--ok-border); }
+  .sv-off  { background: var(--unknown-bg); color: var(--unknown); border: 1px dashed var(--text-faint); }
+  .sv-warn { background: var(--warn-bg);    color: var(--warn);    border-color: var(--warn-border); }
+  .sv-body { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+  #sv-plan { flex: 0 0 auto; }
+  .sv-list { flex: 1 1 260px; min-width: 0; font-size: 0.82rem; }
+  .sv-list table { width: 100%; border-collapse: collapse; }
+  .sv-list th { text-align: left; font-weight: 700; opacity: 0.7; padding: 4px 6px;
+                border-bottom: 1px solid var(--border); }
+  .sv-list td { padding: 4px 6px; border-bottom: 1px solid var(--border);
+                font-variant-numeric: tabular-nums; }
+  .sv-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+  .sv-note { font-size: 0.78rem; opacity: 0.8; }
   #elev-screen-container { display: none; flex: 1; overflow: hidden; }
   #elev-screen-frame { width: 100%; height: 100%; border: none; background: var(--bg); }
 
@@ -345,6 +367,7 @@
       <button class="view-btn active" id="view-log"  onclick="setView('log')">관제 로그</button>
       <button class="view-btn"        id="view-elev" onclick="setView('elev')">엘리베이터 화면</button>
       <button class="view-btn"        id="view-journey" onclick="setView('journey')">여정</button>
+      <button class="view-btn"        id="view-social" onclick="setView('social')">사회적 회피</button>
     </div>
     <!-- 👉 다른 탭을 보고 있을 때의 안전장치(U10-3). 확인 버튼은 여정 화면 한 자리에만 있으므로,
          로그·엘리베이터 화면을 보는 사이에 확인 대기가 걸리면 누를 수단이 화면에 없다.
@@ -390,6 +413,25 @@
       <div id="log-panel"></div>
     </div>
     <div id="elev-screen-container"><iframe id="elev-screen-frame" title="엘리베이터 화면"></iframe></div>
+
+    <div id="social-view">
+      <div class="sv-chips">
+        <div class="sv-chip sv-off" id="sv-toggle"><b>토글</b><span>—</span></div>
+        <div class="sv-chip sv-off" id="sv-gate"><b>구간</b><span>—</span></div>
+        <div class="sv-chip sv-off" id="sv-route"><b>경로</b><span>—</span></div>
+        <div class="sv-chip sv-off" id="sv-feed"><b>추적</b><span>—</span></div>
+      </div>
+      <div class="sv-body">
+        <svg id="sv-plan" width="260" height="260" viewBox="0 0 260 260" aria-label="로봇 기준 사람 위치"></svg>
+        <div class="sv-list">
+          <table>
+            <thead><tr><th>분류</th><th>거리</th><th>속도</th><th>id</th></tr></thead>
+            <tbody id="sv-rows"><tr><td colspan="4" style="opacity:.6">사람 없음</td></tr></tbody>
+          </table>
+          <p class="sv-note" id="sv-note"></p>
+        </div>
+      </div>
+    </div>
     <!-- 여정 뷰(U4) — 여정 중에는 로그 대신 이쪽을 본다. 오른쪽 패널(U3)은 그대로 둔다.
          값은 전부 기존 /auto_status 폴링에서 온다(새 호출 0). 버튼은 기존 핸들러를 그대로 부른다. -->
     <div id="journey-view">
@@ -1458,31 +1500,100 @@ const ALWAYS_TABS = ['NAV2', 'ELEV', 'MAIN', 'IFACE'];   // 상시 노출 5개(A
 let _curView = 'log';        // 지금 보고 있는 뷰 — 확인 대기 띠(U10-3)가 이걸 본다
 function setView(view) {
   _curView = view;
-  document.getElementById('view-log').classList.toggle('active', view === 'log');
-  document.getElementById('view-elev').classList.toggle('active', view === 'elev');
-  document.getElementById('view-journey').classList.toggle('active', view === 'journey');
-  const logView      = document.getElementById('log-view');
+  ['log', 'elev', 'journey', 'social'].forEach(v =>
+    document.getElementById('view-' + v).classList.toggle('active', view === v));
+  const logView       = document.getElementById('log-view');
   const elevContainer = document.getElementById('elev-screen-container');
-  const elevFrame      = document.getElementById('elev-screen-frame');
-  const journeyView    = document.getElementById('journey-view');
-  if (view === 'elev') {
-    // 뷰 진입 시에만 src 부여 — 이탈 시 제거(아래 else)해 MJPEG 스트림이 배경에서 계속 흐르지 않게
-    logView.style.display = 'none';
-    journeyView.style.display = 'none';
-    elevContainer.style.display = 'flex';
-    elevFrame.src = `http://${location.hostname}:5000/`;
-  } else if (view === 'journey') {
-    logView.style.display = 'none';
-    elevContainer.style.display = 'none';
-    elevFrame.src = '';
-    journeyView.style.display = 'flex';
-  } else {
-    elevContainer.style.display = 'none';
-    elevFrame.src = '';
-    journeyView.style.display = 'none';
-    logView.style.display = 'flex';
-  }
+  const elevFrame     = document.getElementById('elev-screen-frame');
+  const journeyView   = document.getElementById('journey-view');
+  const socialView    = document.getElementById('social-view');
+  // 뷰 진입 시에만 iframe src 부여 — 이탈 시 제거해 MJPEG 스트림이 배경에서 계속 흐르지 않게
+  logView.style.display     = (view === 'log')     ? 'flex' : 'none';
+  journeyView.style.display = (view === 'journey') ? 'flex' : 'none';
+  socialView.style.display  = (view === 'social')  ? 'flex' : 'none';
+  elevContainer.style.display = (view === 'elev')  ? 'flex' : 'none';
+  elevFrame.src = (view === 'elev') ? `http://${location.hostname}:5000/` : '';
+  if (view === 'social') pollSocial();     // 전환 즉시 한 번 — 2초를 빈 화면으로 기다리지 않게
 }
+
+// ── 사회적 회피 탭 ────────────────────────────────────────────────────────────
+// 🔴 보이는 동안에만 폴링한다. 추적기가 CPU 를 7코어 넘게 쓰는 상황이라
+//    안 보는 화면 때문에 초당 요청을 더 얹지 않는다(2026-10-14).
+const SV_CLS = {approaching: ['접근자', '#e05252'],
+                companion:   ['동행자', '#36a85c'],
+                unknown:     ['미분류', '#3b8fd4']};
+const SV_RANGE_M = 8;        // 평면도 반경
+
+function _svChip(el, cls, text) {
+  el.className = 'sv-chip ' + cls;
+  el.querySelector('span').textContent = text;
+}
+
+function _svPlan(people, robot) {
+  const S = 260, c = S / 2, k = (S / 2 - 18) / SV_RANGE_M;
+  const ring = (m) => `<circle cx="${c}" cy="${c}" r="${(m * k).toFixed(1)}" fill="none"
+      stroke="currentColor" stroke-opacity="0.18" stroke-dasharray="3 4"/>
+      <text x="${c + 3}" y="${c - m * k + 11}" font-size="9" fill="currentColor"
+      fill-opacity="0.45">${m}m</text>`;
+  let g = ring(2) + ring(4) + ring(7);
+  // 로봇 — 삼각형이 전방(위쪽)을 가리킨다
+  g += `<polygon points="${c},${c - 9} ${c - 6},${c + 6} ${c + 6},${c + 6}"
+         fill="currentColor" fill-opacity="0.75"/>`;
+  if (robot && robot.x !== null && robot.x !== undefined) {
+    const yaw = (robot.yaw || 0) * Math.PI / 180, cs = Math.cos(yaw), sn = Math.sin(yaw);
+    people.forEach(p => {
+      const dx = (p.x || 0) - robot.x, dy = (p.y || 0) - robot.y;
+      const fwd =  dx * cs + dy * sn;         // 전방(+)
+      const left = -dx * sn + dy * cs;        // 좌(+)
+      const px = c - left * k, py = c - fwd * k;
+      if (px < 0 || px > S || py < 0 || py > S) return;   // 화면 밖은 그리지 않는다
+      const col = (SV_CLS[p.classification] || SV_CLS.unknown)[1];
+      g += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="5" fill="${col}"/>`;
+    });
+  }
+  document.getElementById('sv-plan').innerHTML = g;
+}
+
+function pollSocial() {
+  if (_curView !== 'social') return;
+  fetch('/people').then(r => r.json()).then(d => {
+    _svChip(document.getElementById('sv-toggle'),
+            d.toggle ? 'sv-on' : 'sv-off', d.toggle ? '켜짐' : '꺼짐');
+    _svChip(document.getElementById('sv-gate'),
+            d.suspended ? 'sv-warn' : 'sv-on',
+            d.suspended ? `일시중단 (${d.phase || '엘베 구간'})` : `가동 (${d.phase || '여정 아님'})`);
+    const rt = d.route || {};
+    const rtTxt = rt.kind === 'waypoints' ? `경유지 ${rt.n}개 포함`
+                : rt.kind === 'direct'    ? '직행'
+                : '아직 없음';
+    _svChip(document.getElementById('sv-route'),
+            rt.kind === 'waypoints' ? 'sv-on' : 'sv-off',
+            rtTxt + (rt.age_sec === null || rt.age_sec === undefined ? '' : ` · ${rt.age_sec}s 전`));
+    const ppl = d.people || [];
+    _svChip(document.getElementById('sv-feed'),
+            d.age_sec === null || d.age_sec === undefined ? 'sv-off'
+              : (d.age_sec > 10 ? 'sv-warn' : 'sv-on'),
+            d.age_sec === null || d.age_sec === undefined ? '미수신'
+              : `${ppl.length}명 · ${d.age_sec}s 전`);
+
+    const tb = document.getElementById('sv-rows');
+    if (!ppl.length) {
+      tb.innerHTML = '<tr><td colspan="4" style="opacity:.6">사람 없음</td></tr>';
+    } else {
+      tb.innerHTML = ppl.map(p => {
+        const [lbl, col] = SV_CLS[p.classification] || SV_CLS.unknown;
+        const spd = Math.hypot(p.vx || 0, p.vy || 0);
+        return `<tr><td><span class="sv-dot" style="background:${col}"></span>${lbl}</td>`
+             + `<td>${(p.distance === undefined || p.distance < 0) ? '—' : p.distance.toFixed(2) + ' m'}</td>`
+             + `<td>${spd.toFixed(2)}</td><td style="opacity:.6">${p.id ?? ''}</td></tr>`;
+      }).join('');
+    }
+    _svPlan(ppl, d.robot);
+    document.getElementById('sv-note').textContent =
+      d.note ? `최근 회피 판단: ${d.note}` + (d.note_age_s != null ? ` (${d.note_age_s}s 전)` : '') : '';
+  }).catch(() => {});
+}
+setInterval(pollSocial, 1000);
 
 // 로그 SSE + 탭 필터
 const logPanel = document.getElementById('log-panel');
