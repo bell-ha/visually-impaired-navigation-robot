@@ -365,6 +365,7 @@ def start_subprocesses():
 _cmd_node = None
 _cmd_pub  = None
 _arm_client = None   # 팔 수납 트래젝토리 액션 클라이언트 (init_ros에서 생성)
+_nav_mode_client = None  # /switch_to_navigation_mode (init_ros에서 생성)
 _lc_loc_client = None    # lifecycle_manager_localization is_active 클라이언트 (init_ros에서 생성)
 _lc_nav_client = None    # lifecycle_manager_navigation is_active 클라이언트 (init_ros에서 생성)
 _manual_mode = False
@@ -743,7 +744,7 @@ def _readiness_poll_loop():
         time.sleep(3.0)
 
 def init_ros():
-    global _cmd_node, _cmd_pub, _map_client, _init_pub, _arm_client, _lc_loc_client, _lc_nav_client, _diag_st
+    global _cmd_node, _cmd_pub, _map_client, _init_pub, _arm_client, _lc_loc_client, _lc_nav_client, _diag_st, _nav_mode_client
     if not _ROS_OK:
         return
     rclpy.init()
@@ -773,6 +774,13 @@ def init_ros():
     _arm_client = ActionClient(_cmd_node, FollowJointTrajectory,
                                "/stretch_controller/follow_joint_trajectory")
     # 2a-2: 준비상태 폴링용 lifecycle is_active 클라이언트 — 여기서 1회만 생성(폴러 안에서 만들지 않음)
+    # 🔴 2026-10-14 — stretch_driver 모드 되돌리기. 팔을 쓰면 드라이버가 position 모드로
+    #   가는데 **되돌리는 코드가 저장소에 0건이었다.** 그러면 Nav2 가 경로를 아무리 잘
+    #   계산해도 드라이버가 전부 거부한다:
+    #       16:42:26 모드 변경: 자동
+    #       16:42:29~16:46:17 [ERROR][stretch_driver] must be in navigation mode (281회)
+    #   화면에는 '주행 중' 으로 보이는데 바퀴가 안 도는, 가장 알아채기 어려운 실패였다.
+    _nav_mode_client = _cmd_node.create_client(Trigger, "/switch_to_navigation_mode")
     _lc_loc_client = _cmd_node.create_client(Trigger, "/lifecycle_manager_localization/is_active")
     _lc_nav_client = _cmd_node.create_client(Trigger, "/lifecycle_manager_navigation/is_active")
     # 진단 계측 부착 (cmd_vel 퍼블리셔 수·엘리베이터 노드 존재 추적)
@@ -1150,6 +1158,10 @@ def set_mode():
             _manual_cmd["lx"] = 0.0
             _manual_cmd["az"] = 0.0
         publish_cmd(0.0, 0.0)
+        # 🔴 드라이버를 navigation 모드로 되돌린다. 이게 없어서 수동을 한 번 거친 뒤
+        #   모든 주행이 '경로는 받는데 바퀴는 안 도는' 상태가 됐다(2026-10-14 16:42).
+        threading.Thread(target=_ensure_navigation_mode, args=("자동 전환",),
+                         daemon=True).start()
     _log("MAIN", f"모드 변경: {'수동' if _manual_mode else '자동'}")
     return jsonify(ok=True, manual=_manual_mode)
 
@@ -2825,6 +2837,40 @@ def _nav_param_get_detail(node, name):
         _jr("gate", "param_get", inputs={"node": node, "name": name}, exc=repr(_je),
             latency_ms=round((time.monotonic() - _jt0) * 1000))
         return None, repr(_je)
+
+
+def _ensure_navigation_mode(why: str = "") -> bool:
+    """stretch_driver 를 navigation 모드로 되돌린다. 주행 직전과 자동 전환 때 부른다.
+
+    🔴 이걸 안 하면 Nav2 가 멀쩡히 경로를 내는데 드라이버가 속도 명령을 **전부 거부**한다
+    (`must be in navigation mode`). 화면·로그상 '주행 중' 인데 바퀴만 안 도는 실패라
+    눈으로도 못 가린다. 2026-10-14 에 그 상태로 4분을 돌았다.
+
+    이미 navigation 모드여도 호출은 안전하다(드라이버가 그대로 성공을 돌려준다).
+    실패해도 주행을 막지는 않는다 — 막으면 서비스가 느릴 때 출발 자체가 죽는다.
+    대신 로그에 남겨 '왜 안 움직이나' 를 즉시 가릴 수 있게 한다."""
+    cl = _nav_mode_client
+    if cl is None:
+        return False
+    try:
+        if not cl.wait_for_service(timeout_sec=1.0):
+            _log("MAIN", f"⚠ navigation 모드 전환 서비스 없음{(' — ' + why) if why else ''}")
+            return False
+        fut = cl.call_async(Trigger.Request())
+        t0 = time.monotonic()
+        while not fut.done() and time.monotonic() - t0 < 2.0:
+            time.sleep(0.02)
+        if not fut.done():
+            _log("MAIN", f"⚠ navigation 모드 전환 무응답{(' — ' + why) if why else ''}")
+            return False
+        res = fut.result()
+        ok = bool(res and res.success)
+        if not ok:
+            _log("MAIN", f"⚠ navigation 모드 전환 실패: {getattr(res, 'message', '?')}")
+        return ok
+    except Exception as e:
+        _log("MAIN", f"⚠ navigation 모드 전환 예외: {e!r}")
+        return False
 
 
 @_jr_traced("nav_params_restore_normal", ev="gate")
@@ -5015,6 +5061,10 @@ def goto():
         return jsonify(ok=False, error="Nav2 파라미터를 평소값으로 되돌리지 못했습니다 "
                                        "— 주행을 거부했습니다(로그 확인)"), 409
     _write("iface", f"/goto {name}")
+    # 🔴 출발 직전에 드라이버 모드를 보장한다 — position 모드로 남아 있으면 Nav2 가
+    #   경로를 내도 바퀴가 한 번도 안 돈다(2026-10-14, 281회 거부). 이미 navigation
+    #   모드면 그대로 성공이라 매번 불러도 안전하다.
+    _ensure_navigation_mode(f"출발 {name}")
     _log("MAIN", f"🖱 장소 클릭 → '{name}' 즉시 출발")
     return jsonify(ok=True)
 

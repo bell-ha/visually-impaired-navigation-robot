@@ -26,7 +26,22 @@ OBSTACLE_TOPIC   = '/obstacle_pusher/decision'
 
 REPLAN_INTERVAL  = 1.0   # 재평가 주기 (초)
 REPLAN_MIN_DIST  = 0.8   # 목표까지 이 거리 이하면 재계획 안 함 (m)
+# 🔴 2026-10-14 — 경유지가 생겼다 사라졌다 하면 **매초 경로 종류가 바뀌고**, 전환마다
+#   이전 goal 을 취소하므로 그때마다 컨트롤러가 로봇을 세운다(실측 17:00:55~17:01:08
+#   사이 전환 5회). 사람이 조금 움직여 코스트맵 비용이 임계를 넘나든 것이 원인이었다.
+#   그래서 '경유지 있음 → 없음' 방향만 이만큼 붙잡는다. 반대 방향(회피 시작)은
+#   즉시 반응해야 하므로 지연을 두지 않는다.
+WP_HOLD_SEC      = 3.0
 PUSH_SIDE_OFFSET = 0.20  # m — 박스 중심에서 옆으로 스쳐 지나갈 오프셋
+
+# 🔴 경유지 경로 전용 BT (2026-10-14 안전). nav2 기본 through_poses BT 에는
+#   <Spin 1.57rad> 과 <BackUp 0.30m> 복구가 들어 있는데, 시각장애인이 로봇 **뒤에서**
+#   손잡이를 잡고 걷는다 — 후진은 그대로 충돌이다. navigate_to_pose 쪽은 e4d48f0 에서
+#   이미 뺐지만 through_poses 쪽은 yaml 에 설정이 없어 기본 BT 가 쓰이고 있었다.
+#   드러나지 않은 이유: 경유지 경로가 좌표계 버그로 한 번도 실행된 적이 없었다(326ae76).
+#   ⚠ yaml 이 아니라 **goal 의 behavior_tree 필드**로 넘긴다 — nav2 재시작이 필요 없다.
+THROUGH_POSES_BT = ("/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/"
+                    "behavior_trees/navigate_through_poses_no_backup.xml")
 
 
 class NavigationClient(Node):
@@ -53,6 +68,12 @@ class NavigationClient(Node):
         #   음수가 되어 '범위 밖 = 점령'으로 떨어졌고, 회피 경유지가 **매번 조용히
         #   폐기**됐다. 9/04~10/14 Nav2 목표 72건이 전부 '직행'이었던 진짜 원인이다.
         #   변환에 쓸 TF 버퍼. map→odom 은 AMCL 이 늘 쏜다.
+        # 지금 떠 있는 goal 이 어느 액션 서버의 것인가 — 'pose' | 'poses' | None.
+        # bt_navigator 는 BT 엔진이 **하나**라 서버가 다르면 새 goal 을 거부한다(아래).
+        self._active_server = None
+        self._pending_wp    = None   # 취소 완료를 기다리는 중인 경유지 목록
+        self._pending_ts    = 0.0
+        self._wp_hold_until = 0.0   # 이 시각까지는 '경유지 없음' 으로 되돌리지 않는다
         self._tf_buf      = Buffer()
         self._tf_listener = TransformListener(self._tf_buf, self)
         self._modifier          = NavigationModifier(self)
@@ -199,6 +220,15 @@ class NavigationClient(Node):
         if not self._navigating or self.is_arrived or self._probing:
             return
 
+        # 서버 전환 취소 응답을 기다리는 중 — 3초 넘게 안 오면 강제로 보낸다.
+        # (취소 콜백이 유실되면 살아있는 goal 없이 영원히 서 있게 된다)
+        if self._pending_wp is not None:
+            if time.monotonic() - self._pending_ts < 3.0:
+                return
+            print("[NAV] 전환 취소 응답 지연 — 강제 전송", flush=True)
+            self._send_after_cancel()
+            return
+
         # 목표 근처면 재계획 생략
         rx = self._modifier._robot_x
         ry = self._modifier._robot_y
@@ -211,6 +241,13 @@ class NavigationClient(Node):
         social_on = self._social_nav_enabled()
         waypoints   = self._compute_waypoints_if_enabled(social_on)
         now_has_wp  = len(waypoints) > 1
+
+        # 깜빡임 억제 — 위 WP_HOLD_SEC 주석 참조. 경유지가 잠깐 안 잡혀도 바로
+        # 직행으로 되돌리지 않는다(되돌릴 때마다 goal 이 취소돼 로봇이 선다).
+        if now_has_wp:
+            self._wp_hold_until = time.monotonic() + WP_HOLD_SEC
+        elif self._last_had_wp and time.monotonic() < self._wp_hold_until:
+            return
 
         # 접근자가 있으면 매 주기 경유지 갱신 (사람이 다가올수록 회피 방향 재계산).
         # social OFF면 애초에 회피 자체를 안 하므로 접근자 유무로 강제 재계획하면
@@ -322,6 +359,47 @@ class NavigationClient(Node):
     # ── Nav2 전송 (공통) ───────────────────────────────────────────────────────
 
     def _send_to_nav2(self, waypoints: list[tuple[float, float]]) -> bool:
+        """경로를 보낸다. **액션 서버가 바뀌는 경우에만** 기존 goal 을 먼저 끝낸다.
+
+        🔴 2026-10-14 실측 — bt_navigator 는 BT 엔진이 하나라 다른 네비게이터가 돌고
+        있으면 새 goal 을 **거부**한다:
+            16:41:24.301 [NAV] 경유지 1개 포함 경로 전송
+            16:41:24.308 [ERROR][bt_navigator] Requested navigation from
+                         navigate_through_poses while another navigator is processing,
+                         rejecting request.
+            16:41:24.309 목표 실패 status=6 aborted      ← 8ms
+        같은 서버끼리는 선점이 된다(같은 날 16:41:04 'Received goal preemption request').
+        그래서 **종류가 바뀔 때만** 취소하고, 취소가 끝난 뒤에 보낸다."""
+        want = ("poses" if (len(waypoints) > 1 and self._through_poses_client.server_is_ready())
+                else "pose")
+        if self.goal_handle is not None and self._active_server not in (None, want):
+            gh, self.goal_handle = self.goal_handle, None
+            self._pending_wp = list(waypoints)
+            self._pending_ts = time.monotonic()
+            try:
+                # 🔴 취소 **응답**에 전송을 매달지 않는다. cancel_goal_async 의 future 는
+                #    '취소 요청을 접수했다' 에서 완료되고, goal 이 실제로 끝나는 것은 그
+                #    뒤다. 거기에 매달았다가 같은 밀리초에 보내 또 거부당했다:
+                #      16:57:56.487 전환 → 경유지 전송 / .491 rejecting / .508 Goal canceled
+                #    보낼 자리는 **이전 goal 의 결과가 도착한 시점**(get_result_callback)이다.
+                gh.cancel_goal_async()
+                print(f"[NAV] 경로 종류 전환({self._active_server}→{want}) — 기존 goal 종료 대기",
+                      flush=True)
+                return True
+            except Exception as e:
+                self._pending_wp = None
+                print(f"[NAV] 전환 취소 요청 실패({type(e).__name__}) — 그대로 전송", flush=True)
+        return self._send_now(waypoints)
+
+    def _send_after_cancel(self):
+        """취소가 **끝난 뒤** 미뤄 둔 경로를 보낸다."""
+        wp, self._pending_wp = self._pending_wp, None
+        if not wp or not self._navigating or self.is_arrived:
+            return
+        if not self._send_now(wp):
+            self._nav_failed(-1, "resend_failed")
+
+    def _send_now(self, waypoints: list[tuple[float, float]]) -> bool:
         now = self.get_clock().now().to_msg()
 
         if len(waypoints) > 1:
@@ -343,8 +421,10 @@ class NavigationClient(Node):
                     ps.pose.orientation.w = self._goal_w if _last else 1.0
                     ps.pose.orientation.z = self._goal_z if _last else 0.0
                     goal_msg.poses.append(ps)
+                goal_msg.behavior_tree = THROUGH_POSES_BT   # 후진·회전 없는 복구 BT
                 print(f"[NAV] 경유지 {len(waypoints)-1}개 포함 경로 전송", flush=True)
                 self._publish_waypoint_markers(waypoints)
+                self._active_server = "poses"
                 self._goal_gen += 1
                 _gen = self._goal_gen
                 self._through_poses_client.send_goal_async(goal_msg).add_done_callback(
@@ -363,6 +443,7 @@ class NavigationClient(Node):
         goal_msg.pose.pose.orientation.w = self._goal_w
         goal_msg.pose.pose.orientation.z = self._goal_z
         print("[NAV] 직행 경로 전송", flush=True)
+        self._active_server = "pose"
         self._goal_gen += 1
         _gen = self._goal_gen
         self._action_client.send_goal_async(goal_msg).add_done_callback(
@@ -399,7 +480,18 @@ class NavigationClient(Node):
             print(f"[NAV] 결과 수신 예외: {type(e).__name__}: {e}", flush=True)
             self._nav_failed(-1, "result_exception")
             return
+        # 🔴 종류 전환으로 미뤄 둔 경로가 있으면 **여기가** 보낼 자리다 — 이전 goal 이
+        #    terminal 에 도달했으므로 bt_navigator 가 비어 있다. 도착(SUCCEEDED)이면
+        #    보낼 이유가 없으니 버리고 정상 처리로 내려간다.
+        if self._pending_wp is not None and status != GoalStatus.STATUS_SUCCEEDED:
+            self._active_server = None
+            print(f"[NAV] 이전 goal 종료(status={status}) — 미뤄 둔 경로 전송", flush=True)
+            self._send_after_cancel()
+            return
+        self._pending_wp = None
+
         if status == GoalStatus.STATUS_SUCCEEDED:
+            self._active_server = None
             self.is_arrived  = True
             self._navigating = False
             self._stop_replan_timer()
@@ -416,6 +508,7 @@ class NavigationClient(Node):
         if self._failed_announced:
             return
         self._failed_announced = True
+        self._active_server    = None
         self._nav_fail_status  = status
         self._navigating       = False
         self._stop_replan_timer()

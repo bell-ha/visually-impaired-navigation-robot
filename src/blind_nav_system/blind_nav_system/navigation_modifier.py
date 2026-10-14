@@ -11,7 +11,14 @@ COSTMAP_TOPIC         = '/local_costmap/costmap'
 APPROACH_DIST_MAX     = 7.0   # m — 이 거리 안의 접근자만 반응
 COMPANION_DIST_MAX    = 4.0   # m — 이 거리 안의 동행자만 힌트로 사용
 AVOIDANCE_OFFSET      = 0.6   # m — 좌우 오프셋 거리
-AVOIDANCE_LOOKAHEAD   = 2.0   # m — 회피 경유지를 앞으로 얼마나 투영할지
+AVOIDANCE_LOOKAHEAD   = 2.0   # m — 회피 경유지를 앞으로 얼마나 투영할지(첫 후보)
+# 🔴 2026-10-14 — **후보를 여러 개 둔다.** 앞 2.0m·옆 0.6m 한 점만 쓰면 하필 피하려는
+#   사람이 서 있는 자리라, 코스트맵이 그 사람을 부풀려 비용 84~99 가 나왔다(임계 65).
+#   그러면 경유지가 폐기되고, 사람이 조금 움직일 때마다 비용이 65 를 넘나들어
+#   **경유지가 생겼다 사라졌다 → 매초 경로 종류 전환 → goal 취소 → 로봇이 멈칫**거렸다.
+#   더 가깝고 더 옆으로 비킨 자리를 차례로 시도해 **통행 가능한 첫 점**을 쓴다.
+AVOID_CANDIDATES = ((2.0, 0.6), (1.5, 0.9), (1.2, 1.2), (2.5, 0.6), (1.0, 0.6))
+COMPANION_CANDIDATES = (1.5, 1.1, 0.8)   # 동행자 힌트도 같은 이유로 거리를 줄여 가며 시도
 COMPANION_LOOKAHEAD   = 1.5   # m — 동행자 힌트 경유지 앞쪽 거리
 COMPANION_BLEND       = 0.4   # 동행자 방향 가중치 (0=목표만, 1=동행자만)
 OCCUPIED_THRESHOLD    = 65    # costmap 비용 기준 (이 이상이면 통행 불가)
@@ -168,9 +175,19 @@ class NavigationModifier:
         # 오른쪽 선호 (사회적 규범), 오른쪽 비용이 크게 높으면 왼쪽
         side = right if right_cost <= left_cost + RIGHT_PREFERENCE_BIAS else left
 
-        # 경유지는 앞으로 투영 — 로봇이 복도 한쪽을 유지하며 자연스럽게 통과
-        return (self._robot_x + forward[0] * AVOIDANCE_LOOKAHEAD + side[0] * AVOIDANCE_OFFSET,
-                self._robot_y + forward[1] * AVOIDANCE_LOOKAHEAD + side[1] * AVOIDANCE_OFFSET)
+        # 경유지는 앞으로 투영 — 로봇이 복도 한쪽을 유지하며 자연스럽게 통과.
+        # 통행 가능한 첫 후보를 쓴다(위 AVOID_CANDIDATES 주석 참조). 전부 막혔으면
+        # 첫 후보를 그대로 돌려준다 — 호출부가 _is_navigable 로 최종 판정하고,
+        # 폐기되면 그 좌표와 비용이 경고 로그에 남아 왜 안 됐는지 보인다.
+        first = None
+        for ahead_m, side_m in AVOID_CANDIDATES:
+            cand = (self._robot_x + forward[0] * ahead_m + side[0] * side_m,
+                    self._robot_y + forward[1] * ahead_m + side[1] * side_m)
+            if first is None:
+                first = cand
+            if self._is_navigable(*cand):
+                return cand
+        return first
 
     def _companion_waypoint(self, goal_x: float, goal_y: float,
                             companions: list[dict]) -> tuple[float, float] | None:
@@ -209,8 +226,15 @@ class NavigationModifier:
         if bs < 0.01:
             return None
 
-        return (self._robot_x + (bx / bs) * COMPANION_LOOKAHEAD,
-                self._robot_y + (by / bs) * COMPANION_LOOKAHEAD)
+        first = None
+        for ahead_m in COMPANION_CANDIDATES:
+            cand = (self._robot_x + (bx / bs) * ahead_m,
+                    self._robot_y + (by / bs) * ahead_m)
+            if first is None:
+                first = cand
+            if self._is_navigable(*cand):
+                return cand
+        return first
 
     def _to_costmap_frame(self, x: float, y: float):
         """map 좌표를 코스트맵 프레임으로 옮긴다. 못 옮기면 None.
