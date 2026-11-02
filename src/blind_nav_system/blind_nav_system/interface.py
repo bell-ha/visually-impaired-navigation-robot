@@ -1529,6 +1529,79 @@ class InterfaceApp:
     # ──────────────────────────────────────────
     # 버튼 처리 (명세서 §14)
     # ──────────────────────────────────────────
+    # ──────────────────────────────────────────
+    # 대시보드 여정 연동 (2026-11-02)
+    # ──────────────────────────────────────────
+    #   왜: 음성 경로(_go_nav)는 **층 개념이 없다.** location.yaml 143곳에 floor 가
+    #   다 있는데 interface 는 한 번도 안 본다. 그래서 5층에서 "105호" 라고 하면
+    #   엘리베이터를 타지 않고 **5층 지도의 그 좌표**(505호 자리)로 가서
+    #   "105호에 도착했습니다" 라고 말한다 — 층이 라벨뿐이고 좌표가 공용이라
+    #   무경고로 틀린 곳에 도착한다. 이 저장소가 지표로 삼은 '틀린 층 도착 선언'이다.
+    #   층 비교·엘베·지도전환은 대시보드 _auto_run 에 **이미 전부 있다.** 그것을 쓴다.
+    #
+    #   🔴 대시보드를 눈으로 봐야 출발할 수 있으면 음성 안내의 의미가 없다(사용자).
+    #   그래서 여정 중 '다음' 확인도 **손잡이 버튼**으로 받는다 — 엘베 도착은 귀로
+    #   듣고 버튼으로 확인하면 화면이 전혀 필요 없어진다.
+    DASH = "http://127.0.0.1:8080"
+
+    def _dash(self, path, payload=None, timeout=3.0):
+        """대시보드 호출. (ok, dict). 실패해도 예외를 올리지 않는다 —
+        대시보드가 죽어도 음성 안내 자체는 살아 있어야 한다."""
+        try:
+            data = None if payload is None else json.dumps(payload).encode()
+            req = urllib.request.Request(
+                self.DASH + path, data=data,
+                headers={"Content-Type": "application/json"},
+                method=("POST" if payload is not None else "GET"))
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return True, json.loads(r.read().decode() or "{}")
+        except urllib.error.HTTPError as e:
+            try:
+                return False, json.loads(e.read().decode() or "{}")
+            except Exception:
+                return False, {}
+        except Exception as e:
+            print(f"[DASH] {path} 실패: {type(e).__name__}: {e}", flush=True)
+            return False, {}
+
+    def _journey_active(self) -> bool:
+        """대시보드 여정이 돌고 있나. 플래그를 따로 들지 않는다 — 들면 여정이
+        비정상 종료했을 때 영구히 어긋난다. 매번 물어보는 쪽이 자가복구된다.
+
+        🔴 **버튼에서만 쓴다.** 당김(정지)에서는 쓰지 마라 — 왕복이 곧 지연이고,
+        당김은 눈 없는 유일한 정지 수단이다(_handle_pull 주석 참조).
+        타임아웃이 짧은 이유도 같다: 못 물으면 '여정 아님'으로 보고 기존 동작으로
+        떨어지는 편이 버튼이 먹통이 되는 것보다 낫다."""
+        ok, d = self._dash("/auto_status", timeout=0.8)
+        return bool(ok and d.get("active"))
+
+    def _start_journey(self, dest: str) -> None:
+        """목적지를 **대시보드 여정으로** 넘긴다. 거부되면 사유를 읽어 준다.
+
+        폴백: 대시보드가 아예 응답하지 않으면 기존 _go_nav 로 간다. 그 경우
+        **같은 층일 때만 옳다** — 다른 층이면 틀린 곳으로 가므로 경고를 말한다."""
+        # 🔴 목록에 없는 목적지는 **보내기 전에** 거른다. /auto_goto 는 접수(200 ok)
+        #    한 뒤 여정 스레드 안에서 "좌표를 못 찾음" 으로 끝내기 때문에, 그대로
+        #    보내면 "안내를 시작합니다" 라고 말해 놓고 조용히 끝난다(2026-11-02 실측).
+        if dest not in self.destinations():
+            self._say("그 장소를 찾지 못했습니다. 다시 말씀해 주세요.")
+            self._go_ready_dest_input()
+            return
+        ok, d = self._dash("/auto_goto", {"dest": dest})
+        if ok and d.get("ok"):
+            self.last_target = dest
+            self._say(f"{_dest_tts(dest)}로 안내를 시작합니다.")
+            self._state_log()
+            return
+        err = (d or {}).get("error")
+        if err:
+            self._say(str(err))                     # 거부 사유는 이미 한국어 문장이다
+            self._go_locked()
+            return
+        print(f"[DASH] /auto_goto 무응답 — 직행으로 폴백: {dest}", flush=True)
+        self._say("관제와 연결되지 않아 같은 층 기준으로 이동합니다.")
+        self._go_nav(dest)
+
     def _handle_button(self) -> None:
         now = time.time()
         if now < self._btn_guard_until:
@@ -1539,6 +1612,14 @@ class InterfaceApp:
         self._btn_guard_until = now + BUTTON_GUARD_SEC
 
         s, ph = self.state, self.phase
+
+        # 🔴 여정 중에는 버튼이 **'다음' 확인**이다. 엘베 도착은 귀로 듣고 버튼으로
+        #    확인하면 화면이 필요 없어진다(자동 넘김 ON 이면 남는 확인은 '이동중→하차'
+        #    하나뿐이다). 이 분기가 없으면 LOCKED 로 읽혀 "말씀해 주세요"가 나온다.
+        if self._journey_active():
+            ok, d = self._dash("/auto_confirm", {})
+            print(f"[DASH] 버튼 → /auto_confirm ok={ok} {d}", flush=True)
+            return
 
         # ── LOCKED ──────────────────────────────
         if s == State.LOCKED:
@@ -1551,7 +1632,7 @@ class InterfaceApp:
             if self.pending and self.pending.action == "start" and self.pending.destination:
                 dest = self.pending.destination
                 self._clear_pending()
-                self._go_nav(dest)
+                self._start_journey(dest)     # 층 비교·엘베는 대시보드가 안다
             return
 
         # ── READY (그 외) ─────────────────────────
@@ -1629,8 +1710,20 @@ class InterfaceApp:
             return
         self._pull_guard_until = now + PULL_GUARD_SEC
 
+        # 🔴 **먼저 멈추고 나중에 묻는다.** 당김은 눈 없는 유일한 정지 수단이라
+        #    상태 조회(HTTP) 때문에 늦으면 안 된다. 그래서:
+        #      · 내 쪽이 NAV 면 즉시 일시정지 (종전 동작 그대로)
+        #      · 대시보드 여정은 **별도 스레드로** 취소 요청 — 이벤트 루프를 막지 않는다
+        #    여정이 없을 때 /auto_cancel 은 아무 일도 하지 않으므로 그냥 보낸다
+        #    (상태를 먼저 물으면 그 왕복이 곧 지연이다).
         if self.state == State.NAV:
             self._go_paused()
+        else:
+            self._say("안내를 멈췄습니다.")
+        threading.Thread(
+            target=lambda: print(f"[DASH] 당김 → /auto_cancel "
+                                 f"{self._dash('/auto_cancel', {})}", flush=True),
+            daemon=True).start()
 
     # ──────────────────────────────────────────
     # Text (음성 인식 결과) 처리
