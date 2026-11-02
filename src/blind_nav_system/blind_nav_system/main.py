@@ -1296,6 +1296,41 @@ def _jr_map_floor(val, cached, age_s, caller):
         floor=v[0], why=v[1], caller=caller)
 
 
+def _floor_confirm_revalidate(why: str = "") -> bool:
+    """층 확정이 **아직 유효한가**. 유효하지 않으면 확정을 푼다.
+
+    🔴 2026-11-02 — 종전에는 `_floor_confirmed` 가 True 로 올라간 뒤 **False 로
+    내려오는 경로가 한 곳도 없었다**(설정 3곳 / 해제 0곳). 확정은 '사람이 골랐다'는
+    사실인데, 그 뒤에 **실제 지도가 바뀌면 거짓이 된다**:
+      · 런치를 재시작하면 map_server 가 기본 all.yaml(5층)로 되돌아간다
+      · 밖에서 load_map 을 부르면 대시보드는 모른다
+    그런데도 확정이 남아 있으면 ▲▼ 를 거꾸로 누르고, **층을 잘못 알아도 무경고
+    '성공'으로 끝난다** — 이 지도는 층이 라벨뿐이고 좌표가 같아서 104호와 504호가
+    같은 점이다. 실제로 2026-10-12 로그에 `기록(1층)과 파라미터(5층) 불일치` 가 찍혔다.
+
+    🔴 **확실한 불일치일 때만 푼다.** 판정 불가(None)는 풀지 않는다 — 모른다고 풀면
+    map_server 를 못 읽는 동안 엘베 여정이 통째로 막힌다. 이 파일의 기존 원칙과 같다:
+    "모르면 건너뛰지 않는다 — 틀린 층을 '확정'으로 만드는 것이 층을 모르는 것보다 나쁘다."
+    """
+    global _floor_confirmed
+    if not _floor_confirmed:
+        return False
+    (lf, lwhy), _age = _map_loaded_floor_cached()
+    if lf is None or lf == _current_floor:
+        return True                      # 모름 또는 일치 — 확정 유지
+    _floor_confirmed = False
+    _log("MAP", f"🚨 층 확정 해제 — 기록 {_current_floor}층인데 실제 지도는 {lf}층"
+                f" ({lwhy})" + (f" · {why}" if why else "")
+                + ". 대시보드에서 층을 다시 고르세요")
+    _jr("gate", "floor_confirm_revoked", recorded=_current_floor, loaded=lf,
+        loaded_why=lwhy, why=why)
+    try:
+        _elev_post("/floor", {"floor": _current_floor, "confirmed": False}, timeout=2)
+    except Exception:
+        pass
+    return False
+
+
 def _map_loaded_floor_cached():
     """표시 전용 — (결과, 캐시나이초). 판정에는 쓰지 마라(위 주석)."""
     with _map_floor_lock:
@@ -1357,6 +1392,7 @@ def switch_map():
         # loaded_floor 는 **실제로 올라가 있는 지도**다(웹 버튼이 "이 층 확인" /
         # "지도 전환" 중 무엇을 할지 라벨에 미리 써 주는 데 쓴다).
         # 표시 전용 캐시(30s). 값이 몇 초 된 것인지 같이 준다 — 받는 쪽이 신선도를 알 수 있게.
+        _floor_confirm_revalidate("상태 조회")   # 화면이 거짓 '확정'을 보여주지 않게
         (_lf, _why), _age = _map_loaded_floor_cached()
         return jsonify(floor=_current_floor, confirmed=_floor_confirmed,
                        loaded_floor=_lf, loaded_why=_why, loaded_age_s=_age)
@@ -1600,6 +1636,24 @@ _social_nav_enabled = _read_social_nav_flag()   # 기본 비활성, 단 파일�
 #   people_tracker 세 프로세스가 공유하는 계약이라, 이름을 바꾸면 셋을 동시에
 #   재시작해야 하고 하나라도 옛 이름을 보면 **무증상으로 꺼진 채** 돈다.
 #   리팩터는 실험 데이터를 다 모은 뒤에.
+# ── 절제 실험 조건 (2026-11-02) ───────────────────────────────────────────────
+#   "뒤에 매인 사용자" 제약의 각 설계를 하나씩 끄고 비교하는 실험용. 조건은 파일
+#   하나로 두고 **여정 블랙박스 run_start 에 못 박는다** — 손으로 런치 주석을 바꾸던
+#   방식은 어느 조건이었는지 기록이 안 남아, 하루에 수십 번 돌리면 데이터를 못 가린다.
+#   tools/ablation.py 로 설정한다. 파일 없음 = FULL(현재 설계 전부 켬).
+_ABLATION_FILE = "/tmp/ablation_condition"
+_ABLATION_CONDS = ("FULL", "A0", "A1", "A2", "A3", "A4")
+
+
+def _ablation() -> str:
+    """지금 조건. 알 수 없으면 FULL(평소 운용과 같음)."""
+    try:
+        v = Path(_ABLATION_FILE).read_text().strip().upper()
+        return v if v in _ABLATION_CONDS else "FULL"
+    except Exception:
+        return "FULL"
+
+
 _SOCIAL_NAV_PHASES   = ("board", "drive")
 _SOCIAL_SUSPEND_FILE = "/tmp/social_nav_suspend"
 _social_suspend_cur  = None     # 마지막으로 쓴 값 — 같은 값 재기록·로그 도배 방지
@@ -4195,6 +4249,13 @@ def _auto_run(dest):
         #    같은 층 주행은 거부하지 않는다(여기서 막으면 평소 복도 주행이 통째로
         #    멈춘다). 엘베 여정만 거부한다 — 거기서만 틀린 층이 "반대 버튼을 누른다"가
         #    되기 때문이다. 같은 층 쪽은 사실을 로그로 남기고 진행한다.
+        # 🔴 판정 **직전**에 확정이 아직 유효한지 다시 본다. 런치를 재시작하면
+        #    지도는 5층으로 되돌아가는데 확정은 남아 있어, 그 값으로 ▲▼ 를 정하면
+        #    거꾸로 누른다(아래 주석 참조).
+        _ab = _ablation()
+        if _ab != "FULL":
+            _log("AUTO", f"🧪 절제 조건 {_ab} 로 돌고 있다 — 평소 설계가 아니다")
+        _floor_confirm_revalidate("여정 시작")
         if not _floor_confirmed:
             _log("AUTO", f"⚠ 현재 층 미확정(부팅 초기값 {_current_floor}층 그대로) — "
                          f"'{dest}'={dest_floor}층 판정을 그 값으로 한다")
@@ -4762,6 +4823,9 @@ def _jr_begin(dest, remote_addr=None):
             #   파일을 읽는다. 없으면 OFF(interface 와 같은 fail-closed).
             "social_nav": _read_social_nav_flag(),
             "people_tracker": (_people_snapshot()[0] is not None),
+            # 🔴 절제 조건을 **시작 시점에** 박는다. 나중에 로그만 보고 "이건 어느
+            #   조건이었지"를 되짚을 수 없으면 그 주행은 데이터로 못 쓴다.
+            "ablation": _ablation(),
         }, sample_fn=_jr_sample)
     except Exception:
         pass

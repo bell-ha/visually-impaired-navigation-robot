@@ -42,6 +42,19 @@ PUSH_SIDE_OFFSET = 0.20  # m — 박스 중심에서 옆으로 스쳐 지나갈 
 #   ⚠ yaml 이 아니라 **goal 의 behavior_tree 필드**로 넘긴다 — nav2 재시작이 필요 없다.
 THROUGH_POSES_BT = ("/home/hello-robot/ament_ws/src/stretch_ros2/stretch_nav2/"
                     "behavior_trees/navigate_through_poses_no_backup.xml")
+# 절제 실험용 — 후진·회전이 **있는** nav2 기본 BT. A2/A0 에서만 쓴다.
+# 🔴 이 조건으로 돌릴 때 사람을 로봇 뒤에 세우지 말 것(더미/마커로 대체).
+THROUGH_POSES_BT_BACKUP = ("/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/"
+                           "navigate_through_poses_w_replanning_and_recovery.xml")
+ABLATION_FILE = '/tmp/ablation_condition'
+
+
+def _ablation() -> str:
+    try:
+        v = FilePath(ABLATION_FILE).read_text().strip().upper()
+        return v if v in ("FULL", "A0", "A1", "A2", "A3", "A4") else "FULL"
+    except Exception:
+        return "FULL"
 
 
 class NavigationClient(Node):
@@ -421,7 +434,11 @@ class NavigationClient(Node):
                     ps.pose.orientation.w = self._goal_w if _last else 1.0
                     ps.pose.orientation.z = self._goal_z if _last else 0.0
                     goal_msg.poses.append(ps)
-                goal_msg.behavior_tree = THROUGH_POSES_BT   # 후진·회전 없는 복구 BT
+                _ab = _ablation()
+                goal_msg.behavior_tree = (THROUGH_POSES_BT_BACKUP
+                                          if _ab in ("A2", "A0") else THROUGH_POSES_BT)
+                if _ab in ("A2", "A0"):
+                    print(f"[NAV] 🧪 절제 {_ab} — 후진 있는 기본 BT 사용", flush=True)
                 print(f"[NAV] 경유지 {len(waypoints)-1}개 포함 경로 전송", flush=True)
                 self._publish_waypoint_markers(waypoints)
                 self._active_server = "poses"

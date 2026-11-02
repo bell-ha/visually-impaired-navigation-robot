@@ -6,6 +6,20 @@ from std_msgs.msg import String
 from nav_msgs.msg import OccupancyGrid
 
 PEOPLE_TOPIC          = '/people_tracker/people'
+
+# 🔴 절제 실험 조건 (2026-11-02) — main.py 의 _ablation() 과 **같은 파일**을 읽는다.
+#   A3 = 뒤쪽 제외(_is_ahead)를 끈다 / A0 = 기본 nav2 전부.
+#   세 프로세스가 공유하는 계약이므로 파일 하나로 둔다(/tmp/social_nav_* 와 같은 방식).
+ABLATION_FILE = '/tmp/ablation_condition'
+
+
+def _ablation() -> str:
+    try:
+        from pathlib import Path as _P
+        v = _P(ABLATION_FILE).read_text().strip().upper()
+        return v if v in ("FULL", "A0", "A1", "A2", "A3", "A4") else "FULL"
+    except Exception:
+        return "FULL" 
 COSTMAP_TOPIC         = '/local_costmap/costmap'
 
 APPROACH_DIST_MAX     = 7.0   # m — 이 거리 안의 접근자만 반응
@@ -74,6 +88,8 @@ class NavigationModifier:
 
         ⚠ 로봇 자세를 모르면(추적기가 TF 를 못 얻어 distance 를 -1 로 보낸 경우)
         **앞쪽으로 친다**(fail-open). 모른다고 회피를 조용히 꺼 버리는 것이 더 나쁘다."""
+        if _ablation() in ("A3", "A0"):
+            return True        # 절제: 뒤쪽 제외를 끈다(안내 대상도 동행자로 잡히게)
         d = p.get('distance')
         if d is None or d < 0:
             return True                      # 로봇 자세 미상 — 거르지 않는다

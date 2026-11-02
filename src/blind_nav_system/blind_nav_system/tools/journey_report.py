@@ -182,6 +182,29 @@ def analyze(recs):
 
 
 # ── 판정 이상 ────────────────────────────────────────────────────────────────
+# ── 엘베가 정하는 시간 분리 (2026-11-02) ─────────────────────────────────────
+#   완주 시간을 단일 지표로 쓰면 안 된다. ③문열림(엘베가 오기를 기다림)과
+#   이동중(층 사이를 올라감)은 **로봇 성능이 아니라 엘리베이터가 정하는 시간**이고,
+#   같은 코드로 같은 경로를 돌아도 엘베 운에 따라 흔들린다. 실측(2026-10-12 완주):
+#       총 367.3s 중 ③문열림 78.4s + 이동중 35.4s = 113.8s = **31%**
+#   참가자 실험에서 이걸 안 가르면 조건 간 비교가 엘베 운에 오염된다.
+_ELEV_TIME_STAGES = ("문열림", "이동중")
+
+
+def elev_split(stages):
+    """(로봇 시간, 엘베 시간) 초. 양쪽 다 구간이 온전한 단계만 센다."""
+    rob = ev = 0.0
+    for st in stages:
+        if not (st.get("ts0") and st.get("ts1")):
+            continue
+        d = st["ts1"] - st["ts0"]
+        if any(k in (st.get("step") or "") for k in _ELEV_TIME_STAGES):
+            ev += d
+        else:
+            rob += d
+    return rob, ev
+
+
 def gate_issue(g):
     n = g.get("name")
     if g.get("raised"):
@@ -394,6 +417,12 @@ def report_one(path, args):
         cz = a["cause"]
         P(f"■ 결말: {end.get('outcome')}  소요 {dur(end.get('dur_s'))}  "
           f"첫 종결 원인 [{cz.get('kind')}] {cz.get('step') or ''} {short(cz.get('msg') or cz.get('repr') or '', 100)}")
+    _rob, _ev = elev_split(a["stages"])
+    if _ev > 0:
+        _tot = _rob + _ev
+        P(f"■ 시간 분해: 로봇 {dur(_rob)} ({_rob / _tot * 100:.0f}%)  ·  "
+          f"엘베 대기·이동 {dur(_ev)} ({_ev / _tot * 100:.0f}%)"
+          f"   — 엘베 시간은 로봇 성능이 아니다(③문열림+이동중)")
     # 기록 손실은 run_end 가 **없을 때도** 찍는다. 도중에 죽은 파일이 가장 중요한 실패인데
     # 예전엔 else 안에만 있어서 거기서만 침묵했다(2026-09-23 verifier 실측).
     wr = (end or {}).get("writer") or {}
@@ -611,7 +640,8 @@ def report_all(args):
     rows, fail_stage, cid_stats = [], collections.Counter(), collections.defaultdict(list)
     P = print
     P(wpad("시작", 15) + wpad("코드", 10) + wpad("목적지", 12) + wpad("결말", 10) + wpad("층", 4)
-      + wpad("도달 단계", 16) + wpad("소요", 9) + wpad("사람", 10) + "첫 종결 원인")
+      + wpad("도달 단계", 16) + wpad("소요", 9) + wpad("로봇시간", 10)
+    + wpad("사람", 10) + "첫 종결 원인")
     for p in files:
         recs, bad = load_run(p)
         if not recs:
@@ -637,6 +667,7 @@ def report_all(args):
           + wpad(code, 10) + wpad(st0.get("dest") or "?", 12) + wpad(outcome, 10) + wpad(fcm, 4)
           + wpad(reached, 16)
           + wpad(dur((end or {}).get("dur_s")), 9)
+      + wpad((lambda r, e: f"{dur(r)}" + (f" -{dur(e)}" if e > 0 else ""))(*elev_split(a["stages"])), 10)
           + wpad(f"{len(hs)}회 {dur(sum(h['waited_s'] for h in hs))}" if hs else "-", 10)
           + short(f"{cz.get('step') or ''} {cz.get('msg') or cz.get('repr') or ''}".strip(), 60)
           + ("  ⚠기록손실" if loss else ""))
