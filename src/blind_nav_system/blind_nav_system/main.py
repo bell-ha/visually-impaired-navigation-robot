@@ -2083,7 +2083,15 @@ def _grant_elev_lease(granted: bool, reason: str = "") -> bool:
                 _lease_renewer_thread.start()
             return True
     if not granted:
-        _log("ELEVLEASE", "🚨 리스 반납 실패 — 가드 미복원 상태로 엘베앱이 살아있음")
+        # 🔴 st is None(앱이 응답 없음 = 되돌릴 가드도 없음)과 "앱이 살아있는데 거부"는
+        #   전혀 다른 사건이다. 같은 문구로 내면 앱이 꺼져 있을 때마다 🚨 가 떠서
+        #   없는 가드 상태를 찾아 헤매게 된다(2026-11-02 18:23:33 실측 허위 경보).
+        if st is None:
+            _log("ELEVLEASE", "리스 반납 확인 불가 — 엘베앱이 응답하지 않는다"
+                              "(이미 종료됐을 수 있다). 앱이 없으면 되돌릴 가드도 없다")
+        else:
+            _log("ELEVLEASE", "🚨 리스 반납 실패 — 가드 미복원 상태로 엘베앱이 살아있음 "
+                              f"(authority={st.get('authority')} guard_off={st.get('guard_off')})")
     return False
 
 @app.route("/elevator_app_status")
@@ -4828,11 +4836,15 @@ def _jr_begin(dest, remote_addr=None):
             # 🔴 이 주행이 "사회적 회피를 켜고 돌린 것"인지 **시작 시점에 못 박는다.**
             #   실제 효력은 /tmp/social_nav_enabled 파일에 있으므로 메모리가 아니라
             #   파일을 읽는다. 없으면 OFF(interface 와 같은 fail-closed).
-            "social_nav": _read_social_nav_flag(),
-            "people_tracker": (_people_snapshot()[0] is not None),
+            # 🔴 deferred 는 {필드명: **함수**}다 — 괄호를 붙여 호출하면 값이 들어가고
+            #   writer 가 그 값을 호출하려다 TypeError 로 기록을 통째로 잃는다
+            #   (2026-11-02 실측: 블랙박스 5건에 deferred_err, ablation 은 추가 후
+            #    2건 전부 유실 — 어느 절제 조건이었는지 로그에 안 남았다).
+            "social_nav": _read_social_nav_flag,
+            "people_tracker": lambda: (_people_snapshot()[0] is not None),
             # 🔴 절제 조건을 **시작 시점에** 박는다. 나중에 로그만 보고 "이건 어느
             #   조건이었지"를 되짚을 수 없으면 그 주행은 데이터로 못 쓴다.
-            "ablation": _ablation(),
+            "ablation": _ablation,
         }, sample_fn=_jr_sample)
     except Exception:
         pass
