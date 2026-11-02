@@ -2630,6 +2630,30 @@ SCENE_TURN_WARN_DEG = 100.0
 # ±22° = 그 정상 범위의 두 배 남짓. 넘으면 횡오차가 70cm대로 가는 영역이다.
 SCENE_CLAMP_TURN_DEG_BY_SCENE = {5: 22.0}
 
+# ── ④ 캐빈 진입 전용: 물러나서 조준각을 눕힌다 (2026-11-02, 사용자 승인) ──────
+#   문제: 조준각 = atan(횡 / 남은거리) 라 **가까워질수록 폭발한다.**
+#         실측(2026-09-08) 전진 6.9cm · 횡 9.1cm → ①정렬 52.8°, ③까지 왕복 105.7°.
+#   왜 위험한가: 뒤로 0.9m 뻗은 꼬리가 제자리 회전에서 호를 그린다. 지도 실측으로
+#         캐빈은 좌 82.5cm · 우 70.0cm · 앞 72.5cm 다(all_with_cabin.pgm 레이캐스팅).
+#             꼬리 횡이동 = 0.9·sin(θ) → θ > 51.1° 에서 **우측 벽선을 넘는다.**
+#         즉 위 52.8° 는 벽을 긁는 각이었다. 회전으로는 애초에 풀리지 않는 문제다.
+#   해법: 먼저 **현재 헤딩 그대로 뒤로** 물러난다(회전 0). 거리가 늘면 각이 눕는다.
+#             15cm 물러남 → 52.8° → 22.6°, 꼬리 횡 71.7 → 34.5cm
+#   왜 후진이 허용되는가: ⑥ 하차가 이미 같은 경로로 187cm 후진한다. 문이 열려 있는
+#         동안 뒤는 비어 있다(지도상 4m+ 자유). 15cm 는 그보다 훨씬 작은 움직임이다.
+#   🔴 안전장치 셋 — 하나라도 빼지 마라. 틀린 측위가 "뒤로 가라"고 시킬 수 있고,
+#      그 뒤에는 **손잡이를 잡은 사람이 서 있다**(현재 음성 안내 없음):
+#        · 누적 상한 RETREAT_MAX_TOTAL_CM — 씬 전체에서 이만큼까지만
+#        · 횟수 상한 RETREAT_MAX_COUNT
+#        · 씬 화이트리스트 — ④ 캐빈 진입에서만. ⑥은 이미 후진이고 ①③은 밖이다.
+#   WARN 참가자 실험 전에는 **음성 안내를 반드시 붙일 것**(사용자와 합의: 지금은 보류).
+SCENE_RETREAT_SCENES  = (3,)     # (4) 엘리베이터 안 진입만
+RETREAT_WHEN_DIST_M   = 0.25     # 목표가 이보다 가까울 때만
+RETREAT_WHEN_TURN_DEG = 30.0     # 그리고 조준각이 이보다 클 때만
+RETREAT_CM            = 15.0     # 한 번에 물러나는 양
+RETREAT_MAX_TOTAL_CM  = 30.0     # 씬 전체 누적 상한
+RETREAT_MAX_COUNT     = 2        # 횟수 상한
+
 # 좌표 경로가 '클램프 거부'로 멈췄을 때 하드코딩(SCENE_MOVES)으로 물러설 씬.
 # ⑥ 하차뿐이다 — 여기서 안 움직이면 사람을 태운 채 엘리베이터 안에 서 있게 되고,
 # 문이 닫혀 엘리베이터가 다시 움직이는 것이 좌표를 조금 벗어나는 것보다 나쁘다.
@@ -4590,6 +4614,7 @@ class ElevatorTracker(Node):
 
         prev_dist = None      # 직전 반복 시작 시점의 dist — 무진전 판정용
         stop_why = None       # 조기 중단 사유 (최종 결과에 실린다)
+        retreat_n, retreat_cm = 0, 0.0   # 물러남 누적(위 상수 주석)
         for it in range(1, SCENE_MAX_ITERS + 1):
             res = self._scene_residual(tgt)
             if res is None:
@@ -4620,6 +4645,51 @@ class ElevatorTracker(Node):
             fwd_plan = abs(turn_fwd) <= abs(turn_rev)
             turn = turn_fwd if fwd_plan else turn_rev
             why = "전진안 선택" if fwd_plan else "후진안 선택"
+
+            # 물러남 — 위 SCENE_RETREAT_SCENES 주석이 근거다.
+            #   회전을 **하기 전에** 거리를 벌어 두는 것이 요점이다(회전 0으로 후진).
+            if (n in SCENE_RETREAT_SCENES and dist <= RETREAT_WHEN_DIST_M
+                    and abs(turn) >= RETREAT_WHEN_TURN_DEG
+                    and retreat_n < RETREAT_MAX_COUNT
+                    and retreat_cm + RETREAT_CM <= RETREAT_MAX_TOTAL_CM):
+                _after = math.degrees(math.atan2(abs(lat_cm) / 100.0,
+                                                 dist + RETREAT_CM / 100.0))
+                self._dlog(f"[AUTO] 씬{n} 반복{it} 물러남 {RETREAT_CM:.0f}cm — "
+                           f"조준각 {abs(turn):.1f}도 → {_after:.1f}도 예상 "
+                           f"(dist {dist:.3f}m 횡 {lat_cm:+.1f}cm · 꼬리 횡 "
+                           f"{90 * math.sin(math.radians(abs(turn))):.0f} → "
+                           f"{90 * math.sin(math.radians(_after)):.0f}cm · 누적 "
+                           f"{retreat_cm:.0f}/{RETREAT_MAX_TOTAL_CM:.0f}cm)")
+                with state_lock:
+                    _a0 = (state.get("scene_acc") or {}).get("fwd_cm", 0.0)
+
+                def _retreat_residual(fast=False, _a0=_a0):
+                    # 남은 후진량(cm, 음수). odom 누적으로 재므로 AMCL 잡음과 무관하다.
+                    with state_lock:
+                        _a = (state.get("scene_acc") or {}).get("fwd_cm", 0.0)
+                    return -RETREAT_CM - (_a - _a0)
+
+                def _retreat_clamp(_remain, _a0=_a0):
+                    # 이 한 번의 후진이 RETREAT_CM 을 넘지 못하게. 누적은 위 조건이 본다.
+                    with state_lock:
+                        _a = (state.get("scene_acc") or {}).get("fwd_cm", 0.0)
+                    if abs(_a - _a0) <= RETREAT_CM + 5.0:
+                        return True
+                    self._dlog(f"[AUTO] 물러남이 {RETREAT_CM:.0f}cm 를 넘었다 "
+                               f"({_a - _a0:+.0f}cm) — 중단")
+                    rejected.append(f"물러남 초과({_a - _a0:+.0f}cm)")
+                    return False
+
+                st = self._scene_leg(n, it, "물러남", "fwd",
+                                     _retreat_residual, _retreat_clamp)
+                retreat_n += 1
+                retreat_cm += RETREAT_CM
+                if st == "abort":
+                    return _result(False, "물러남 중단")
+                # 물러났으니 dist 가 **일부러** 늘었다. 무진전 판정 기준을 비우지
+                # 않으면 다음 반복이 이걸 후퇴로 보고 break 한다.
+                prev_dist = None
+                continue
 
             # 진동으로 ①②가 중단돼도 ③정렬(제자리 회전)은 반드시 거친다. ③는 위치를
             # 안 건드리므로 건너뛸 이유가 없고, 건너뛰면 자세가 틀어진 채로 "완료"가
