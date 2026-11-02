@@ -590,6 +590,26 @@ PLAN_SCHEMA = {
     "additionalProperties": False,
 }
 
+
+def _plan_schema(locations: List[str]) -> Dict[str, Any]:
+    """PLAN_SCHEMA 에 목적지 enum 을 박아 돌려준다.
+
+    🔴 destination 을 자유 문자열로 두면 모델이 **목록 밖 이름을 만들어낸다**.
+    2026-11-02 실측(143개 목록, 한글 수사 21건): 프롬프트에 남아 있던 옛 행사장
+    예시 'ITRC 201 …' 을 그대로 베낀 응답이 3건 나왔다. 상태머신이
+    `dest in self.destinations()` 로 걸러(§propose 분기) 잘못된 주행은 없지만,
+    그 턴은 "현재 갈 수 있는 장소가 아닙니다"로 버려진다 — 눈이 없는 사용자에게
+    버려지는 턴은 비싸다. enum 을 박으면 그 실패가 구조적으로 불가능해진다.
+
+    목록은 런타임 값(location.yaml)이라 모듈 상수에 박을 수 없어 함수로 만든다.
+    PLAN_SCHEMA 를 직접 고치지 않는다 — 호출마다 다른 목록이 들어오므로 상수를
+    오염시키면 두 번째 호출이 첫 번째의 목록을 쓴다."""
+    s = json.loads(json.dumps(PLAN_SCHEMA))      # 깊은 복사 (상수 오염 방지)
+    if locations:
+        # null 을 빼면 안 된다 — ask_again·disambiguate 는 destination=None 이다.
+        s["properties"]["destination"]["enum"] = [*locations, None]
+    return s
+
 class GPTPlanner:
     def __init__(self, api_key: str, model: str = "gpt-4o-mini", debug: bool = False):
         self.api_key = api_key
@@ -614,17 +634,27 @@ class GPTPlanner:
             "- '다시 가/계속/재개/그냥 가' → resume_propose, button_action=resume\n"
             "- '종료/그만/끝/멈춰' → abort_propose, button_action=abort\n"
             "- '바꾸고 싶어/다른 곳/변경' (새 목적지 없음) → change_dest_request, button_action=change_ready\n"
-            "- 목적지 이름이 발화에 포함된 경우 (예: '삼백 오호', '301호로 바꿔', '그냥 숭실대로', '세종대 부스로') → change_dest_propose, button_action=change_start, destination=해당목적지\n"
+            "- 목적지 이름이 발화에 포함된 경우 (예: '삼백 오호', '301호로 바꿔', '백오호로 가줘') → change_dest_propose, button_action=change_start, destination=해당목적지\n"
             "- 위 어디에도 해당 안 되면 → ask_again\n\n"
             "[중요] PAUSED에서 목적지 이름이 들리면 반드시 change_dest_propose로 처리할 것. ask_again 금지.\n\n"
-            "[유사 목적지 매칭 규칙]\n"
-            "- 발화가 목록의 목적지와 완전히 일치하지 않아도, 숫자/발음이 유사하면 가장 가까운 목적지로 매칭할 것.\n"
-            "- 예: '아이티알씨 이백일' → 'ITRC 201 AI융합연구원 (숭실대)', '삼백십삼' → 'ITRC 313 인공지능반도체시스템 연구센터 (KAIST)'\n"
-            "- 목적지 이름 괄호 안 내용은 별칭이다. 예: 'ITRC 217 지능통감융합 연구센터 (KAIST)'는 '카이스트' 또는 '지능통감'으로 불릴 수 있다.\n"
-            "- [중요] 발화가 별칭과 일치할 때 해당 별칭을 가진 목적지가 2개 이상이면 반드시 action=disambiguate로 처리하고 candidates에 전부 넣어라. propose 금지.\n"
-            "  예: '카이스트'라 하면 목록에 KAIST가 포함된 목적지가 여러 개이므로 → action=disambiguate, candidates=['ITRC 217 지능통감융합 연구센터 (KAIST)', 'ITRC 301 XR 워크스테이션 HCI 기술 연구센터 (KAIST)', 'ITRC 313 인공지능반도체시스템 연구센터 (KAIST)']\n"
-            "- [중요] destination 필드에는 반드시 목록에 있는 정확한 전체 이름을 그대로 써야 한다. "
-            "예: 사용자가 '숭실대'라고 해도 목록에 'ITRC 201 AI융합연구원 (숭실대)'이 있으면 destination='ITRC 201 AI융합연구원 (숭실대)'로 반환.\n"
+            "[호수 읽기 규칙 \u2014 가장 중요]\n"
+            "- 목적지는 '<층><방번호>호' 세 자리 호수다. 한글 수사를 **자리별로 끊어** 숫자로 바꿔라.\n"
+            "- 맨 앞이 층이다: 백=1, 이백=2, 삼백=3, 사백=4, 오백=5.\n"
+            "- 그 뒤가 방번호 두 자리다: 공=0, 일=1 … 구=9, 십=10, 십일=11, 이십=20, 이십팔=28.\n"
+            "- 예: '백오호'→105호 / '백이십팔호'→128호 / '이백십호'→210호 /\n"
+            "      '삼백이십호'→320호 / '오백일호'→501호 / '오백사호'→504호(연구실) / '오백십호'→510호\n"
+            "- [경고] 층 자리를 방번호로 흘리지 마라. '백오호'는 105호이고 505호가 아니다.\n"
+            "  '오백사호'는 504호이고 505호가 아니다. '오백일호'는 501호이고 505호가 아니다.\n"
+            "- 자리를 하나씩 읽기도 한다: '일공오호' → 일-공-오 → 105호.\n"
+            "- 발화가 목록과 완전히 일치하지 않아도 위 규칙으로 환산해 가장 가까운 목적지로 매칭할 것.\n\n"
+            "[별칭 규칙]\n"
+            "- 목적지 이름의 괄호 안 내용은 별칭이다. 예: '504호(연구실)'는 '연구실'로 불릴 수 있다.\n"
+            "- [중요] 그 별칭을 가진 목적지가 2개 이상이면 반드시 action=disambiguate 로 처리하고\n"
+            "  candidates 에 전부 넣어라. propose 금지.\n"
+            "  예: '연구실' → 목록에 '504호(연구실)'와 '520호(연구실)'이 있으므로\n"
+            "      action=disambiguate, candidates=['504호(연구실)', '520호(연구실)']\n"
+            "- [중요] destination 에는 목록에 있는 **정확한 전체 이름**을 괄호까지 그대로 써라.\n"
+            "  예: '오백사호' → destination='504호(연구실)' ('504호' 로 쓰면 안 된다)\n"
             "- 단, 후보가 2개 이상으로 애매하면 disambiguate 또는 ask_again 사용.\n\n"
             "[reason 규칙]\n"
             "- out_of_list: 목록 밖 목적지\n"
@@ -644,7 +674,7 @@ class GPTPlanner:
                 "format": {
                     "type": "json_schema",
                     "name": "voice_plan",
-                    "schema": PLAN_SCHEMA,
+                    "schema": _plan_schema(locations),
                     "strict": True,
                 }
             },

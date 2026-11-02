@@ -5105,15 +5105,12 @@ def auto_status():
                           ("active", "dest", "step", "msg", "waiting",
                            "force", "phase", "dest_floor", "mode", "paused")})
 
-_CONFIRMED_LOCATIONS = {
-    "인공지능 플랫폼",
-    "특별전시관",
-    "ITRC 120 상담장",
-    "ITRC 219 문화행사",
-    "ITRC 217 지능통감융합 연구센터 (KAIST)",
-    "ITRC 215 배리어프리 ICT기술 연구센터 (단국대)",
-    "ITRC 114 UAM-eVTOL 융합 연구센터 (세종대)",
-}
+# 장소 목록의 ✅ 배지 기준. 2026-11-02 사용자 결정: location.yaml 의 좌표는 전부
+# 실측·검증된 것이므로 모두 ✅ 로 표시한다(아래 /locations 가 confirmed=True 고정).
+# 그 전에는 옛 ITRC 행사장 부스 이름 7개만 담은 집합이어서 현재 목록(101~528호)과
+# 하나도 겹치지 않아 143개가 **전부 ⬜** 였다 — 배지가 정보를 0 비트 담고 있었다.
+# 나중에 "주행 검증된 방만 ✅" 로 되살리려면 여기 집합을 되돌리고 confirmed 를
+# `n in _CONFIRMED_LOCATIONS` 로 바꾸면 된다.
 
 @app.route("/goto", methods=["POST"])
 def goto():
@@ -5149,7 +5146,7 @@ def get_locations():
     except Exception:
         locs = {}
     return jsonify(locations=[
-        {"name": n, "confirmed": n in _CONFIRMED_LOCATIONS,
+        {"name": n, "confirmed": True,
          "floor": (v or {}).get("floor")}   # 층 메타데이터 (없으면 null = 공용)
         for n, v in locs.items()
     ])

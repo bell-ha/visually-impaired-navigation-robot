@@ -759,11 +759,22 @@ function setMode(manual) {
 function loadLocations() {
   fetch('/locations').then(r => r.json()).then(d => {
     const el = document.getElementById('location-list');
-    const item = loc => loc.confirmed
-      ? `<div class="loc-item" data-name="${escHtml(loc.name)}" style="background:var(--ok-bg);border-radius:6px;padding:5px 10px;font-size:0.78rem;color:var(--ok);cursor:pointer" title="클릭 = 즉시 출발 (개발용 임시방편 — 최종판은 확인 절차 복원 예정)">✅ ${escHtml(loc.name)}</div>`
-      : `<div class="loc-item" data-name="${escHtml(loc.name)}" style="background:var(--neutral-bg);border-radius:6px;padding:5px 10px;font-size:0.78rem;color:var(--text-faint);cursor:pointer" title="클릭 = 즉시 출발 (개발용 임시방편 — 최종판은 확인 절차 복원 예정)">⬜ ${escHtml(loc.name)}</div>`;
-    // 층별 그룹: 공용(엘리베이터 지점, floor 없음) → 5층 → 4층 → 3층
-    const groups = [[null, '🛗 공용'], [5, '5층'], [4, '4층'], [3, '3층']];
+    const item = loc => {
+      const fl = (loc.floor ?? null);
+      const bg = loc.confirmed ? 'var(--ok-bg)' : 'var(--neutral-bg)';
+      const fg = loc.confirmed ? 'var(--ok)'    : 'var(--text-faint)';
+      const mk = loc.confirmed ? '✅' : '⬜';
+      return `<div class="loc-item" data-name="${escHtml(loc.name)}" data-floor="${fl ?? ''}"`
+           + ` style="background:${bg};border-radius:6px;padding:5px 10px;font-size:0.78rem;`
+           + `color:${fg};cursor:pointer"`
+           + ` title="클릭 = 여정 시작 — 같은 층이면 바로 주행, 다른 층이면 엘리베이터를 탄다">`
+           + `${mk} ${escHtml(loc.name)}</div>`;
+    };
+    // 층 그룹은 /locations 응답에서 모은다 — 하드코딩하면 yaml 에 층이 늘어도 화면이
+    // 안 따라온다(2026-11-02 까지 [공용,5,4,3] 이 박혀 있어 1·2층 56개가 안 보였다).
+    const floors = [...new Set(d.locations.map(l => l.floor).filter(f => f != null))]
+                     .sort((a, b) => b - a);
+    const groups = [[null, '🛗 공용'], ...floors.map(f => [f, f + '층'])];
     el.innerHTML = groups.map(([f, label]) => {
       const items = d.locations.filter(l => (l.floor ?? null) === f);
       if (!items.length) return '';
@@ -772,12 +783,18 @@ function loadLocations() {
            + `background:var(--bg);">${label} (${items.length})</div>`
            + items.map(item).join('');
     }).join('');
-    // 클릭 = 즉시 출발 (오클릭 방지용 브라우저 확인 팝업만 거침)
+    // 🔴 클릭은 **여정**(/auto_goto)으로 보낸다. 예전에는 /goto(Nav2 단일 목표)라서
+    //    5층에서 '305호'를 누르면 엘리베이터를 타지 않고 층이 공유하는 같은 좌표로
+    //    직행한 뒤 "도착"이 떴다(층은 라벨뿐이고 28개 좌표를 5개 층이 공유한다).
+    //    /auto_goto 는 목적지 floor 와 현재 층을 비교해 같은 층이면 바로 주행하고
+    //    다른 층이면 엘리베이터 여정을 돈다 — 화면 입력의 "바로 출발"은 그대로다.
     el.querySelectorAll('.loc-item').forEach(div => div.onclick = () => {
-      const n = div.dataset.name;
-      if (!confirm(n + ' (으)로 즉시 출발합니다. 진행할까요?')) return;
-      fetch('/goto', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({name: n})})
+      const n  = div.dataset.name;
+      const fl = div.dataset.floor;
+      const where = fl ? `${n} (${fl}층)` : n;
+      if (!confirm(where + '(으)로 출발합니다. 다른 층이면 엘리베이터를 탑니다. 진행할까요?')) return;
+      fetch('/auto_goto', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({dest: n})})
         .then(r => r.json()).then(d => { if (!d.ok) alert(d.error); });
     });
   }).catch(() => {});
