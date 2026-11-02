@@ -149,6 +149,19 @@ def msg5(dest: str) -> str:
     d = _dest_tts(dest)
     return f"{d}로 이동할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
 
+def msg16(dest: Optional[str]) -> str:
+    """도착 안내 — **어디에 도착했는지 이름을 말한다.**
+
+    🔴 2026-11-02 — 종전에는 MSG[16] "목적지에 도착했습니다." 하나였다. 그런데
+    여정의 중간 구간도 같은 /goto 경로를 타므로, 엘리베이터 탑승지점·문앞에
+    도착할 때마다 **"목적지에 도착했습니다"** 가 울렸다. 눈으로 확인할 수 없는
+    사용자에게 이것은 **틀린 도착 선언**이다 — 118호에 왔다고 믿게 만든다.
+    출발 안내는 이미 이름을 말한다(f"{dest}로 안내를 시작합니다"). 도착도 같아야
+    짝이 맞고, 사용자가 '내가 들은 곳'과 '가려던 곳'을 스스로 대조할 수 있다.
+    이름을 모를 때만(직접 /goto 없이 도착한 경우) 종전 문구로 떨어진다."""
+    return f"{_dest_tts(dest)}에 도착했습니다." if dest else MSG[16]
+
+
 def msg12(dest: str) -> str:
     d = _dest_tts(dest)
     return f"{d}로 목적지를 변경할까요? 맞으면 버튼을 눌러주세요. 아니면 말씀해 주세요."
@@ -1887,8 +1900,11 @@ class InterfaceApp:
     # ──────────────────────────────────────────
     def _handle_arrive(self) -> None:
         if self.state == State.NAV:
+            # 🔴 이름을 **지우기 전에** 집는다 — 종전에는 먼저 None 으로 지워서
+            #    "목적지에 도착했습니다" 밖에 말할 수 없었다(msg16 주석 참조).
+            where = self.last_target
             self.last_target = None
-            self._say(MSG[16])
+            self._say(msg16(where))
             self._go_locked()
 
     def _handle_nav_failed(self) -> None:
