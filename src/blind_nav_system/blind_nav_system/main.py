@@ -3814,10 +3814,17 @@ def _auto_front_nav2():
     try:
         # 모듈 최상위에 `import math` 가 없다 — 예전 `math.degrees` 는 NameError 로 except 에 떨어져
         # 이 로그의 방향이 도입 이후 **항상 "?"** 였다(A2 를 로그로 잡을 유일한 수단이 죽어 있었다).
-        tgt_yaw = _math_auto.degrees(2.0 * _math_auto.atan2(float(p.get("z") or 0.0),
-                                                            float(p.get("w") or 1.0)))
+        # 🔴 `p.get("z") or 0.0` 금지 — 2471 줄 주석이 못 박은 그 패턴이 여기 남아
+        #   있었다(2026-11-02 정리). location.yaml 143곳 중 z·w 가 **둘 다 있는 건
+        #   3곳뿐**이고 나머지 140곳은 방향이 아예 없다. 기본값을 채우면 그 140곳이
+        #   "없는 값"이 아니라 **"목표 방위 0°"라는 틀린 값**을 갖는다.
+        #   여기는 표시·로그 전용이고 대상도 `엘리베이터 문앞`(z·w 있음) 한 곳이라
+        #   당장 터지지는 않았다. 고치는 이유는 **다음 사람이 이걸 보고 판정 자리에
+        #   복사하는 것**을 막기 위해서다. 26줄 위 _ty_f 가 올바른 판이다 — 같은 함수
+        #   안에서 두 방식이 섞여 있었다.
+        tgt_yaw = _math_auto.degrees(2.0 * _math_auto.atan2(float(p["z"]), float(p["w"])))
         dy = (_robot_pose["yaw_deg"] - tgt_yaw + 180.0) % 360.0 - 180.0
-    except Exception:
+    except (TypeError, ValueError, KeyError):
         dy = None
     _log("AUTO", "② 문앞 Nav2 도착 — 잔여 위치 "
                  + ("?" if d is None else f"{d:.3f}m")

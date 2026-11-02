@@ -701,8 +701,11 @@ class JourneyRecorder:
                 return
             yaw = None
             try:
-                yaw = math.degrees(2.0 * math.atan2(float(loc.get("z") or 0.0),
-                                                    float(loc.get("w") or 1.0)))
+                # 🔴 기본값 채우기 금지(main.py 2471 주석). location.yaml 143곳 중
+                #   z·w 가 둘 다 있는 건 3곳뿐이라, or 0.0 을 쓰면 나머지 140곳이
+                #   블랙박스에 **"목표 방위 0°"라는 틀린 값**으로 기록된다.
+                #   없으면 없는 대로 둬야 사후 분석이 "방향이 없었다"를 알 수 있다.
+                yaw = math.degrees(2.0 * math.atan2(float(loc["z"]), float(loc["w"])))
             except Exception:
                 pass
             run.goal = {"name": name, "x": loc.get("x"), "y": loc.get("y"), "yaw_deg": yaw}
