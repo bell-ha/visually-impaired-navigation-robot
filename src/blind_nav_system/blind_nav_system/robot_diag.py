@@ -312,9 +312,20 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
             _b = _safe_call(battery_getter)
             if isinstance(_b, dict):
                 _v, _i = _b.get("voltage"), _b.get("current")
-                batt = (f" batt={'?' if _v is None else f'{_v}V'}"
-                        f"/{'?' if _i is None else f'{_i}A'}"
-                        f"{' 충전중' if _b.get('charging') else ''}")
+                _age = _b.get("age_s")
+                _num = (f"{'?' if _v is None else f'{_v}V'}"
+                        f"/{'?' if _i is None else f'{_i}A'}")
+                # 🔴 나이를 **반드시** 같이 보여준다. 값만 찍으면 토픽이 끊겨도 마지막
+                #   값이 영원히 "현재값"처럼 보인다 — 2026-11-05 16:10 런치 종료 뒤
+                #   `batt=12.3V/6.61A` 가 123줄 연속 같은 값으로 찍혔고 그걸 배터리
+                #   이상으로 오판했다. 얼어붙은 값은 값이 없는 것보다 나쁘다.
+                if _age is None:
+                    batt = " batt=미수신"
+                elif _age > BATT_STALE_SEC:
+                    batt = f" batt=🚨끊김{_age:.0f}s(마지막 {_num})"
+                else:
+                    batt = (f" batt={_num}"
+                            f"{' 충전중' if _b.get('charging') else ''}")
             elif battery_getter is not None:
                 batt = " batt=?"      # getter 는 줬는데 dict 가 아니다 = 아직 미수신
             logger.log("HB",
@@ -336,6 +347,11 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
     except Exception as e:
         logger.log("WARN", f"하트비트 타이머 생성 실패: {e}")
     return st
+
+
+# /battery 가 이보다 오래 안 오면 HB 가 "끊김"으로 적는다. 대시보드
+# _READY_THRESH["battery"]=15.0 과 같은 뜻이고, robot_diag 는 그 표를 모르므로 여기 둔다.
+BATT_STALE_SEC = 15.0
 
 
 def _safe_call(fn):

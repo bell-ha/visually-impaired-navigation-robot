@@ -815,7 +815,15 @@ def init_ros():
             # 🔴 getter 로 넘긴다 — 이 노드는 이미 /battery 를 구독하고 있어서
             #   (_battery_callback) robot_diag 안에서 또 구독하면 같은 토픽에
             #   콜백이 둘 붙는다. authority/phase 와 같은 기존 관용구를 쓴다.
-            battery_getter=lambda: _battery,
+            # 🔴 **나이를 같이 넘긴다.** 값만 넘기면 토픽이 끊겨도 HB 가 마지막 값을
+            #   살아있는 것처럼 찍는다 — 2026-11-05 16:10 런치를 끈 뒤 `batt=12.3V/6.61A`
+            #   가 **123줄 연속 똑같이** 찍혔고, 그걸 보고 "배터리 이상"으로 오판했다.
+            #   준비바 pill 은 나이를 보므로 맞게 "신호 끊김"이라 했는데 HB 만 거짓말했다.
+            #   얼어붙은 값을 현재값으로 보여주는 것은 값이 없는 것보다 나쁘다.
+            battery_getter=lambda: {
+                **_battery,
+                "age_s": (time.monotonic() - _ready["battery"]) if _ready["battery"] > 0 else None,
+            },
             own_node_name="main_web_cmdvel",
             expected_nodes=["elevator_tracker", "rplidar", "camera",
                             "gripper_camera", "safety_zone_left_back_tf",
