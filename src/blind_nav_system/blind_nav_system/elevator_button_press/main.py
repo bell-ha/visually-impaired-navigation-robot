@@ -63,11 +63,42 @@ _infer_proc = None
 _infer_lock = threading.Lock()
 
 
+# OCR 추론 스레드 상한. 🔴 안 주면 TF 가 코어 16개를 전부 잡는다 — 2026-11-05
+# 여정 중 **전원이 끊긴** 사고 조사에서 나온 값이다. 승차지점 도착 직후 이 콜드
+# 로딩이 시작되고 2.7초 뒤에 꺼졌고, 그 순간 Nav2 는 31노드 전부 살아 있었다.
+# 실측 (16코어, 유휴 머신, 추론 3회씩 — tools 아님, 1회성 하네스):
+#     스레드   로딩CPU   추론CPU(3회)   추론지연
+#     무제한    12.1초     11.38초      336~381ms
+#     8          7.9초      7.21초      422~448ms
+#     6          6.7초      5.89초      486~519ms
+#     4          5.5초      3.98초      354~436ms   ← 채택
+#     2          4.7초      3.54초      605~628ms
+#   → 4 에서 **추론 CPU 가 65% 줄고 지연은 거의 그대로**다. 2 는 CPU 이득이 작은데
+#     지연이 1.7배로 뛴다. 로딩 시간은 오히려 짧아진다(4.5→3.8초) — 16코어에서는
+#     스레드 경합 오버헤드가 이득을 먹고 있었다.
+#   ⚠ 지연 수치는 3회 표본이라 비단조다(6 이 8 보다 나쁘게 나왔다). 단조로운 것은
+#     CPU 쪽이고 채택 근거도 CPU 다 — 지연은 "크게 안 나빠진다"까지만 읽을 것.
+#   🔴 상한이 콜드 로딩에만 듣는 게 아니다: 엘베앱은 추론을 1~2Hz 로 **계속** 돌린다
+#     (로그의 `[OCR] tgt=... dets=[...]` 줄). 그래서 엘베 단계 **내내** 효과가 있고,
+#     "평균지연 불변·최악지연 2배"로 알려진 OCR CPU vs 센서지연 문제도 같이 완화된다.
+#   상주화(런치 때 미리 올리고 소켓으로 붙기)는 **하지 않았다** — 추론 서버는
+#   `for line in sys.stdin:` 으로 블록해서 유휴 CPU 가 실측 0.00초였지만, RSS 1.34GB 를
+#   런치 때부터 영구 점유하고 파이프→소켓 IPC 변경이 필요하다. 그 이득("로딩 4.5초를
+#   주행과 안 겹치게")의 대부분을 이 상한이 이미 가져간다.
+OCR_TF_THREADS = "4"
+
+
 def start_infer_server():
     global _infer_proc
     print("OCR 모델 로딩 중... (최초 1회, 수초 소요)", flush=True)
     _infer_proc = subprocess.Popen(
         [VENV_PYTHON, INFER_SERVER],
+        # 🔴 env 를 통째로 새로 주지 말고 **물려받은 환경에 얹는다** — VENV_PYTHON 이
+        #   쓰는 PATH·LD_LIBRARY_PATH·ROS 환경이 빠지면 서버가 import 에서 죽는다.
+        env={**os.environ,
+             "OMP_NUM_THREADS":        OCR_TF_THREADS,
+             "TF_NUM_INTRAOP_THREADS": OCR_TF_THREADS,
+             "TF_NUM_INTEROP_THREADS": "1"},
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
