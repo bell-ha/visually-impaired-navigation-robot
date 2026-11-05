@@ -2286,7 +2286,14 @@ _AUTO = {"active": False, "dest": "", "step": "", "msg": "",
          #   흐름과 실제가 갈린다. 끄고 싶으면 취소하거나 '다음'을 직접 눌러 진행한다.
          #   켜도 항상 사람을 기다리는 자리: ①③⑤ 의 **실패·시간초과** 뒤, 그리고
          #   **"이동중 → ⑥ 하차"**(엘리베이터가 목적 층에 섰는지는 귀로 판단한다).
-         "auto_advance": False}
+         "auto_advance": False,
+         # 🔴 현재 단계가 **시작된 시각**(epoch). 2026-09-23 사고를 식별한 값이 바로
+         #   "한 단계에서 몇 초 기다렸나" 다 — `① 정렬 완료로 '다음'을 기다리는 동안
+         #   사용자가 엘베앱에서 직접 눌러 여정이 4분 22초를 버렸다`. 그런데 화면의
+         #   `#jv-elapsed` 는 "/auto_status 에 시작시각이 없어" 영구 공백이었다.
+         #   `step` 이 **바뀔 때만** 갱신한다 — _auto_set 은 같은 step 으로 msg 만
+         #   바꿔 여러 번 불리므로, 매 호출 갱신하면 경과가 늘 0 이 된다.
+         "step_t0": 0.0}
 # UI 토글이 쓰는 기본값(여정 밖에서 보관). 여정 시작 때 _AUTO 로 복사된다.
 _auto_advance_pref = False
 _auto_lock = threading.Lock()
@@ -2298,6 +2305,8 @@ def _auto_set(step, msg, wait=False, phase=None):
     jv-msg 의 textContent·로그의 escHtml 로 들어가므로 별표가 그대로 화면에 보인다
     (2026-10-12 에 8군데를 걷어냈다). 강조가 필요하면 🚨/🔴 기호를 앞에 붙여라."""
     with _auto_lock:
+        if step != _AUTO.get("step"):
+            _AUTO["step_t0"] = time.time()      # 단계가 바뀐 순간만 (위 주석)
         _AUTO["step"] = step; _AUTO["msg"] = msg; _AUTO["waiting"] = wait
         if phase is not None:
             _AUTO["phase"] = phase
@@ -5185,7 +5194,12 @@ def auto_status():
     with _auto_lock:
         return jsonify(**{k: _AUTO[k] for k in
                           ("active", "dest", "step", "msg", "waiting",
-                           "force", "phase", "dest_floor", "mode", "paused")})
+                           "force", "phase", "dest_floor", "mode", "paused",
+                           # step_t0: 단계 경과 표시용(#jv-elapsed). auto_advance:
+                           # "이 여정이 단계마다 나를 기다리는가" — 화면에 없으면
+                           # 운영자가 토글을 켜 놓고도 왜 멈췄는지 알 수 없다
+                           # (2026-11-05 사용자가 실제로 그걸 물었다).
+                           "step_t0", "auto_advance")})
 
 # 장소 목록의 ✅ 배지 기준. 2026-11-02 사용자 결정: location.yaml 의 좌표는 전부
 # 실측·검증된 것이므로 모두 ✅ 로 표시한다(아래 /locations 가 confirmed=True 고정).

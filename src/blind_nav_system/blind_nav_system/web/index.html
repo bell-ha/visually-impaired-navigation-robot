@@ -159,6 +159,13 @@
   .jv-step.cur .jv-you { background: #fff; }
   .jv-foot { font-size: 0.8rem; color: var(--text-faint); }
   .log-entry { padding: 2px 0; border-bottom: 1px solid var(--border); white-space: pre-wrap; word-break: break-all; }
+  /* AUTO·ELEVLEASE·JOURNEY 는 새로 추가(위 SOURCES 주석). ELEV·NAV2 는 탭이 있는데도
+     색이 없어 무채색으로 나왔다 — 색이 있는 HOME·FREE 보다 중요한 소스다. */
+  .src-AUTO     { color: #0f766e; }
+  .src-ELEVLEASE{ color: #86198f; }
+  .src-JOURNEY  { color: #525252; }
+  .src-ELEV     { color: #c026d3; }
+  .src-NAV2     { color: #1d4ed8; }
   .src-IFACE    { color: #0369a1; }
   .src-VISION   { color: #15803d; }
   .src-HW       { color: #b45309; }
@@ -406,6 +413,9 @@
         <span class="other-source-wrap">
           <select id="other-source-sel" onchange="setTab(this.value)">
             <option value="" disabled selected>기타 소스 ▾</option>
+            <option value="AUTO">안내</option>
+            <option value="ELEVLEASE">엘베 제어권</option>
+            <option value="JOURNEY">블랙박스</option>
             <option value="VISION">비전</option>
             <option value="HW">하드웨어</option>
             <option value="WEB">웹</option>
@@ -1461,8 +1471,32 @@ function renderJourneyView(d) {
   // 출발층은 이미 폴링 중인 /switch_map 값(_loadedFloor)을 쓴다 — 새 호출 없음. 미확정이면 안 적는다.
   const dep = (d.dest_floor && _floorConfirmed && _loadedFloor != null)
             ? `<b>${_loadedFloor}층</b> ${(+d.dest_floor < +_loadedFloor) ? '▼' : '▲'} ` : '';
-  route.innerHTML = (d.mode === 'same') ? '같은 층 이동'
-    : `${dep}<b>${d.dest_floor}층</b> · 엘리베이터 경유 · 확인 <b>${flow.filter(p => p[2]).length}번</b>`;
+  // 🔴 단계 경과 — `#jv-elapsed` 는 여태 영구 공백이었다("/auto_status 에 시작시각이
+  //   없어 비워 둔다"). 그런데 2026-09-23 사고를 식별한 값이 바로 이것이다(한 단계에서
+  //   4분 22초를 버렸다). 서버에 step_t0 를 추가해 채운다.
+  const _el = document.getElementById('jv-elapsed');
+  if (_el) {
+    const t0 = d.step_t0;
+    if (!t0) { _el.textContent = ''; }
+    else {
+      const s = Math.max(0, Math.floor(Date.now() / 1000 - t0));
+      _el.textContent = `이 단계 ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+      // 한 단계에서 오래 머무는 것 자체가 신호다 — 60초를 넘기면 색으로 알린다.
+      _el.style.color = s >= 60 ? 'var(--warn)' : 'var(--text-dim)';
+    }
+  }
+  // 🔴 자동 넘김 상태를 같이 적는다. 2026-11-05 사용자가 "자동여정 활성화했는데 왜
+  //   안 됐나" 를 물었고, 답은 "①②③④ 는 자동으로 넘어갔고 ⑤ 는 정렬 실패라
+  //   의도대로 사람을 기다렸다" 였다. 그 사실이 화면에 없어서 물어야만 알 수 있었다.
+  //   '확인 N번' 과 나란히 둔다 — 자동 넘김이 켜져 있으면 그 N번을 다 묻지 않는다.
+  //   🔴 `undefined` 와 `false` 를 가른다. 서버가 아직 이 필드를 안 보내면(대시보드
+  //   재시작 전) 모르는 것이고, 그때 "OFF" 라고 찍으면 **거짓말**이다 — 토글이 켜져
+  //   있는데 화면이 꺼졌다고 말하는 것이 아무 말도 안 하는 것보다 나쁘다.
+  const _adv = (d.auto_advance === undefined) ? ''
+             : (d.auto_advance ? ' · 자동 넘김 <b>ON</b>' : ' · 자동 넘김 OFF');
+  route.innerHTML = ((d.mode === 'same') ? '같은 층 이동'
+    : `${dep}<b>${d.dest_floor}층</b> · 엘리베이터 경유 · 확인 <b>${flow.filter(p => p[2]).length}번</b>`)
+                  + _adv;
   now.style.display = 'grid';
   now.className = 'jv-now ' + (d.paused ? 'stop' : d.waiting ? 'wait' : 'busy');
   document.getElementById('jv-badge').textContent = active >= 0 ? jvSym(flow[active][1]) : '·';
@@ -1522,8 +1556,15 @@ function pollAuto() {
     }
     const st = document.getElementById('auto-status');
     const gb = document.getElementById('auto-go-btn');
-    // 확인·취소·건너뛰기·재개 버튼은 여기 없다(U10) — 여정 화면이 갖고 있다.
-    if (!st || !gb) return;
+    // 확인·취소·건너뛰기·재개 버튼은 여기 없다(U10) — 안내 화면이 갖고 있다.
+    // 🔴 종전에는 여기가 `if (!st || !gb) return;` 이었다. 그 한 줄이 아래 전부를
+    //   막는다 — renderJourneyView(안내 화면) · updateWaitBanner(2026-09-23 사고
+    //   안전장치) · setView('journey') 자동 전환이 **매 초 조기 return 으로 건너뛰어진다.**
+    //   그런데 이 줄 **앞**의 코드(스냅샷 버튼·속도 잠금)는 계속 돌기 때문에 증상이
+    //   "폴링이 죽었다"로 안 읽힌다 — 화면은 첫 폴링 상태로 영구 동결되고
+    //   `#jv-confirm` 은 HTML 초기값 disabled 그대로여서 '다음'을 영원히 못 누른다.
+    //   오른쪽 패널의 두 요소는 **없어도 되는 것**이므로 요소별로 가드한다.
+    if (st && gb) {
     if (d.active) {
       // 누르기 구간(① 호출 · ⑤ 층선택 · 그 둘에서만 쓰는 '재시도')에서는 멈춤이 팔을 멈추지 못한다.
       const armMoving = d.paused && (/^[①⑤]/.test(d.step) || d.step === '재시도');
@@ -1536,6 +1577,7 @@ function pollAuto() {
       st.style.color = 'var(--text-dim)';
       gb.disabled = false; gb.style.opacity = '1';
     }
+    }                     // ← if (st && gb) 끝. 아래는 요소 유무와 무관하게 돈다.
     paintTodo(d);         // 행동 지시줄(U3)
     renderAutoTrack(d);   // 전체 흐름 트래커 갱신 (현재 단계 하이라이트)
     renderJourneyView(d); // 여정 뷰(U4) — 보이든 안 보이든 값은 맞춰 둔다
@@ -1698,8 +1740,15 @@ let allLogs = [];
 // 매번 전부 다시 계산됐다(초당 5줄 · 25분에 6천 줄 → 탭 CPU 124%).
 const LOG_MAX = 2000;
 let currentTab = 'ALL';
-const SOURCES = ['IFACE','VISION','HW','MAIN','WEB','ARM','ELEV','NAV2','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD','MAP','POSE','OBSTACLE'];
-const SOURCE_LABELS = {ALL:'전체', IFACE:'인터페이스', VISION:'비전', HW:'하드웨어', MAIN:'메인', WEB:'웹',
+// 🔴 AUTO·ELEVLEASE·JOURNEY 가 빠져 있었다 (2026-11-05). 서버가 가장 많이 찍는
+//   태그가 `_log("AUTO")` **54회**(1위)인데 여기 없어서 ① 필터 탭도 없고
+//   ② SOURCE_LABELS 라벨도 없고 ③ `.src-*` 색도 없고, 결정적으로
+//   ④ updateBadges 가 이 배열만 순회하므로 **미읽음 점이 영원히 안 떴다**
+//   (badge-OTHER 도 `SOURCES.some(...)` 이라 못 잡는다). 즉 안내 오케스트레이터
+//   로그는 '전체' 탭에서만 볼 수 있고, 안 읽었다는 표시도 없었다.
+const SOURCES = ['AUTO','ELEVLEASE','JOURNEY','IFACE','VISION','HW','MAIN','WEB','ARM','ELEV','NAV2','SYS','ROS2','RVIZ','BATT','FREE','HOME','ARD','MAP','POSE','OBSTACLE'];
+const SOURCE_LABELS = {ALL:'전체', AUTO:'안내', ELEVLEASE:'엘베 제어권', JOURNEY:'블랙박스',
+                       IFACE:'인터페이스', VISION:'비전', HW:'하드웨어', MAIN:'메인', WEB:'웹',
                        ARM:'팔고정', ELEV:'엘베', NAV2:'주행', SYS:'시스템', ROS2:'ROS2', RVIZ:'RViz',
                        BATT:'배터리', FREE:'정리', HOME:'홈위치', ARD:'아두이노', MAP:'지도', POSE:'위치',
                        OBSTACLE:'장애물'};
