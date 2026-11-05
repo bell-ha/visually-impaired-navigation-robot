@@ -4911,28 +4911,68 @@ class ElevatorTracker(Node):
                         f"⚠ {side} {clear:.2f}m — 막힘, 이동 보류 "
                         f"(필요 {abs(move_m)+CLEAR_MARGIN:.2f}m)"); return
 
-            dur = abs(move_m) / BASE_SPEED
+            # 🔴 odom 폐루프로 바꾼다 (2026-11-05). 종전 개루프(시간 제어)는 **작은 걸음을
+            #   바퀴에 전달하지 못했다.** 그날 ① 호출 실측:
+            #       명령 3.8cm → odom 2.6cm (68%)   |  명령 1.0cm → odom 0.1cm (10%)
+            #       명령 4.0cm → odom 2.8cm (70%)   |  명령 0.7cm → odom 0.0cm ( 0%)
+            #       명령 2.1cm → odom 0.9cm (43%)   |  명령 0.5cm → odom 0.0cm ( 0%)
+            #     걸음 ≥2cm 평균 64% / 걸음 <2cm 평균 **5%**. 정조준 오차가 -20px → -12px
+            #     에서 멈췄고(허용 ±8px) 4px 를 못 메워 `⚠ 자동정렬 실패` 로 끝났다.
+            #   🔴 기전은 정지마찰보다 **가속 램프**가 더 잘 설명한다(베이스 가속 0.12 m/s² 고정).
+            #     명령 시간을 `거리/BASE_SPEED` 로 잡으면 짧은 걸음은 **등속에 도달하기 전에
+            #     끝난다** — 0.04 m/s 까지 올라가는 데만 0.33초가 걸리는데 0.5cm 명령의
+            #     지속시간은 0.125초다. 램프 구간 거리는 ½·a·t² 이라:
+            #         명령 1.0cm(0.25s) → 램프 거리 ≈ 3.8mm   (실측 odom 1mm)
+            #         명령 4.0cm(1.00s) → 램프+등속 ≈ 33mm    (실측 odom 28mm)
+            #     짧을수록 비율이 급격히 나빠지는 관측과 부호·크기가 맞는다.
+            #   🔴 새로 만드는 것이 아니다 — `_base_move` 가 **이미** 같은 이유로 폐루프다:
+            #     "시간 제어는 정지마찰 때문에 5mm 명령→2mm 실주행 같은 언더슈트 발생 —
+            #      실측". ALIGN(_do_nudge)만 그 수정을 못 받고 있었다.
+            #   odom 이 없으면 종전과 똑같은 시간 기준으로 떨어진다(_base_move 와 같은 폴백).
+            #   이동 중 여유 감시(CLEAR_MARGIN)는 그대로 둔다 — 그건 _base_move 보다 낫다.
             msg = Twist(); msg.linear.x = direction * BASE_SPEED
             t0 = time.time()
             aborted = False
-            while time.time() - t0 < dur:
+            reached = False
+            # 정지마찰을 뚫을 시간을 준다. 도달하면 즉시 멈추므로 평소엔 다 안 쓴다.
+            timeout = abs(move_m) / BASE_SPEED * 3.0 + 1.0
+            while time.time() - t0 < timeout:
                 if not guard_off:
                     c = self._clearance(direction)       # 이동 중에도 계속 감시
                     if c is not None and c < CLEAR_MARGIN:   # 최소 이격 침범 → 즉시 정지
                         self._set_align_note(f"⚠ 이동 중 {side} 막힘 — 즉시 정지")
                         aborted = True
                         break
+                if start_xy is not None and self._odom_xy is not None:
+                    _dx = self._odom_xy[0] - start_xy[0]
+                    _dy = self._odom_xy[1] - start_xy[1]
+                    if (_dx * _dx + _dy * _dy) ** 0.5 >= abs(move_m):
+                        reached = True
+                        break                            # 실거리 도달 → 정지
+                elif time.time() - t0 > abs(move_m) / BASE_SPEED:
+                    break                                # odom 없음 → 시간 기준 폴백
                 self._cmd_pub.publish(msg)
                 time.sleep(1 / 15)
             self._cmd_pub.publish(Twist())               # 정지
-            # 실제 이동량 = 속도 × 실제 이동 시간 (중단 시 과대집계 방지) — 제어·누적은 그대로.
-            moved = min(abs(move_m), BASE_SPEED * (time.time() - t0))
-            # odom 실이동 — 기록만(위 start_xy 주석 참조). 못 읽으면 빈칸으로 그냥 진행한다.
+            # odom 실이동 — 이제 **기록만이 아니다** (아래 누적에 쓴다).
+            _od = None
             odom_txt = ""
             if start_xy is not None and self._odom_xy is not None:
                 _dx = self._odom_xy[0] - start_xy[0]
                 _dy = self._odom_xy[1] - start_xy[1]
-                odom_txt = f" / odom {(_dx * _dx + _dy * _dy) ** 0.5 * 100:.1f}cm"
+                _od = (_dx * _dx + _dy * _dy) ** 0.5
+                odom_txt = f" / odom {_od * 100:.1f}cm"
+            # 🔴 누적(=16cm 예산)을 **실이동**으로 센다. 종전에는 `속도 × 경과시간` 추정치였고
+            #   그래서 **안 움직인 이동으로 예산이 깎였다** — 그날 ① 에서 12.1cm 가 깎였는데
+            #   odom 실이동은 3.5cm 였다. 그리고 이 둘은 묶여 있다: 폐루프는 정지마찰과
+            #   싸우느라 경과시간이 최대 3배가 되므로, 그 추정치를 그대로 쓰면 예산이 3배
+            #   빨리 탄다. 폐루프와 이 회계는 **같이** 바꿔야 한다.
+            if reached:
+                moved = abs(move_m)                      # 목표 도달 — 명령량만큼 움직였다
+            elif _od is not None:
+                moved = min(_od, abs(move_m))            # 중단/시간초과 — 실측값(상한 명령량)
+            else:
+                moved = min(abs(move_m), BASE_SPEED * (time.time() - t0))   # odom 없음(종전)
             with state_lock:
                 state["base_travel"] += moved
                 tv = state["base_travel"]
