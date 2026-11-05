@@ -283,9 +283,25 @@ _NOISE_PREFIXES = ("ALSA lib", "Cannot open device", "Unknown PCM", "Invalid fie
 _nav_route: dict = {"kind": None, "n": 0, "ts": 0.0, "note": None, "note_ts": 0.0}
 
 
+# 선두 제어문자 집합 — \t \n \r 은 **남긴다**(들여쓴 줄의 선두 공백도 뜻이 있다).
+_CTRL_LEAD = "".join(chr(c) for c in range(0x20) if chr(c) not in "\t\n\r") + "\x7f"
+
+
 def _capture(proc: subprocess.Popen, name: str):
     global _nav_fail_seen
     for line in proc.stdout:
+        # 🔴 선두 제어문자를 벗긴다. `Beeper.beep()` 이 BEL 을 **개행 없이** 흘린다
+        #   (interface.py:479 `print("\a", end="", flush=True)`). stdout 이 파이프라서
+        #   그 바이트가 **다음 줄 앞에 붙는다**. 2026-11-05 실측(system_20261105_131141):
+        #   `[MIC]` 2줄 **전부**와 `[ROBOT]` 12줄 중 **5줄**이 `\x07\x07[MIC] 118호` 꼴.
+        #   피해가 셋이다:
+        #     ① 로그 패널·파일에 `^G^G` 가 그대로 보인다.
+        #     ② 바로 아래 `_NOISE_PREFIXES` 판정이 **안 듣는다** — `str.strip()` 은 공백만
+        #        떼고 `\x07` 은 공백이 아니다. BEL 붙은 ALSA 에러가 그대로 올라왔다.
+        #     ③ 접두사로 거르는 소비자(대시보드 자막)가 발화를 **조용히** 놓친다.
+        #   삑소리 자체는 BEL 이 아니라 wav 재생이다(`_make_wav`) — 이 바이트는 터미널
+        #   벨용이고 파이프에서는 쓸 데가 없으므로 버려도 잃는 것이 없다.
+        line = line.lstrip(_CTRL_LEAD)
         if any(line.strip().startswith(p) for p in _NOISE_PREFIXES):
             continue
         # Nav2 목표 실패를 **여기서** 잡는다 — navigation_client 의 `_nav_failed` 가 찍는 줄이

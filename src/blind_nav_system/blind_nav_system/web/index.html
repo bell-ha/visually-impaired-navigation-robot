@@ -116,6 +116,21 @@
   .jv-now.busy .jv-todo { color: var(--accent); }
   .jv-sub { font-size: 0.88rem; color: var(--bad); font-weight: 600; }
   .jv-acts { display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap; }
+  /* 자막 — 로봇이 말한 것 / 사용자가 말한 것. 기존 토큰만 쓴다(새 색 안 만든다). */
+  .jv-caption { border-bottom: 1px solid var(--border); padding: 6px 0 8px; }
+  .jv-cap-head { font-size: 0.68rem; font-weight: 700; color: var(--text-dim);
+                 letter-spacing: 0.04em; margin-bottom: 3px; }
+  .jv-cap-idle { font-size: 0.78rem; color: var(--text-faint); }
+  .jv-cap-row { display: grid; grid-template-columns: 48px 1fr auto; gap: 8px;
+                align-items: baseline; font-size: 0.84rem; line-height: 1.45; }
+  .jv-cap-who { font-size: 0.7rem; font-weight: 700; text-align: right; }
+  .jv-cap-robot .jv-cap-who { color: var(--accent); }
+  .jv-cap-user  .jv-cap-who { color: var(--ok); }
+  .jv-cap-err   .jv-cap-who { color: var(--warn); }
+  .jv-cap-err   .jv-cap-text { color: var(--warn); }
+  /* 긴 발화가 줄바꿈돼도 시각 칸이 안 밀리게 — min-width:0 없으면 grid 가 넘친다 */
+  .jv-cap-text { min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+  .jv-cap-t { font-family: var(--font-mono); font-size: 0.68rem; color: var(--text-faint); }
   .jv-btn { border: none; border-radius: 8px; font-family: inherit; font-weight: 700;
             cursor: pointer; padding: 14px 26px; font-size: 1.05rem; }
   /* 누르기 쉬운 크기는 지키고 **폭만** 막는다 — 1920 에서 이 버튼 하나가 960px 였다(U13). */
@@ -441,6 +456,17 @@
         <!-- 경과 시간: /auto_status 에 시작시각이 없어 비워 둔다(U4-3, main.py 무변경) -->
         <span class="jv-elapsed" id="jv-elapsed"></span>
       </div>
+      <!-- 🔴 자막 — `.jv-head` 와 `#jv-now` **사이**에 둔다. 이 자리가 중요하다:
+           · `#jv-now` **안**에 두면 안 된다 — 그 카드는 여정이 없을 때 `display:none` 이고,
+             음성 대화(버튼 → "어디로 가실 건가요?" → 발화 → "…이동할까요?")는 대부분
+             여정이 **시작되기 전**에 일어난다. 가장 필요할 때 사라진다.
+           · 레일 **아래**에 두면 안 된다 — 320px 에서 11행 레일을 지나야 닿는다
+             (`#journey-view{overflow:visible}` + 페이지 스크롤). 실제 조작 형태는 폰이다.
+           ⚠ 여기 뜨는 것은 "로봇이 **말하려 한** 문장"이다. `interface.py:386` 의
+             `print(f"[ROBOT] {t}")` 바로 다음 줄이 `if not self._ok: return` 이라
+             재생 실패가 이 줄에 반영되지 않는다. 2026-11-02 에 스피커가 음소거였는데
+             로그에는 발화가 멀쩡히 찍혔다 — 그 함정이 여기로 그대로 넘어온다. -->
+      <div class="jv-caption" id="jv-caption"></div>
       <div class="jv-now" id="jv-now" style="display:none">
         <div class="jv-badge" id="jv-badge"></div>
         <div class="jv-body">
@@ -1483,7 +1509,7 @@ function updateWaitBanner(d) {
 
 // 상태 폴링 (1초) — 단계/메시지 표시 + '다음 확인' 버튼 활성/강조
 let _autoWasActive = false;   // 여정 시작 순간(false→true)을 잡으려고 직전 값을 들고 있는다
-setInterval(() => {
+function pollAuto() {
   fetch('/auto_status').then(r => r.json()).then(d => {
     autoJourneyActive = !!d.active;
     _lastAuto = d;        // 거부 사유를 즉시 그릴 때 쓴다(U10)
@@ -1519,7 +1545,20 @@ setInterval(() => {
     if (d.active && !_autoWasActive) setView('journey');
     _autoWasActive = !!d.active;
   }).catch(() => {});
-}, 1000);
+}
+// 🔴 랜딩 뷰를 '안내' 로 (2026-11-05 사용자 결정 — "나는 전체 여정에서 시작할게").
+//    `_curView` 상수만 바꾸면 안 된다: 초기 화면은 **순수 CSS** 가 정한다
+//    (`#log-view{display:flex}` / `#journey-view{display:none}`) 이고 `setView()` 는
+//    페이지 로드 때 한 번도 안 불린다. 상수만 바꾸면 화면은 로그인데 `_curView` 는
+//    'journey' 라고 거짓말하게 되고, 그러면 `updateWaitBanner` 의
+//    `_curView !== 'journey'` 가 **항상 false** 가 되어 확인 대기 띠가 영구히 안 뜬다
+//    — 2026-09-23 사고("기다리는 줄 모르고 다른 화면을 만졌다") 그 자체가 재현된다.
+//    그래서 함수를 **호출**한다. 선언은 호이스팅되므로 아래 정의보다 먼저 불러도 된다.
+setView('journey');
+// 🔴 즉시 1회 — 안 하면 로드 후 첫 1초간 `#jv-rail` 이 **빈 div** 다. 지금까진 로그가
+//    첫 화면이라 아무도 못 봤지만, 안내가 랜딩 뷰가 되면 매번 보이는 빈 화면이 된다.
+pollAuto();
+setInterval(pollAuto, 1000);
 
 function setTtsSpeed(v) {
   document.getElementById('tts-speed-val').textContent = parseFloat(v).toFixed(1);
@@ -1544,7 +1583,11 @@ function setView(view) {
   journeyView.style.display = (view === 'journey') ? 'flex' : 'none';
   socialView.style.display  = (view === 'social')  ? 'flex' : 'none';
   elevContainer.style.display = (view === 'elev')  ? 'flex' : 'none';
-  elevFrame.src = (view === 'elev') ? `http://${location.hostname}:5000/` : '';
+  // 🔴 빈 문자열이 아니라 `about:blank` 을 쓴다. `src=''` 는 브라우저에 따라 **현재
+  //    문서 URL** 로 해석돼 대시보드가 iframe 안에 재귀 로드될 수 있다(그러면 SSE·폴링이
+  //    한 벌 더 돈다). 종전에는 이 대입이 '엘베 뷰를 떠날 때'만 일어났지만, 랜딩 뷰를
+  //    안내로 바꾸면서 **페이지 로드 때도** 한 번 일어난다. MJPEG 회수 효과는 같다.
+  elevFrame.src = (view === 'elev') ? `http://${location.hostname}:5000/` : 'about:blank';
   if (view === 'social') pollSocial();     // 전환 즉시 한 번 — 2초를 빈 화면으로 기다리지 않게
 }
 
@@ -1725,10 +1768,84 @@ function updateBadges() {
   }
 }
 
+// ── 자막 ────────────────────────────────────────────────────────────────────
+// 서버 변경 0 으로 만든다 — `_log` 이 `msg` 를 `rstrip()` 만 하고 흘리므로(main.py:103)
+// `[ROBOT] `·`[MIC] ` 접두사가 SSE 의 `d.msg` 선두에 **원형 그대로** 도달한다.
+// (`[system/IFACE]` 는 **파일 로그 전용** 표기다 — SSE 엔 `{src:"IFACE", msg:"[ROBOT] …"}`.)
+const CAP_MAX = 5;                 // 고정 5줄 — 스크롤 없이 흘깃 본다
+let captions = [];                 // 🔴 `allLogs`(2000줄 상한)에서 뽑지 않는다. 자체 배열이다 —
+                                   //    `allLogs` 는 로그가 몰리면 옛 발화를 밀어내고,
+                                   //    `renderLogs` 의 `filtered` 를 쓰면 **탭에 따라 자막이
+                                   //    사라진다**(NAV2 탭엔 IFACE 가 없다).
+const CAP_ROBOT = '[ROBOT] ';
+const CAP_MIC   = '[MIC] ';
+// 🔴 `[MIC] ` 로 STT **에러도** 나간다(interface.py:786·809·824, stderr→stdout 합류).
+//    접두사만 보면 "listen error: Input overflowed" 가 **사용자가 한 말**로 자막에 오른다.
+//    실험 기록 화면에서 그건 거짓 데이터다. 성공 인식(interface.py:834)만 사용자 발화로 센다.
+//    `[MIC-vosk]`(805)는 `'[MIC] '` 로 시작하지 않아 자동 제외된다 — vosk 경로의 중복 줄이다.
+const CAP_MIC_ERR = /^\[MIC\] (listen error|vosk 실패|Google STT 실패)/;
+
+function captionFeed(d) {
+  // 🔴 `src` 가 IFACE 만이 아니다 — vision_assistant.py:160 도 `[ROBOT]` 을 찍고
+  //    그건 `src="VISION"` 으로 들어온다(main.py:359). IFACE 만 보면 시각 분석이
+  //    사용자에게 한 말이 자막에서 통째로 빠진다.
+  if (d.src !== 'IFACE' && d.src !== 'VISION') return;
+  // 🔴 선두 제어문자에 관대하게. 서버(_capture)가 이미 벗기지만 여기서도 벗긴다 —
+  //    자막은 **접두사 문자열에 의존하는 파서**라, 앞에 한 바이트만 끼어도 발화를
+  //    조용히 0건으로 만든다(2026-11-05: 삑소리 BEL 이 `[MIC]` 앞에 붙어 사용자
+  //    발화가 전부 사라지는 것을 실측으로 잡았다). 조용한 실패를 두 겹으로 막는다.
+  const m = (d.msg || '').replace(/^[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+/, '');
+  let who = null, text = null;
+  if (m.startsWith(CAP_ROBOT)) {
+    who = 'robot'; text = m.slice(CAP_ROBOT.length);
+  } else if (m.startsWith(CAP_MIC)) {
+    if (CAP_MIC_ERR.test(m)) { who = 'err';  text = '못 알아들었습니다'; }
+    else                     { who = 'user'; text = m.slice(CAP_MIC.length); }
+  }
+  if (!who || !text) return;
+  captions.push({who: who, text: text, t: d.t});
+  if (captions.length > CAP_MAX) captions.splice(0, captions.length - CAP_MAX);
+  renderCaptions();
+}
+
+const CAP_WHO = {robot: '로봇', user: '사용자', err: '마이크'};
+function renderCaptions() {
+  const box = document.getElementById('jv-caption');
+  if (!box) return;
+  box.textContent = '';
+  const head = document.createElement('div');
+  head.className = 'jv-cap-head';
+  head.textContent = '자막';
+  head.title = '로봇이 말하려 한 문장입니다 — 재생 성공 여부는 포함하지 않습니다';
+  box.appendChild(head);
+  if (!captions.length) {
+    const e = document.createElement('div');
+    e.className = 'jv-cap-idle';
+    e.textContent = '아직 주고받은 말이 없습니다';
+    box.appendChild(e);
+    return;
+  }
+  captions.forEach(c => {
+    const row = document.createElement('div');
+    row.className = 'jv-cap-row jv-cap-' + c.who;
+    // 🔴 textContent 로만 넣는다 — 자막 원천이 자식 프로세스 stdout 원문이다.
+    const w = document.createElement('span');
+    w.className = 'jv-cap-who';  w.textContent = CAP_WHO[c.who] || c.who;
+    const t = document.createElement('span');
+    t.className = 'jv-cap-text'; t.textContent = c.text;
+    const s = document.createElement('span');
+    s.className = 'jv-cap-t';    s.textContent = c.t || '';
+    row.appendChild(w); row.appendChild(t); row.appendChild(s);
+    box.appendChild(row);
+  });
+}
+renderCaptions();                  // 빈 상태 문구를 먼저 그린다(SSE 리플레이 전)
+
 const es = new EventSource('/logs');
 es.onmessage = e => {
   const d = JSON.parse(e.data);
   allLogs.push(d);
+  captionFeed(d);                  // 접속 시 서버 버퍼(800줄) 리플레이도 여기를 지난다
   if (allLogs.length > LOG_MAX) allLogs.splice(0, allLogs.length - LOG_MAX);
   if (currentTab === 'ALL' || d.src === currentTab) {
     // 판정은 '추가 전'에 해야 한다 — 추가한 뒤엔 언제나 바닥에서 멀어져 있다.
