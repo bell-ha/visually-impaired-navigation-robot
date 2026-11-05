@@ -89,6 +89,33 @@
              padding-bottom: 12px; border-bottom: 1px solid var(--border); }
   .jv-dest { font-size: 1.3rem; font-weight: 700; }
   .jv-route { font-size: 0.95rem; color: var(--text-dim); }
+  /* 현재 층 — 안내 화면에서 제일 먼저 읽히는 값. 확정 전에는 회색 점선으로 말한다. */
+  .jv-floor { font-size: 1.3rem; font-weight: 800; padding: 1px 10px; border-radius: 8px;
+              background: var(--accent); color: #fff; white-space: nowrap; }
+  /* 첫 폴링(1초) 전에는 내용이 없다 — 빈 칩이 파란 조각으로 보이지 않게 숨긴다 */
+  .jv-floor:empty { display: none; }
+  .jv-floor.unconfirmed { background: var(--neutral-bg); color: var(--text-faint);
+                          border: 1px dashed var(--border); font-weight: 700; }
+  /* 출발 줄 */
+  .jv-start { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+              padding: 10px 0 2px; border-bottom: 1px solid var(--border); }
+  .jv-start-label { font-size: 0.78rem; font-weight: 700; color: var(--text-dim); }
+  .jv-start select { min-width: 0; background: var(--neutral-bg); color: var(--text);
+                     border: 1px solid var(--border); border-radius: 6px;
+                     padding: 7px 8px; font-size: 0.95rem; }
+  /* 목적지만 늘어난다 — 층 select 가 같이 늘면 한 줄이 층으로 꽉 찬다 */
+  .jv-start #auto-dest { flex: 1 1 200px; }
+  .jv-start #floor-sel { flex: 0 0 auto; }
+  .jv-start button { border: none; border-radius: 8px; padding: 9px 20px; cursor: pointer;
+                     font-weight: 700; font-size: 0.95rem; white-space: nowrap; }
+  /* 출발만 초록(주 동작). 층 확인은 보조라 중립색 — 둘 다 초록이면 어느 쪽이
+     "가는" 버튼인지 급할 때 생각하게 된다. */
+  .jv-start #auto-go-btn   { background: var(--ok); color: #fff; }
+  .jv-start #map-switch-btn{ background: var(--neutral-bg); color: var(--text);
+                             border: 1px solid var(--border); font-weight: 600; }
+  .jv-start button:disabled { opacity: 0.5; cursor: default; }
+  .jv-start-sep { flex: 0 0 1px; align-self: stretch; background: var(--border); margin: 0 4px; }
+  @media (max-width: 760px) { .jv-start-sep { display: none; } }
   .jv-route b { color: var(--text); font-weight: 600; }
   .jv-elapsed { margin-left: auto; font-family: var(--font-mono); font-size: 0.9rem;
                 color: var(--text-dim); font-variant-numeric: tabular-nums; }
@@ -461,10 +488,32 @@
          값은 전부 기존 /auto_status 폴링에서 온다(새 호출 0). 버튼은 기존 핸들러를 그대로 부른다. -->
     <div id="journey-view">
       <div class="jv-head">
+        <!-- 🔴 현재 층을 **맨 앞에 크게**. 사용자 지적: "내가 층 이동을 하면 몇층인지
+             그 지도(층)에 뜨거나 안내에 뜨던가 해야지 그래야 위로 갈 지 아래로 갈 지
+             알 거아냐". 종전에는 `board` 단계 메시지(`325호=3층 / 현재 1층 → ▲ 상행`)에
+             묻혀 있었고 지도(층) 카드는 오른쪽 패널이었다. 값은 이미 폴링 중인
+             /switch_map(_loadedFloor·_floorConfirmed)에서 온다 — 새 호출 0. -->
+        <span class="jv-floor" id="jv-floor"></span>
         <span class="jv-dest" id="jv-dest">대기 중 — 목적지를 고르고 출발하세요</span>
         <span class="jv-route" id="jv-route"></span>
-        <!-- 경과 시간: /auto_status 에 시작시각이 없어 비워 둔다(U4-3, main.py 무변경) -->
         <span class="jv-elapsed" id="jv-elapsed"></span>
+      </div>
+      <!-- 출발 줄 — 안내가 돌고 있지 않을 때만 보인다(renderJourneyView 가 토글).
+           오른쪽 패널에서 그대로 옮겨온 요소다(id·onclick 무변경). -->
+      <div class="jv-start" id="jv-start">
+        <span class="jv-start-label">현재 층</span>
+        <select id="floor-sel" onchange="paintFloorBtn()">
+          <option value="5" selected>5층</option>
+          <option value="4">4층</option>
+          <option value="3">3층</option>
+          <option value="2">2층</option>
+          <option value="1">1층</option>
+        </select>
+        <button id="map-switch-btn" onclick="switchMap()">이 층 확인</button>
+        <span class="jv-start-sep"></span>
+        <span class="jv-start-label">어디로</span>
+        <select id="auto-dest"></select>
+        <button id="auto-go-btn" onclick="autoGoto()">🚀 출발</button>
       </div>
       <!-- 🔴 자막 — `.jv-head` 와 `#jv-now` **사이**에 둔다. 이 자리가 중요하다:
            · `#jv-now` **안**에 두면 안 된다 — 그 카드는 여정이 없을 때 `display:none` 이고,
@@ -648,19 +697,12 @@
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <div class="toggle-row">
-          <span class="toggle-label">🗺 지도(층)</span>
-          <span style="display:flex;gap:6px;align-items:center;">
-            <select id="floor-sel" onchange="paintFloorBtn()" style="background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;">
-              <option value="5" selected>5층</option>
-              <option value="4">4층</option>
-              <option value="3">3층</option>
-              <option value="2">2층</option>
-              <option value="1">1층</option>
-            </select>
-            <button id="map-switch-btn" onclick="switchMap()" style="background:var(--neutral-bg);color:var(--text);border:none;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.8rem;">지도 전환</button>
-          </span>
-        </div>
+        <!-- 🔴 지도(층) select + 이 층 확인 버튼도 **안내 화면**(#jv-start)으로 옮겼다
+             (2026-11-05). 사용자: "어디로갑니까 말고 지금 현재층도 필요하지."
+             엘베 여정은 층이 확정돼야 시작된다(미확정이면 _auto_run 이 거부한다).
+             그 확정 컨트롤이 오른쪽 패널에 있으면 안내 화면만 보고는 출발할 수 없다 —
+             "목적지를 고르고 출발하세요" 가 또 거짓말이 된다.
+             요소를 그대로 옮겼다 — id·onchange·onclick 이 전부 종전 코드다. -->
         <div class="toggle-row">
           <span class="toggle-label">📍 현재 위치</span>
           <span id="pose-result" style="font-size:0.72rem;color:var(--accent);margin:0 8px;
@@ -703,21 +745,23 @@
               꺼짐 — 단계마다 '다음'을 누릅니다</div>
           </div>
         </div>
-        <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-          <select id="auto-dest" style="flex:1;background:var(--neutral-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:0.82rem;"></select>
-          <button id="auto-go-btn" onclick="autoGoto()" style="background:var(--ok);color:#fff;border:none;border-radius:6px;padding:5px 14px;cursor:pointer;font-weight:700;font-size:0.82rem;white-space:nowrap;">🚀 출발</button>
-        </div>
+        <!-- 🔴 목적지 select + 🚀 출발은 **안내 화면**(#jv-start)으로 옮겼다 (2026-11-05).
+             사용자 지적: "자동 넘김 아래에 있는 118호(1층) 이건 또 뭐야; 해당 UI는 쓸모
+             없는 거 같은데". 맞다 — 출발 입구가 셋(장소 목록·여기·음성)이었고, 정작
+             안내 화면에는 "목적지를 고르고 출발하세요"라고 쓰여 있는데 출발 컨트롤이
+             없었다. 안내 화면이 랜딩 뷰가 된 뒤로 그 문구는 거짓말이었다.
+             요소를 **그대로 옮겼다** — id·onclick·채우는 fetch 가 전부 종전 코드다. -->
         <!-- 👉 행동 지시줄 — 칩 줄이 "어디까지 왔나"를 말하고, 이 줄이 "지금 뭘 해야 하나"를 말한다(U3).
              2026-09-23 14:50 사고: ① 정렬 완료로 '다음'을 기다리는 동안 사용자가 엘베앱 화면에서
              직접 누르기를 실행해 여정이 그 사실을 모른 채 4분 22초를 버렸다. -->
-        <div id="auto-todo" style="display:none;padding:6px 2px"></div>
+        <!-- 🔴 #auto-todo 제거 (2026-11-05) — 안내 화면과 **같은 값을 두 번** 그리던 자리다. 왼쪽 레일/지시줄/정지주의와 중복이라 화면만 길어졌다. -->
         <div id="auto-status" style="font-size:0.78rem;color:var(--text-dim);min-height:1.3em;padding:5px 6px;background:var(--panel);border:1px solid var(--border);border-radius:5px;">대기 중 — 목적지 선택 후 출발</div>
-        <div id="auto-track" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;"></div>
+        <!-- 🔴 #auto-track 제거 (2026-11-05) — 안내 화면과 **같은 값을 두 번** 그리던 자리다. 왼쪽 레일/지시줄/정지주의와 중복이라 화면만 길어졌다. -->
         <!-- 여정 조작 버튼(확인·취소·건너뛰기·재개)은 여기 없다 — 전부 여정 화면 한 자리에 있다(U10).
              여기는 **상태만** 본다: 지시줄 · 상태 한 줄 · 칩 줄. 출발은 여정 화면이 없을 때 쓰는
              것이라 위에 남는다. 확인 대기인데 다른 탭을 보고 있으면 #wait-banner 가 부른다. -->
         <!-- ■ 정지가 멈추지 못하는 두 구간 — 재개 버튼이 숨어 있을 때도 항상 보인다(STOP S2). -->
-        <div id="stop-note" style="font-size:0.72rem;color:var(--warn);margin-top:5px">■ 정지: 버튼 누르는 중엔 팔이 멈추지 않습니다(런스톱만) · 엘리베이터 안에서 누르면 안내가 끝납니다</div>
+        <!-- 🔴 #stop-note 제거 (2026-11-05) — 안내 화면과 **같은 값을 두 번** 그리던 자리다. 왼쪽 레일/지시줄/정지주의와 중복이라 화면만 길어졌다. -->
       </div>
     </div>
 
@@ -1461,9 +1505,34 @@ function renderJourneyView(d) {
   const now = document.getElementById('jv-now');
   const dest = document.getElementById('jv-dest');
   const route = document.getElementById('jv-route');
+  // 🔴 현재 층 칩과 출발 줄은 **early return 앞**에 둔다. 안내가 돌지 않을 때가
+  //   오히려 이 둘이 가장 필요한 때다(출발 전에 몇 층인지 알아야 목적지를 고른다).
+  //   값은 이미 /switch_map 을 3초마다 폴링해서 들고 있다 — 새 호출 0.
+  const _fl = document.getElementById('jv-floor');
+  if (_fl) {
+    if (_loadedFloor == null) {
+      _fl.textContent = '층 ?';
+      _fl.className = 'jv-floor unconfirmed';
+      _fl.title = '지도가 아직 안 읽혔습니다 (map_server·런치 확인)';
+    } else if (!_floorConfirmed) {
+      // 🔴 "우연히 맞은 층"과 "사람이 고른 층"을 가른다 — 부팅 초기값이 5 라서
+      //   숫자만 보여주면 확정된 것으로 오해한다(엘베 여정은 미확정이면 거부된다).
+      _fl.textContent = _loadedFloor + '층?';
+      _fl.className = 'jv-floor unconfirmed';
+      _fl.title = '미확정 — 지도(층)에서 현재 층을 확인해야 엘리베이터를 쓸 수 있습니다';
+    } else {
+      _fl.textContent = _loadedFloor + '층';
+      _fl.className = 'jv-floor';
+      _fl.title = '확정된 현재 층';
+    }
+  }
+  const _start = document.getElementById('jv-start');
+  if (_start) _start.style.display = d.active ? 'none' : 'flex';
   if (!d.active) {
     dest.textContent = '대기 중 — 목적지를 고르고 출발하세요';
     route.innerHTML = '';
+    const _e0 = document.getElementById('jv-elapsed');
+    if (_e0) _e0.textContent = '';          // 지난 안내의 경과를 남기지 않는다
     now.style.display = 'none';
     return;
   }
@@ -1578,8 +1647,9 @@ function pollAuto() {
       gb.disabled = false; gb.style.opacity = '1';
     }
     }                     // ← if (st && gb) 끝. 아래는 요소 유무와 무관하게 돈다.
-    paintTodo(d);         // 행동 지시줄(U3)
-    renderAutoTrack(d);   // 전체 흐름 트래커 갱신 (현재 단계 하이라이트)
+    // paintTodo·renderAutoTrack 호출 제거 — 그리던 대상(#auto-todo·#auto-track)이
+    // 중복이라 없어졌다. 두 함수는 `if (!el) return;` 가드가 있어 호출해도 무해하지만,
+    // 대상 없는 호출을 남기면 "왜 안 그려지지" 를 다시 찾게 된다.
     renderJourneyView(d); // 여정 뷰(U4) — 보이든 안 보이든 값은 맞춰 둔다
     updateWaitBanner(d);  // 여정 화면 밖에서 확인 대기면 부른다(U10-3)
     // 여정이 시작되는 순간에만 여정 뷰로 넘어간다(U4-2). 매 틱 강제하면 로그를 볼 수 없고,
