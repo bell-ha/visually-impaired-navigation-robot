@@ -3380,7 +3380,7 @@ def _press_done_or_confirm(res, step, scene, token):
     if res == "ok":
         return True
     if res != "press_failed":
-        _auto_notify("누르기를 확인하지 못해 멈췄습니다", stow_hint=True)
+        _auto_notify("누르기를 확인하지 못해 안내를 종료했습니다", stow_hint=True)
         _auto_set("오류", "누르기/팔복귀 미완료(타임아웃/취소) — 여정 중단")
         return False
     # 🔴 2단계(점등 자동 판정)의 학습 자료가 되는 자리다. press 스냅샷 폴더가
@@ -3768,7 +3768,7 @@ def _auto_front_nav2():
         return False
     _sent2, _ = _elev_scene(1, move=False)
     if not _sent2:
-        _auto_notify("팔을 접지 못해 이동을 멈췄습니다", stow_hint=True)
+        _auto_notify("팔을 접지 못해 안내를 종료했습니다", stow_hint=True)
         _auto_set("오류", "🚨 ② 자세 전환(팔 수납) 전송 실패 — 뻗은 팔로 주행할 수 "
                           "없다. ② 중단", phase="front")
         return False
@@ -3784,7 +3784,7 @@ def _auto_front_nav2():
     if _arm_why is None:
         return False          # 대기 중 취소 — _auto_hold 가 False 일 때와 같은 모양으로 끝낸다
     if not _arm_ok:
-        _auto_notify("팔이 접혔는지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
+        _auto_notify("팔이 접혔는지 확인되지 않아 안내를 종료했습니다", stow_hint=True)
         _auto_set("오류", f"🚨 팔 수납 미확인 — {_arm_why}. ② 주행 거부", phase="front")
         return False
     _log("AUTO", f"② 주행 전 {_arm_why}")
@@ -3813,7 +3813,7 @@ def _auto_front_nav2():
     #    끈다 — 팔은 ① 누르기 뒤 수납 확인된 상태(arm_safe)라 앱 종료로 잃는 것은 패드뿐이고,
     #    Nav2 가 아직 바퀴를 잡고 있다면 패드는 어차피 쓸 수 없다.
     if not _nav_release_wheels(arrived, "② 문앞"):
-        _auto_notify("로봇이 멈췄는지 확인하지 못해 여정을 멈췄습니다. 도움을 요청하세요")
+        _auto_notify("로봇이 멈췄는지 확인하지 못해 안내를 종료했습니다. 도움을 요청하세요")
         _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 엘베앱 제어권을 돌려주지 "
                           "않고 ② 중단", phase="front")
         return False
@@ -4065,6 +4065,13 @@ _ARM_STOW_NOTE = ("팔이 뻗은 상태일 수 있음 — 대시보드 '팔 수�
                   "넣은 뒤 밀거나 수동주행할 것")
 
 
+# 🔴 "멈췄습니다" 를 쓰지 마라 — 화면의 '멈춤' 은 ▶ 재개로 풀리는 **가역 상태**
+#   (`_AUTO["paused"]`, /auto_resume)이고, 아래 호출처들은 전부 `_auto_set("오류", …)`
+#   + `return False` 로 끝나는 **비가역 종료**다. 2026-11-05 전수 확인: 멈춤 문구를 쓰던
+#   19곳이 하나도 빠짐없이 종료였다. 시각장애인은 재개를 기다리는데 안내는 죽어 있었다.
+#   그리고 음성의 어휘는 **"안내"** 다 — interface.py 의 MSG 전부가 그렇고(종료·시작·중지),
+#   사용자가 듣는 말에 "여정" 은 한 번도 나오지 않는다("여정" 은 화면·로그의 말이었고
+#   2026-11-05 사용자 결정으로 화면도 "안내" 로 맞췄다). 비가역이면 "안내를 종료했습니다".
 def _auto_notify(msg: str, voice: bool = True, stow_hint: bool = False):
     """여정 거부·중단을 알린다. 조용히 멈추면 그게 또 무증상 실패다.
 
@@ -4173,7 +4180,7 @@ def _press_or_pass() -> bool:
     _press_done_or_confirm() 이 해석하고, **접촉 판정 실패에 한해** 사람이 '눌렸다'고
     확인하면 통과시킨다 — 판정을 없앤 것이 아니라 사람을 한 명 끼운 것이다."""
     if not _auto_hold("누르기"):
-        _auto_notify("여정을 멈췄습니다", stow_hint=True)
+        _auto_notify("안내를 종료했습니다", stow_hint=True)
         _auto_set("오류", "취소됨 — 여정 중단")
         return False
     ok, reason = _elev_press()
@@ -4182,7 +4189,7 @@ def _press_or_pass() -> bool:
     why = reason or "사유 없음"
     st = _elev_status()
     if st is None:
-        _auto_notify("누르기 명령을 보내지 못해 멈췄습니다", stow_hint=True)
+        _auto_notify("누르기 명령을 보내지 못해 안내를 종료했습니다", stow_hint=True)
         _auto_set("오류", f"누르기 거부({why}) + 엘베앱 상태 조회 실패 — 여정 중단")
         return False
     if st.get("pressing") or st.get("scene_next_ok"):
@@ -4197,7 +4204,7 @@ def _press_or_pass() -> bool:
         _auto_notify("잠시만 기다려 주세요")
         _auto_set("재시도", f"누르기 대기 후 재시도: {why}")
         if not _auto_sleep(_PRESS_WAIT_SEC):
-            _auto_notify("여정을 멈췄습니다", stow_hint=True)
+            _auto_notify("안내를 종료했습니다", stow_hint=True)
             _auto_set("오류", "취소됨 — 여정 중단")
             return False
     elif any(k in why for k in _PRESS_RETRY_HELP):
@@ -4210,11 +4217,11 @@ def _press_or_pass() -> bool:
                       f"누르기 거부({_try}/{_PRESS_RETRY_MAX}): {why} — {_help} → 맞춘 뒤 '다음'",
                       wait=True)
             if not _auto_wait_confirm():
-                _auto_notify("여정을 멈췄습니다", stow_hint=True)
+                _auto_notify("안내를 종료했습니다", stow_hint=True)
                 _auto_set("오류", "취소됨 — 여정 중단")
                 return False
             if not _auto_hold("누르기 재시도"):
-                _auto_notify("여정을 멈췄습니다", stow_hint=True)
+                _auto_notify("안내를 종료했습니다", stow_hint=True)
                 _auto_set("오류", "취소됨 — 여정 중단")
                 return False
             ok_r, reason_r = _elev_press()
@@ -4227,17 +4234,17 @@ def _press_or_pass() -> bool:
             why = reason_r or why
         # 상한까지 갔다 — 끊되, **마지막으로 본 사유를 문구에 남긴다**(종전엔 거부 문자열만 남아
         # 운영자가 원인을 못 가렸다).
-        _auto_notify("누르기를 계속하지 못해 멈췄습니다", stow_hint=True)
+        _auto_notify("누르기를 계속하지 못해 안내를 종료했습니다", stow_hint=True)
         _auto_set("오류", f"재시도 {_PRESS_RETRY_MAX}회 모두 거부: {why} — "
                           f"{_press_block_help(st)} — 여정 중단")
         return False
     else:
-        _auto_notify("누르기 명령을 보내지 못해 멈췄습니다", stow_hint=True)
+        _auto_notify("누르기 명령을 보내지 못해 안내를 종료했습니다", stow_hint=True)
         _auto_set("오류", f"누르기 거부: {why} — 여정 중단")
         return False
 
     if not _auto_hold("누르기 재시도"):
-        _auto_notify("여정을 멈췄습니다", stow_hint=True)
+        _auto_notify("안내를 종료했습니다", stow_hint=True)
         _auto_set("오류", "취소됨 — 여정 중단")
         return False
     ok2, reason2 = _elev_press()      # 재시도는 여기 한 번뿐
@@ -4247,7 +4254,7 @@ def _press_or_pass() -> bool:
     if st2 is not None and (st2.get("pressing") or st2.get("scene_next_ok")):
         _log("AUTO", f"재시도 거부({reason2 or '사유 없음'})지만 엘베앱 상태는 진행 중 — 통과")
         return True
-    _auto_notify("누르기 명령을 보내지 못해 멈췄습니다", stow_hint=True)
+    _auto_notify("누르기 명령을 보내지 못해 안내를 종료했습니다", stow_hint=True)
     _auto_set("오류", f"재시도도 거부: {reason2 or '사유 없음'} — 여정 중단")
     return False
 
@@ -4279,7 +4286,7 @@ def _auto_run(dest):
     if _h["status"] != "ok":
         _log("AUTO", f"⚠ 손잡이 신호 없음({_h['detail']}) — 여정 중 당김(정지 요청)을 "
                      "받을 수 없다. 여정은 진행한다(1단계 경고)")
-        _auto_notify("손잡이 신호가 없습니다. 여정 중 손잡이를 당겨도 "
+        _auto_notify("손잡이 신호가 없습니다. 안내 중 손잡이를 당겨도 "
                      "정지 요청이 전달되지 않습니다")
     try:
         with _auto_lock:
@@ -4365,7 +4372,7 @@ def _auto_run(dest):
             #    대시보드가 통째로 돌아오고(`/cmd` 수동주행은 `_journey_gate` 에 안 걸린다)
             #    팔은 아직 뻗지 않았다(엘베 씬 진입 전).
             if not _nav_release_wheels(_board_arrived, "승차지점"):
-                _auto_notify("로봇이 멈췄는지 확인하지 못해 여정을 멈췄습니다. 도움을 요청하세요")
+                _auto_notify("로봇이 멈췄는지 확인하지 못해 안내를 종료했습니다. 도움을 요청하세요")
                 _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 승차지점 중단")
                 return
             # 사유를 재서 문구에 싣는다 — "취소/시간초과"만 뜨면 운영자가 원인을 못 가린다.
@@ -4399,7 +4406,7 @@ def _auto_run(dest):
         # 🔴 첫 제어권 부여도 같다 — 승차지점 '도착'은 xy 만 본 판정이라 Nav2 가 아직
         #    제자리 회전 중일 수 있다(A2). 확인 못 하면 제어권을 주지 않는다.
         if not _nav_release_wheels(True, "승차지점"):
-            _auto_notify("로봇이 멈췄는지 확인하지 못해 여정을 멈췄습니다. 도움을 요청하세요")
+            _auto_notify("로봇이 멈췄는지 확인하지 못해 안내를 종료했습니다. 도움을 요청하세요")
             _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 엘베앱 제어권 부여 거부")
             return
         if not _grant_elev_lease(True, "엘베 여정 시작"):
@@ -4454,7 +4461,7 @@ def _auto_run(dest):
         #    start_ext 다), 접는 것은 _auto_front_nav2() 첫머리의 자세 전환이다. 실제
         #    수납 판정은 그 직후 _elev_arm_stowed() 가 하고, 거기서 막히면 주행을 안 한다.
         if not arm_safe:
-            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
+            _auto_notify("팔이 안전한지 확인되지 않아 안내를 종료했습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(② 문앞정렬)")
             _auto_abort_elev(); return
         if not _auto_front_nav2(): _auto_abort_elev(); return
@@ -4506,7 +4513,7 @@ def _auto_run(dest):
 
         # ④ 엘리베이터 안: 전진 185 (자동 안무)
         if not arm_safe:
-            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
+            _auto_notify("팔이 안전한지 확인되지 않아 안내를 종료했습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(④ 엘리베이터 안)")
             _auto_abort_elev(); return
         ok_, _why, _res = _auto_scene_step(
@@ -4596,7 +4603,7 @@ def _auto_run(dest):
                   wait=True, phase="moving")
         if not _auto_wait_confirm(): _auto_abort_elev(); return
         if not arm_safe:
-            _auto_notify("팔이 안전한지 확인되지 않아 이동을 멈췄습니다", stow_hint=True)
+            _auto_notify("팔이 안전한지 확인되지 않아 안내를 종료했습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(⑥ 하차)")
             _auto_abort_elev(); return
         _auto_set("⑥ 하차", "하차(후진) 중...", phase="exit")
@@ -4764,7 +4771,7 @@ def _auto_run(dest):
             #    arrived=True 에도 부르는 것은 **제어권을 엘베앱에 넘기기 때문**이다.
             #    여기는 넘길 상대가 없다(여정의 끝).
             if not _nav_release_wheels(arrived, "목적지"):
-                _auto_notify("로봇이 멈췄는지 확인하지 못해 여정을 멈췄습니다. 도움을 요청하세요")
+                _auto_notify("로봇이 멈췄는지 확인하지 못해 안내를 종료했습니다. 도움을 요청하세요")
                 _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 목적지 주행 중단",
                           phase="done")
                 return

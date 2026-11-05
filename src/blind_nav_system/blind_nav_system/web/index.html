@@ -350,7 +350,7 @@
        padding·font-size 가 작아진다. -->
   <button class="btn btn-danger" id="hdr-stop-btn" onclick="emergencyStop()"
           style="font-size:1rem;padding:9px 22px;white-space:nowrap;width:auto;display:inline-block"
-          title="로봇 정지 — 자동 여정 중이면 멈춤(재개는 여정 화면의 ▶ 재개). 확인 창 없이 바로 나간다">■ 정지</button>
+          title="로봇 정지 — 자동 안내 중이면 멈춤(재개는 안내 화면의 ▶ 재개). 확인 창 없이 바로 나간다">■ 정지</button>
 </header>
 <div class="readiness-bar" id="readiness-bar">
   <div class="readiness-pill status-unknown" id="ready-amcl"><span class="readiness-label">측위</span><span class="readiness-detail">모름</span></div>
@@ -366,7 +366,7 @@
     <div class="view-switch">
       <button class="view-btn active" id="view-log"  onclick="setView('log')">관제 로그</button>
       <button class="view-btn"        id="view-elev" onclick="setView('elev')">엘리베이터 화면</button>
-      <button class="view-btn"        id="view-journey" onclick="setView('journey')">여정</button>
+      <button class="view-btn"        id="view-journey" onclick="setView('journey')">안내</button>
       <button class="view-btn"        id="view-social" onclick="setView('social')">보행 흐름 주행</button>
     </div>
     <!-- 👉 다른 탭을 보고 있을 때의 안전장치(U10-3). 확인 버튼은 여정 화면 한 자리에만 있으므로,
@@ -379,7 +379,7 @@
       <span id="wait-banner-txt"></span>
       <button onclick="setView('journey')" style="margin-left:auto;background:var(--warn);color:#fff;
               border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-weight:700;
-              font-size:0.84rem;white-space:nowrap">여정 화면으로</button>
+              font-size:0.84rem;white-space:nowrap">안내 화면으로</button>
     </div>
     <div id="log-view">
       <div class="tab-bar">
@@ -460,7 +460,7 @@
         </div>
       </div>
       <div class="jv-rail" id="jv-rail"></div>
-      <div class="jv-foot">■ 정지: 버튼 누르는 중엔 팔이 멈추지 않습니다(런스톱만) · 엘리베이터 안에서 누르면 여정이 끝납니다</div>
+      <div class="jv-foot">■ 정지: 버튼 누르는 중엔 팔이 멈추지 않습니다(런스톱만) · 엘리베이터 안에서 누르면 안내가 끝납니다</div>
     </div>
   </div>
   <div class="ctrl-panel">
@@ -636,7 +636,7 @@
     </div>
 
     <div>
-      <h2>🤖 자동 여정 (엘베 포함)</h2>
+      <h2>🤖 자동 안내 (엘베 포함)</h2>
       <div style="margin-top:6px">
         <!-- 주행 속도 — 출발 전에 맞추는 값이라 목적지·출발 줄 바로 위에 둔다. 여정 중엔 잠긴다
              (서버 409 와 같다). 값은 컨트롤러에서 읽은 실제 값이고, 못 읽으면 '?' 와 사유 툴팁. -->
@@ -681,7 +681,7 @@
              여기는 **상태만** 본다: 지시줄 · 상태 한 줄 · 칩 줄. 출발은 여정 화면이 없을 때 쓰는
              것이라 위에 남는다. 확인 대기인데 다른 탭을 보고 있으면 #wait-banner 가 부른다. -->
         <!-- ■ 정지가 멈추지 못하는 두 구간 — 재개 버튼이 숨어 있을 때도 항상 보인다(STOP S2). -->
-        <div id="stop-note" style="font-size:0.72rem;color:var(--warn);margin-top:5px">■ 정지: 버튼 누르는 중엔 팔이 멈추지 않습니다(런스톱만) · 엘리베이터 안에서 누르면 여정이 끝납니다</div>
+        <div id="stop-note" style="font-size:0.72rem;color:var(--warn);margin-top:5px">■ 정지: 버튼 누르는 중엔 팔이 멈추지 않습니다(런스톱만) · 엘리베이터 안에서 누르면 안내가 끝납니다</div>
       </div>
     </div>
 
@@ -759,6 +759,15 @@ function setMode(manual) {
 function loadLocations() {
   fetch('/locations').then(r => r.json()).then(d => {
     const el = document.getElementById('location-list');
+    // 🔴 경유지 3개(탑승지점·문앞·하차지점)를 목록에서 뺀다 — 안내의 **중간 지점**이고
+    //    목적지가 아니다. `#auto-dest` select 는 처음부터 같은 조건으로 걸렀는데(위
+    //    `_DEST_DEFAULT` 블록) 이 목록은 안 걸렀다. 2026-11-02 에 목록 클릭을
+    //    /goto → /auto_goto 로 바꾸면서 **경유지를 눌러 안내를 시작**할 수 있게 됐다.
+    //    floor 가 없어서 `🛗 공용` 그룹에 그대로 떠 있었다. 세 개를 빼면 그 그룹은
+    //    비어서 아래 `if (!items.length) return ''` 로 저절로 사라진다.
+    d.locations = (d.locations || []).filter(l =>
+      !(l.name.includes('탑승지점') || l.name.includes('하차지점')
+        || l.name.includes('문앞')));
     const item = loc => {
       const fl = (loc.floor ?? null);
       const bg = loc.confirmed ? 'var(--ok-bg)' : 'var(--neutral-bg)';
@@ -767,7 +776,7 @@ function loadLocations() {
       return `<div class="loc-item" data-name="${escHtml(loc.name)}" data-floor="${fl ?? ''}"`
            + ` style="background:${bg};border-radius:6px;padding:5px 10px;font-size:0.78rem;`
            + `color:${fg};cursor:pointer"`
-           + ` title="클릭 = 여정 시작 — 같은 층이면 바로 주행, 다른 층이면 엘리베이터를 탄다">`
+           + ` title="클릭 = 안내 시작 — 같은 층이면 바로 주행, 다른 층이면 엘리베이터를 탄다">`
            + `${mk} ${escHtml(loc.name)}</div>`;
     };
     // 층 그룹은 /locations 응답에서 모은다 — 하드코딩하면 yaml 에 층이 늘어도 화면이
@@ -1096,7 +1105,7 @@ function _syncElevApp() {
     const m = (Date.now() >= elevNoteHold)
       ? document.getElementById('elev-mode-note') : null;   // 임시 사유 표시 중이면 덮지 않는다
     if (m) m.textContent = !elevAppRunning ? '모드: 앱 꺼짐'
-      : d.no_ocr === true  ? '모드: 사진모드 — 버튼 인식 없음 · 여정 시작 불가'
+      : d.no_ocr === true  ? '모드: 사진모드 — 버튼 인식 없음 · 안내 시작 불가'
       : d.no_ocr === false ? '모드: 정상'
       : '모드: 확인 중...';
     // 켜져 있는 동안엔 모드를 못 바꾼다(끄고 다시 켜야 한다) — 서버 계약과 일치.
@@ -1304,7 +1313,7 @@ function autoForce() {
   }).catch(() => {});
 }
 function autoCancel() {
-  if (confirm('자동 여정을 취소할까요?')) fetch('/auto_cancel', {method:'POST'}).catch(() => {});
+  if (confirm('자동 안내를 취소할까요?')) fetch('/auto_cancel', {method:'POST'}).catch(() => {});
 }
 
 // 전체 흐름 트래커 — 엘베 포함 여정 vs 같은 층. 현재 단계만 하이라이트.
@@ -1314,12 +1323,12 @@ function autoCancel() {
 // moving(3042). exit 는 하차 안무라 자동이고 board·app·drive·done 도 자동이다.
 // 4번째 원소 = 여정 뷰 레일의 '내가 할 일' 설명(U4). {floor}=목적층 {dest}=목적지.
 const AUTO_FLOW_ELEV = [
-  ['board','🚶 승차지점',false,'엘리베이터 앞까지 자율주행 — 따라 걷기'],
+  ['board','🚶 탑승지점',false,'엘리베이터 앞까지 자율주행 — 따라 걷기'],
   ['app','🛗 엘베 시작',false,'앱 기동 + 제어권 부여 (최대 20초)'],
   ['call','① 호출',true,"정렬이 끝나면 '다음' → 팔이 호출 버튼을 누른다"],
   ['front','② 문앞 정렬',true,"Nav2로 문 앞 이동 — 로봇이 멈추면 '다음'"],
   ['door','③ 문 열림',true,"문 열린 것을 눈으로 보고 '다음'"],
-  ['ride','④ 탑승',true,"전진 185cm — 같이 타고 '다음'"],
+  ['ride','④ 엘리베이터 안',true,"전진 185cm — 같이 타고 '다음'"],
   ['floor','⑤ 층 선택',true,"정렬이 끝나면 '다음' → 팔이 {floor}층 버튼을 누른다"],
   ['moving','🔼 이동중',true,"{floor}층 도착 소리를 듣고 '다음' → 하차 시작"],
   ['exit','⑥ 하차·지도',false,'후진 186cm · 제어권 반납 · {floor}층 지도 전환'],
@@ -1364,7 +1373,7 @@ function renderAutoTrack(d) {
 
 // 지시 문구는 여기서만 만든다 — 오른쪽 패널(U3)과 여정 뷰(U4)가 같이 쓴다.
 // 멈춤 > 확인 대기 > 작업 중 순으로 앞의 것이 이긴다.
-const JV_APP_WARN = '⚠ 엘리베이터 앱 화면에서 직접 누르지 마세요 — 여정이 그 사실을 모릅니다';
+const JV_APP_WARN = '⚠ 엘리베이터 앱 화면에서 직접 누르지 마세요 — 안내가 그 사실을 모릅니다';
 // '다음 확인'을 지금 눌러도 되는가 — 서버 /auto_confirm 과 **같은 규칙**을 화면이 한 번만 적는다.
 // 멈춤 중에는 안 된다: 예전에는 멈춤 중 클릭이 서버에 접수돼 ▶ 재개 순간 그대로 진행됐다 —
 // 사람이 팔 앞에 서 있는 채로 팔이 뻗는다(U11). 버튼 자리는 U10 으로 여정 화면 한 곳이 됐지만,
@@ -1483,7 +1492,7 @@ setInterval(() => {
     const spd = document.getElementById('speed');
     if (spd) {
       spd.disabled = !!d.active;
-      spd.title = d.active ? '자동 여정 중에는 바꿀 수 없습니다 — 취소 후 다시' : '';
+      spd.title = d.active ? '자동 안내 중에는 바꿀 수 없습니다 — 취소 후 다시' : '';
     }
     const st = document.getElementById('auto-status');
     const gb = document.getElementById('auto-go-btn');
@@ -1584,7 +1593,7 @@ function pollSocial() {
             d.toggle ? 'sv-on' : 'sv-off', d.toggle ? '켜짐' : '꺼짐');
     _svChip(document.getElementById('sv-gate'),
             d.suspended ? 'sv-warn' : 'sv-on',
-            d.suspended ? `일시중단 (${d.phase || '엘베 구간'})` : `가동 (${d.phase || '여정 아님'})`);
+            d.suspended ? `일시중단 (${d.phase || '엘베 구간'})` : `가동 (${d.phase || '안내 아님'})`);
     const rt = d.route || {};
     const rtTxt = rt.kind === 'waypoints' ? `경유지 ${rt.n}개 포함`
                 : rt.kind === 'direct'    ? '직행'
