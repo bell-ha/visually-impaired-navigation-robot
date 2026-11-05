@@ -1129,6 +1129,19 @@ ARM_EXT_MIN, ARM_EXT_MAX = 0.00, 0.50  # wrist_extension 안전 범위
 LASER_YAW_OFFSET = 3.141592653589793  # 실측 TF: laser가 base 기준 180° 회전 장착
 BASE_STEP_MAX    = 0.04   # m — 1회 이동 상한
 BASE_TRAVEL_MAX  = 0.15   # m — 누적 이동 상한 (넘으면 정지, 주차가 틀렸다는 뜻)
+# 🔴 회전이 일어나면 위 누적을 **0 으로 돌린다** (2026-11-05 실기 근거).
+#   예산의 뜻은 "주차 위치가 틀렸다"를 잡는 것이다. 그런데 제자리 회전은 '횡' 의
+#   기준축 자체를 돌려버리므로, 회전 전에 쌓인 횡이동 누적은 회전 뒤의 횡오차와
+#   **같은 축의 양이 아니다.** 그걸 계속 더하면 예산이 자기 회전 때문에 소모된다.
+#   325호 ⑤ 실측 — 회전과 횡이동이 번갈아 들어가며 서로를 되돌렸다:
+#       ROTATE +12.8° → +4.0 → -4.0 → ROTATE -4.4° → -3.3 → +2.4 → +0.9 → -0.8
+#       누적 15.4cm 로 예산 소진. 그런데 ex 는 -120 → +79 → -46 → **-18px** 로
+#       수렴하고 있었다(허용 ±8px). **10px 모자라서** 실패했다.
+#   마지막 ROTATE(-4.4°) 에서 리셋했다면 누적은 7.4cm 였고 예산이 절반 남았다.
+# ⚠ 리셋만 두면 "회전 → 리셋 → 15cm → 회전 → 리셋 → 15cm" 로 무한히 흐를 수 있다.
+#   그래서 **리셋되지 않는 절대 상한**을 따로 둔다. 회전은 _rot_count<4 라 리셋만
+#   있으면 최대 4×15=60cm 까지 흐르는데 캐빈 폭이 152cm 다. 30cm 로 묶는다.
+BASE_TRAVEL_HARD_MAX = 0.30   # m — 회전 리셋을 포함한 **절대** 누적 상한
 # ── 평행이 먼저다 ────────────────────────────────────────────────────────────
 # 🔴 2026-11-05 사용자 관찰: "각도가 너무 틀어지면 왔다갔다 했다 — 평행하지 못해서
 #   그런 것 같다." 그날 ⑤ 층선택 로그가 그대로 뒷받침한다:
@@ -1326,7 +1339,8 @@ state = {
     "base_align":   False,  # 베이스 전후 X정렬 ON/OFF (기본 OFF — 명시적으로 켜야 움직임)
     "guard_off":    False,  # 라이다 가드 해제 (개발용 — 재시작 시 항상 가드 ON 복귀)
     "jpeg_fail":    None,   # 타겟 인식 실패 순간의 OCR 입력 스냅샷 (디버그: /fail.jpg)
-    "base_travel":  0.0,    # 누적 이동량 (m)
+    "base_travel":  0.0,    # 누적 이동량 (m) — 회전하면 0 으로 리셋(위 상수 주석)
+    "base_travel_total": 0.0,  # 리셋되지 않는 절대 누적 (BASE_TRAVEL_HARD_MAX 용)
     "press_ready":  False,  # 정조준+근접 래치 (진입 0.25/유지 0.28 히스테리시스)
     "align_note":   None,   # X정렬 상태 메시지
     # 🔴 2026-10-12 — "무엇이 막고 있나"를 대시보드가 읽을 수 있게 올린다.
@@ -2798,6 +2812,38 @@ POSE_DONE_DEG = max(3.0,  SCENE_TOL_ROT_DEG)
 # 대한 방위(잡음 지배)로 ①정렬이 크게 돈다 — 2026-09-04에 겪은 그 실패다.
 # 같게 두면 그 구간이 ③정렬만 도는 정상 경로가 된다.
 POSE_SKIP_M   = POSE_DONE_M
+
+# ── ④ 캐빈 진입 전용: 합격을 **축별로** 본다 ─────────────────────────────────
+# 🔴 2026-11-05 실기가 근거다. 종전 조건은 `dist = hypot(전진, 횡) ≤ 5cm` 인데
+#   `조준각 = atan(횡 / 남은거리)` 라서 **전진 잔여가 0 에 가까우면 조준각이 폭발한다.**
+#   그러면 물러남(RETREAT_WHEN_TURN_DEG=30°)이 발동해 거의 다 온 자세를 버린다.
+#     504호 반복1: 전진 -0.2cm · 횡 +7.7cm · yaw -3.1°  →  조준각 88.9°
+#       → 물러남 15cm → 반복3 ①정렬 +27.1° 과회전 → 과주행 227cm
+#       → `⛔ 좌표 목표가 티칭값과 너무 다름 (계산 +3cm vs 기준 -39cm)` 실행 거부
+#       → 로봇이 엉뚱한 자리 → 그리퍼 카메라가 패널을 못 봄
+#       → ⑤ 에서 `'5'` 검출 **35프레임 0건** → 층 선택 실패
+#   즉 ④ 에서 횡을 억지로 맞추려 한 것이 ⑤ 를 통째로 망쳤다.
+# 🔴 핵심: **두 축의 비용이 다르다.**
+#     전진 오차 — ⑤ 가 고칠 수 없다(앞뒤로 못 움직인다). 작아야 한다.
+#     횡   오차 — ⑤ 의 X정렬이 고친다(예산 15cm). 8cm 는 충분히 메워진다.
+#   같은 날 실측이 그걸 보여준다:
+#     325호 ④ 횡 +3.7cm → ⑤ 가 `'3'` 을 찾았다(정렬은 예산 문제로 실패, 검출은 성공)
+#     120호 ④ 횡 -1.5cm → ⑤ **정렬 완료 ✅ → 1층 눌렀다**
+#     504호 ④ 횡 7.7cm 에서 억지 보정 → 위 연쇄 → 검출 0건
+# ⚠ ④(씬 3)에만 적용한다. ②문앞·⑥하차는 뒤에 X정렬이 없어서 횡을 봐 줄 사람이 없다.
+CABIN_TOL_FWD_CM = 2.0    # ④ 전진 허용 — SCENE_TOL_FWD_CM(2.0)과 같은 자
+CABIN_TOL_LAT_CM = 8.0    # ④ 횡 허용 — ⑤ X정렬 예산(15cm)의 절반 남짓
+
+
+def _pose_ok(n, dist, fwd_cm, lat_cm, rot_deg):
+    """안무 합격 판정. 씬 3(④ 캐빈 진입)만 축별로 보고 나머지는 종전 dist 기준.
+
+    yaw 는 두 경우 모두 본다 — 방향이 틀어지면 ⑤ 의 카메라가 패널을 비스듬히 본다."""
+    if abs(rot_deg) > POSE_DONE_DEG:
+        return False
+    if n == 3:
+        return abs(fwd_cm) <= CABIN_TOL_FWD_CM and abs(lat_cm) <= CABIN_TOL_LAT_CM
+    return dist <= POSE_DONE_M
 # 한 구간(_scene_leg 1회)에서 허용하는 최대 스텝. 진동 감지가 '개선 없을 때만'
 # 세도록 바뀌어서, 아주 느리게 개선되는 경우 무한히 돌 여지가 생겼다 — 그 상한.
 # 한 스텝이 최대 50cm/90°이므로 30회면 어떤 정상 구간보다 넉넉하다.
@@ -3974,7 +4020,18 @@ class ElevatorTracker(Node):
             if _ext is not None and _ext > 0.02:
                 self._dlog("[ROTATE] 회전 전 팔 후퇴")
                 self._move_joint_wait(ARM_JOINT, ARM_EXT_MIN, 2, 8.0)
-            self._rotate_base(ang_rad)
+            if self._rotate_base(ang_rad):
+                # 🔴 회전 성공 → 횡정렬 예산 리셋 (위 BASE_TRAVEL_HARD_MAX 주석).
+                #   회전이 '횡' 의 기준축을 돌렸으므로 회전 전 누적은 같은 축의 양이
+                #   아니다. 절대 누적(base_travel_total)은 **그대로 둔다.**
+                with state_lock:
+                    _was = state["base_travel"]
+                    state["base_travel"] = 0.0
+                    _tot = state["base_travel_total"]
+                if _was > 0.001:
+                    self._dlog(f"[ALIGN] 회전으로 X정렬 예산 리셋 "
+                               f"{_was*100:.1f}cm → 0 (절대 누적 {_tot*100:.1f}cm / "
+                               f"상한 {BASE_TRAVEL_HARD_MAX*100:.0f}cm)")
         finally:
             self._nudging = False
 
@@ -4684,9 +4741,12 @@ class ElevatorTracker(Node):
                            f"남은 반복({SCENE_MAX_ITERS - it + 1}회)을 건너뛴다")
                 break
             prev_dist = dist
-            if dist <= POSE_DONE_M and abs(rot_deg) <= POSE_DONE_DEG:
+            if _pose_ok(n, dist, fwd_cm, lat_cm, rot_deg):
                 self._dlog(f"[AUTO] {SCENES[n]} 안무 완료 ✓ ({it}회) — "
-                           f"잔여 dist={dist:.3f}m yaw={rot_deg:+.1f}° 횡={lat_cm:+.1f}cm")
+                           f"잔여 dist={dist:.3f}m yaw={rot_deg:+.1f}° "
+                           f"횡={lat_cm:+.1f}cm 전진={fwd_cm:+.1f}cm"
+                           + (f" [축별: 전진≤{CABIN_TOL_FWD_CM:.0f} 횡≤{CABIN_TOL_LAT_CM:.0f}cm]"
+                              if n == 3 else ""))
                 return _result(True, "완료", res)
 
             bearing = math.degrees(math.atan2(dy, dx))
@@ -4822,7 +4882,7 @@ class ElevatorTracker(Node):
         fwd_cm, lat_cm, rot_deg, (px, py, _y) = res
         dist = math.hypot(tgt["x"] - px, tgt["y"] - py)
         # 반복 상한까지 갔는데 종료조건 미달이면 ✓를 찍지 않는다 — 전송성공≠동작완료.
-        ok = (dist <= POSE_DONE_M and abs(rot_deg) <= POSE_DONE_DEG)
+        ok = _pose_ok(n, dist, fwd_cm, lat_cm, rot_deg)
         self._dlog(f"[AUTO] {SCENES[n]} 안무 " + ("완료 ✓" if ok else "⚠ 미달")
                    + f" — 잔여 dist={dist:.3f}m yaw={rot_deg:+.1f}° "
                      f"횡={lat_cm:+.1f}cm 전진={fwd_cm:+.1f}cm"
@@ -4871,6 +4931,17 @@ class ElevatorTracker(Node):
             self._align_defer_ts = 0.0
             self._align_defer_logged = False
             self._align_defer_gaveup = False
+        # 🔴 절대 상한을 먼저 본다 — 이쪽은 회전으로 리셋되지 않는다.
+        with state_lock:
+            _tot = state.get("base_travel_total", 0.0)
+        if _tot >= BASE_TRAVEL_HARD_MAX:
+            with state_lock:
+                state["base_align"] = False
+                state["align_auto_off"] = True
+            self._set_align_note(
+                f"절대 누적 {_tot*100:.0f}cm 초과 — X정렬 OFF. 회전 리셋을 포함한 "
+                f"상한({BASE_TRAVEL_HARD_MAX*100:.0f}cm)이다. 주차 위치를 옮겨야 한다.")
+            return
         if travel >= BASE_TRAVEL_MAX:
             # 상한 도달 → X정렬 자동 OFF (메시지 반복 방지). 재활성화하면 누적 리셋됨.
             with state_lock:
@@ -4975,6 +5046,7 @@ class ElevatorTracker(Node):
                 moved = min(abs(move_m), BASE_SPEED * (time.time() - t0))   # odom 없음(종전)
             with state_lock:
                 state["base_travel"] += moved
+                state["base_travel_total"] += moved          # 리셋 안 되는 쪽
                 tv = state["base_travel"]
             if not aborted:
                 self._set_align_note(

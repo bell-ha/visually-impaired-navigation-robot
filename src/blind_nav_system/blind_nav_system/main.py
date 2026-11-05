@@ -2759,8 +2759,14 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None, check_yaw=False
 # 2026-09-23 실기: ⑤ 에서 elev_wait_ready 가 45.3s 만에 실패한 뒤에도 같은 문구로 **2분 19초**
 # 더 기다렸다(1회차는 2분 40초). 여정을 끊지는 않는다 — 사람이 정렬하는 중일 수 있다. 문구만 바꾼다.
 _ALIGN_NUDGE_SEC = 60.0
-_ALIGN_NUDGE_MSG = ("⚠ 정렬 실패 후 60초 경과 — 엘베앱 화면에서 정렬만 하고(씬 변경 금지) "
-                    "'다음', 안 되면 '✖ 취소'")
+# 🔴 이 문자열은 **트리거**다. 아래 _auto_wait_confirm 이 `_ALIGN_FAIL_MARK in msg` 로
+#   "정렬 실패로 열린 대기인가" 를 가린다. 그래서 실패 문구와 이 마크를 **같은 상수로
+#   묶는다** — 2026-11-05 에 실패 문구를 `🚨 정렬 3회 실패 …` 로 바꾸면서 종전 트리거
+#   `"자동정렬 실패"` 가 더는 안 맞게 됐고, 그러면 60초 넛지가 **조용히 영구 사망**한다.
+#   (죽은 가드는 없는 가드보다 나쁘다 — 주석이 있다는 이유로 믿게 되기 때문이다.)
+_ALIGN_FAIL_MARK = "정렬 실패"
+_ALIGN_NUDGE_MSG = ("⚠ 정렬 실패 후 60초 경과 — 엘베앱 조종 패드로 맞춘 뒤 '다음', "
+                    "안 되면 '✖ 취소' (씬 변경 금지)")
 
 
 @_jr_traced("auto_wait_confirm", post=_jr_cancel_post)
@@ -2793,7 +2799,7 @@ def _auto_wait_confirm(timeout=900, auto_ok=False):
         # 정렬 실패로 열린 대기(①⑤)만 60초 뒤 문구를 바꾼다. 멈춰 있던 시간은 위에서 t0 에
         # 더해지므로 세지 않는다. 여정은 계속 기다린다(기존 900초 상한 그대로).
         if not nudged and (time.monotonic() - t0) >= _ALIGN_NUDGE_SEC \
-                and "자동정렬 실패" in (_AUTO.get("msg") or ""):
+                and _ALIGN_FAIL_MARK in (_AUTO.get("msg") or ""):
             nudged = True
             with _auto_lock:
                 _AUTO["msg"] = _ALIGN_NUDGE_MSG      # waiting 은 건드리지 않는다
@@ -3246,6 +3252,45 @@ def _elev_press():
     사유는 응답이 없을 때 None."""
     r = _elev_post("/press", {}, timeout=15)
     return bool(r and r.get("ok")), (r or {}).get("error")
+
+# ── 정렬은 "실패" 로 끝내지 않는다 ─────────────────────────────────────────────
+# 🔴 2026-11-05 사용자: "수동 정렬하라는 거 자체가 말이 안 되지. 음성 안내가 있어봤자
+#   뭐해. 어떻게든 정렬을 해야지." 맞는 지적이다 — 종전 실패 문구
+#   `⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'` 은 **눈 보이는 운영자용**이고
+#   이 로봇의 사용자는 화면을 못 본다. 실패를 알리는 것은 해결이 아니다.
+#   (그래서 여기에 음성 안내를 붙이지 않는다 — 사용자 지시다.)
+# 🔴 그리고 그날 실패는 "불가능" 이 아니라 "**예산이 먼저 떨어졌다**" 였다:
+#     325호 ⑤ — ex -120 → +79 → -46 → **-18px** 로 수렴 중이었고 허용은 ±8px 였다.
+#       10px 모자랐는데 누적 15.4cm 로 X정렬 예산(15cm)이 소진됐다.
+#   즉 다시 시도하면 된다. 그리고 재시도 수단은 **이미 있다** — 엘베앱의
+#   `POST /select`(타겟 선택)이 `base_travel` 을 0 으로 돌리고 예산 소진으로 꺼진
+#   X정렬을 자동 재활성한다("X정렬 예산 = 타겟 시도당 16cm" 주석). 새로 만들지 않는다.
+# ⚠ 무한 재시도는 안 된다 — 캐빈 안에서 사람이 기다리고 문이 열려 있다. 3회로 묶는다.
+#   그리고 엘베앱의 **절대 누적 상한**(BASE_TRAVEL_HARD_MAX=30cm)은 /select 로
+#   리셋되지 않으므로, 재시도가 로봇을 캐빈 밖으로 밀어내지는 않는다.
+ALIGN_TRY_MAX = 3
+
+
+def _elev_align_with_retry(tok, step, what):
+    """버튼 선택 → 정렬 대기를 최대 ALIGN_TRY_MAX 회 반복. 성공하면 True.
+
+    각 시도를 `/select` 로 시작한다 — 그게 X정렬 예산을 되돌리는 유일한 경로다.
+    취소(_auto_hold False)는 즉시 False 로 빠진다."""
+    for i in range(1, ALIGN_TRY_MAX + 1):
+        if not _auto_hold(f"{step} 정렬 시도 {i}"):
+            return False
+        _elev_select(tok)
+        if _elev_wait_ready(tok=tok):
+            if i > 1:
+                _log("AUTO", f"{step} 정렬 성공 — {i}회 시도 끝에")
+            return True
+        if i < ALIGN_TRY_MAX:
+            _auto_set(step, f"정렬 재시도 {i + 1}/{ALIGN_TRY_MAX} — "
+                            f"예산을 되돌리고 다시 맞춥니다 ({what})")
+            _log("AUTO", f"{step} 정렬 실패 {i}회 — 재시도(/select 로 예산 리셋)")
+    _log("AUTO", f"{step} 정렬 실패 — {ALIGN_TRY_MAX}회 전부")
+    return False
+
 
 @_jr_traced("elev_wait_ready", post=_jr_cancel_post)
 def _elev_wait_ready(timeout=45, tok=None):
@@ -4461,12 +4506,13 @@ def _auto_run(dest):
         if not _auto_hold("① 인식 자세"): _auto_abort_elev(); return
         _elev_scene(0)                          # place=hall + 인식자세(블로킹)
         if not _auto_hold("① 호출 버튼 선택"): _auto_abort_elev(); return
-        _elev_select("^" if up else "s")        # 호출버튼 자동 선택 (^=상행 s=하행)
-        _align_ok = _elev_wait_ready(tok=("^" if up else "s"))
+        # 선택+정렬을 재시도까지 묶어서 돈다 (위 _elev_align_with_retry 주석)
+        _align_ok = _elev_align_with_retry("^" if up else "s", "① 호출", dir_txt)
         if _align_ok:
             _auto_set("① 호출", f"정렬 완료 ✅ — '다음' 누르면 호출({dir_txt}) 누름", wait=True)
         else:
-            _auto_set("① 호출", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
+            _auto_set("① 호출", f"🚨 {_ALIGN_FAIL_MARK} ({ALIGN_TRY_MAX}회 시도) — 사람이 도와야 합니다 "
+                                "(엘베앱 조종 패드로 맞춘 뒤 '다음')", wait=True)
         # 정렬 성공일 때만 자동으로 넘긴다. 실패는 사람이 엘베UI 에서 맞춰야 풀린다.
         if not _auto_wait_confirm(auto_ok=_align_ok): _auto_abort_elev(); return
         if not _press_or_pass():                # 다음 → 호출버튼 누르기
@@ -4581,12 +4627,13 @@ def _auto_run(dest):
         if not _auto_hold("⑤ 인식 자세"): _auto_abort_elev(); return
         _elev_scene(4)                          # place=cab + 인식자세
         if not _auto_hold("⑤ 층 버튼 선택"): _auto_abort_elev(); return
-        _elev_select(dest_floor)                # 층버튼 자동 선택
-        _align_ok = _elev_wait_ready(tok=dest_floor)
+        # 선택+정렬을 재시도까지 묶어서 돈다 (위 _elev_align_with_retry 주석)
+        _align_ok = _elev_align_with_retry(dest_floor, "⑤ 층선택", f"{dest_floor}층")
         if _align_ok:
             _auto_set("⑤ 층선택", f"정렬 완료 ✅ — '다음' 누르면 {dest_floor}층 누름", wait=True)
         else:
-            _auto_set("⑤ 층선택", "⚠ 자동정렬 실패 — 엘베UI서 수동 정렬 후 '다음'", wait=True)
+            _auto_set("⑤ 층선택", f"🚨 {_ALIGN_FAIL_MARK} ({ALIGN_TRY_MAX}회 시도) — 사람이 도와야 합니다 "
+                                  "(엘베앱 조종 패드로 맞춘 뒤 '다음')", wait=True)
         # 정렬 성공일 때만 자동으로 넘긴다. 실패는 사람이 엘베UI 에서 맞춰야 풀린다.
         if not _auto_wait_confirm(auto_ok=_align_ok): _auto_abort_elev(); return
         if not _press_or_pass():                # 다음 → 층버튼 누르기
