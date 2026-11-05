@@ -1550,11 +1550,36 @@ def _readiness_polled(key, label):
         return {"status": "unknown", "age_sec": round(age, 1), "detail": f"{label} 판정대기"}
     return {"status": val["status"], "age_sec": round(age, 1), "detail": val["detail"]}
 
+def _readiness_battery():
+    """배터리 pill. 🔴 종전에는 `_readiness_signal` 을 그대로 써서 **토픽이 오고
+    있다**만 보고 "배터리 정상"이라고 썼다 — 전압이 얼마든 같은 문구였다.
+    2026-11-05 여정 중 전원이 끊긴 뒤(승차지점 도착 직후) 숫자를 띄운다.
+
+    ⚠ 판정(status)은 **일부러 안 건드렸다.** 여기 쓸 경고 전압을 아직 모른다 —
+      pimu low_voltage_alert 는 10.5V 지만 그건 로봇 자신의 알림 기준이고,
+      brownout 이 실제로 몇 V 에서 오는지는 이제 쌓이는 HB·블랙박스 기록으로
+      정해야 한다. 지어낸 선으로 초록·빨강을 칠하면 그 선이 틀렸을 때
+      "화면이 정상이라 했다"가 된다. 그래서 숫자만 보여주고 선은 비워 둔다.
+
+    🔴 status 가 ok 일 때만 문구를 바꾼다 — 토픽이 끊긴 상태에서 마지막 전압을
+      띄우면 **옛 값을 현재값으로 읽는다**(끊김 진단 문구가 더 급한 정보다)."""
+    sig = _readiness_signal("battery", "배터리")
+    v, c = _battery.get("voltage"), _battery.get("current")
+    if sig.get("status") == "ok" and v is not None:
+        txt = f"배터리 {v}V"
+        if c is not None:
+            txt += f"/{c:.1f}A"          # pill 폭이 좁다 — 소수 1자리로 줄인다
+        if _battery.get("charging"):
+            txt += " 충전"
+        sig["detail"] = txt
+    return sig
+
+
 @app.route("/readiness")
 def readiness():
     return jsonify(
         amcl=_readiness_amcl(),
-        battery=_readiness_signal("battery", "배터리"),
+        battery=_readiness_battery(),
         handle=_readiness_signal("handle", "손잡이"),
         nav2=_readiness_polled("nav2", "nav2"),
         gripper_camera=_readiness_polled("gripper_camera", "그리퍼캠"),
