@@ -172,7 +172,7 @@ NODE_MISS_GRACE = 10.0   # 없는노드 판정 기동 유예(초)
 
 
 def attach(node, logger, cameras=None, cmd_vel_topic=None,
-           authority_getter=None, phase_getter=None,
+           authority_getter=None, phase_getter=None, battery_getter=None,
            own_node_name=None, expected_nodes=None,
            hb_period=2.0, snap_period=10.0, dead_after=2.5):
     """node에 진단 전용 구독/타이머를 붙인다. 기존 로직은 건드리지 않는다.
@@ -181,6 +181,8 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
     cmd_vel_topic    : 퍼블리셔 수를 감시할 토픽 (예: /stretch/cmd_vel)
     authority_getter : 현재 제어권을 반환하는 callable (있으면 로그에 표시)
     phase_getter     : 현재 단계를 반환하는 callable (있으면 로그에 표시)
+    battery_getter   : {"voltage","current","charging"} 를 반환하는 callable
+                       — 전압·전류를 HB 한 줄에 싣는다 (아래 ④ 참고)
     own_node_name    : 자기 노드 이름 (참가자 중복=유령 감지)
     expected_nodes   : 존재해야 하는 노드 이름 목록 (사라지면 이벤트)
     """
@@ -297,10 +299,28 @@ def attach(node, logger, cameras=None, cmd_vel_topic=None,
             except Exception:
                 nodes = []
             # 없는노드 목록은 ⑤(전이시 1회)로 옮겼다 — 여기선 총 노드 수만 남긴다.
+            # 🔴 전압·전류를 HB 에 싣는다 (2026-11-05). 여정 중 전원이 끊긴 사고를
+            #   조사하면서 **전압이 어디에도 기록되지 않는다**는 것이 드러났다 —
+            #   system 로그 태그 22종에도, 블랙박스 sample 17필드에도 없었다. 그래서
+            #   brownout 가설을 로그로 확정할 수 없었다(pimu low_voltage_alert=10.5V
+            #   인데 `Low voltage` 는 전 로그 0건 — 다만 voltage_LPF=1.0Hz 라
+            #   NUC 를 죽이는 수백 ms 전압 딥은 애초에 그 값에 안 나타난다. 그래서
+            #   여기 기록은 "딥을 잡는다"가 아니라 **그 순간의 부하와 기저 전압**을
+            #   남기는 것이다 — 무부하 11.84V/4.05A 와 주행 중 8.5~10A 는 다른 사건이다).
+            #   HB 에 두는 이유: 여정이 없을 때도 10초마다 무조건 돌기 때문이다.
+            batt = ""
+            _b = _safe_call(battery_getter)
+            if isinstance(_b, dict):
+                _v, _i = _b.get("voltage"), _b.get("current")
+                batt = (f" batt={'?' if _v is None else f'{_v}V'}"
+                        f"/{'?' if _i is None else f'{_i}A'}"
+                        f"{' 충전중' if _b.get('charging') else ''}")
+            elif battery_getter is not None:
+                batt = " batt=?"      # getter 는 줬는데 dict 가 아니다 = 아직 미수신
             logger.log("HB",
                        f"cams[{' '.join(cam_ages)}] shm={shm_count()} "
                        f"authority={_safe_call(authority_getter)} "
-                       f"phase={_safe_call(phase_getter)}{extra} "
+                       f"phase={_safe_call(phase_getter)}{extra}{batt} "
                        f"nodes={len(nodes)}")
       except Exception as _e:
         # HB 콜백이 어떤 이유로든 예외를 내도 executor(spin)를 죽이면 안 됨

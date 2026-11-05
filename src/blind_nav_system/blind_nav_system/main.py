@@ -374,7 +374,7 @@ _manual_lock = threading.Lock()
 _backup_warn_until = 0.0   # 후진 안내 디바운스
 
 # ── 배터리 상태 ────────────────────────────────────────────────────────────────
-_battery = {"pct": None, "voltage": None, "charging": None}
+_battery = {"pct": None, "voltage": None, "current": None, "charging": None}
 
 # ── 준비상태 신호 갱신시각 (2a-1: 뼈대) ────────────────────────────────────────
 # monotonic 갱신시각만 저장 — age는 /readiness에서 요청 시점에 계산(값 저장 금지).
@@ -529,6 +529,11 @@ def _battery_callback(msg):
             _battery["pct"] = round(p * 100) if p <= 1.0 else round(p)
         v = msg.voltage
         _battery["voltage"]  = round(v, 1) if (v is not None and not math.isnan(v)) else None
+        # 🔴 전류도 남긴다 (2026-11-05 전원 차단 조사). 전압만으로는 "부하가 얼마일 때
+        #   그 전압이었나"를 못 가린다 — 무부하 11.84V/4.05A 와 주행 중 8.5~10A 가
+        #   전혀 다른 사건이다. NaN 가드는 percentage 와 같은 이유로 전류에도 적용한다.
+        c = msg.current
+        _battery["current"]  = round(c, 2) if (c is not None and not math.isnan(c)) else None
         _battery["charging"] = msg.power_supply_status == 1  # CHARGING=1
         _ready["battery"] = time.monotonic()
     except Exception:
@@ -791,6 +796,10 @@ def init_ros():
         _diag_st = _diag.attach(
             _cmd_node, _diaglog,
             cmd_vel_topic="/stretch/cmd_vel",
+            # 🔴 getter 로 넘긴다 — 이 노드는 이미 /battery 를 구독하고 있어서
+            #   (_battery_callback) robot_diag 안에서 또 구독하면 같은 토픽에
+            #   콜백이 둘 붙는다. authority/phase 와 같은 기존 관용구를 쓴다.
+            battery_getter=lambda: _battery,
             own_node_name="main_web_cmdvel",
             expected_nodes=["elevator_tracker", "rplidar", "camera",
                             "gripper_camera", "safety_zone_left_back_tf",
@@ -4788,6 +4797,11 @@ def _jr_sample():
     return {"pose": _jr_pose(), "step": _AUTO.get("step"), "phase": _AUTO.get("phase"),
             "waiting": _AUTO.get("waiting"), "floor": _current_floor,
             "lease_held": _elev_lease_held,
+            # 🔴 전압·전류 (2026-11-05). HB(10초)보다 촘촘한 1Hz 기록이고, 여정 단계와
+            #   같은 파일·같은 시계에 남아 "어느 단계에서 전압이 떨어졌나"를 바로 본다.
+            #   11/05 전원 차단 때 이 필드가 없어서 brownout 을 확정할 수 없었다.
+            "batt_v": _battery.get("voltage"), "batt_a": _battery.get("current"),
+            "charging": _battery.get("charging"),
             # people_n=None 은 "한 번도 못 받았다"(추적기 미기동)이고 0 은 "봤는데 없었다"다.
             # 둘을 반드시 구분해서 적는다 — 이 구분이 없어서 오늘 원인을 못 가렸다.
             "people_n": _pn, "people_age_s": _page, "people_cls": _pcls or None,
