@@ -1129,6 +1129,25 @@ ARM_EXT_MIN, ARM_EXT_MAX = 0.00, 0.50  # wrist_extension 안전 범위
 LASER_YAW_OFFSET = 3.141592653589793  # 실측 TF: laser가 base 기준 180° 회전 장착
 BASE_STEP_MAX    = 0.04   # m — 1회 이동 상한
 BASE_TRAVEL_MAX  = 0.15   # m — 누적 이동 상한 (넘으면 정지, 주차가 틀렸다는 뜻)
+# ── 평행이 먼저다 ────────────────────────────────────────────────────────────
+# 🔴 2026-11-05 사용자 관찰: "각도가 너무 틀어지면 왔다갔다 했다 — 평행하지 못해서
+#   그런 것 같다." 그날 ⑤ 층선택 로그가 그대로 뒷받침한다:
+#     15:32:32~48  [ALIGN] 이동 +4cm ×4  → 누적 16cm (횡정렬 예산 **전부**)
+#     15:32:51     누적 16cm 초과 — X정렬 자동 OFF
+#     15:32:56     [ROTATE] 벽 수직 정렬 1/4: +12.4°   ← 24초 늦게, 예산이 끝난 뒤
+#   벽이 12.4° 기울어 있는 것을 **알면서** 횡정렬이 예산을 먼저 다 썼다.
+#   왜 그게 낭비인가: 기울어진 채로 보는 ex 는 **회전 오차가 섞인 값**이라 평행이동
+#   으로는 0 으로 만들 수 없다. 실제로 회전 뒤 ex 가 -61 → +37px 로 중앙을 **지나쳤다**
+#   (= 그 전 횡이동이 과보정이었다는 증거). 그때는 되돌릴 예산이 0 이었다.
+#   늦게 돈 이유는 회전 게이트의 `not self._nudging` 이다 — 횡정렬이 돌고 있으면 회전이
+#   비집고 들어갈 틈이 없고, 틈은 예산이 소진된 뒤에야 생겼다. 순서가 거꾸로였다.
+# ⇒ 기울기가 크면 횡정렬을 **보류**하고 회전을 먼저 보낸다(_maybe_base_nudge 참고).
+# ⚠ 이 값은 회전 게이트와 **같은 상수**를 써야 한다. 두 숫자가 벌어지면 "회전도 안 하고
+#   횡정렬도 안 하는" 구간이 생긴다 — 교착이다.
+ALIGN_TILT_FIRST_DEG     = 4.0    # ° — 이보다 기울면 수직 정렬을 먼저
+ALIGN_TILT_DEFER_MAX_SEC = 12.0   # s — 그 보류의 상한. 넘으면 기울어진 채로라도 진행
+#   (상한이 필요한 이유: 회전이 다른 조건으로 막힐 수 있다. 상한이 없으면 회전도 못 하고
+#    횡정렬도 안 하는 교착이 되고, 증상은 "로봇이 캐빈 안에서 15분 서 있는다" 다.)
 # 🔴 2026-10-06 — 옛 주석("0.02는 정지 마찰을 못 이겨 바퀴가 헛돈다")은 **n=31 실측에서
 # 재현되지 않았다.** 세 세션 독립분석(로그 전수) 결과:
 #   🔴 **2026-10-12 갱신 — 아래 0.83/0.52 는 폐기한다. 그리고 그 줄의 "odom" 은 오기였다.**
@@ -4821,6 +4840,37 @@ class ElevatorTracker(Node):
             travel   = state["base_travel"]
         if not enabled or pressing or self._nudging:
             return
+        # 🔴 평행 먼저 — 위 ALIGN_TILT_FIRST_DEG 주석이 근거다(2026-11-05 실측).
+        #   교착 방지 세 겹. 하나라도 빼면 "아무것도 안 움직이는" 상태가 된다:
+        #     ① 회전 예산(_rot_count<4)이 남아 있을 때만 보류한다
+        #     ② 팔이 접혀 있을 때만 — 회전 게이트는 뻗은 팔로는 회전을 거부한다
+        #        (회전이 팔을 접으므로 접근을 통째로 버리게 되기 때문)
+        #     ③ 보류 자체에 시간 상한 — 넘으면 기울어진 채로라도 횡정렬을 진행한다
+        with state_lock:
+            _tilt_n = state["wall_tilt"]
+            _flat_n = state["wall_flat"]
+            _ext_n  = state["arm_ext"]
+        if (_flat_n and _tilt_n is not None
+                and abs(_tilt_n) > ALIGN_TILT_FIRST_DEG
+                and getattr(self, "_rot_count", 0) < 4
+                and (_ext_n is None or _ext_n < 0.05)):
+            _t0 = getattr(self, "_align_defer_ts", 0.0) or time.time()
+            self._align_defer_ts = _t0
+            if time.time() - _t0 < ALIGN_TILT_DEFER_MAX_SEC:
+                if not getattr(self, "_align_defer_logged", False):
+                    self._align_defer_logged = True   # 틱마다 찍지 않는다(_set_align_note 가 로그도 남긴다)
+                    self._set_align_note(
+                        f"벽 기울기 {_tilt_n:+.1f}° — 수직 정렬을 먼저 한다 (X정렬 보류)")
+                return
+            if not getattr(self, "_align_defer_gaveup", False):
+                self._align_defer_gaveup = True
+                self._set_align_note(
+                    f"수직 정렬을 {ALIGN_TILT_DEFER_MAX_SEC:.0f}초 기다렸으나 기울기 "
+                    f"{_tilt_n:+.1f}° 가 안 줄었다 — 기울어진 채로 X정렬 진행")
+        else:
+            self._align_defer_ts = 0.0
+            self._align_defer_logged = False
+            self._align_defer_gaveup = False
         if travel >= BASE_TRAVEL_MAX:
             # 상한 도달 → X정렬 자동 OFF (메시지 반복 방지). 재활성화하면 누적 리셋됨.
             with state_lock:
@@ -6167,7 +6217,7 @@ class ElevatorTracker(Node):
         _rot_ok = False
         with state_lock:
             _ext_rot = state["arm_ext"]
-        if (_flat and _tilt is not None and abs(_tilt) > 4.0
+        if (_flat and _tilt is not None and abs(_tilt) > ALIGN_TILT_FIRST_DEG
                 and not self._nudging
                 and not self._is_press_ready()   # 클릭 대기 중엔 회전 금지 (동결)
                 # 접근 시작 후(팔 뻗음)에도 회전 금지 — 회전은 팔을 접으므로 접근을
