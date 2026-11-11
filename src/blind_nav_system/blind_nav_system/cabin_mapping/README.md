@@ -45,7 +45,7 @@
 7. 렌더:
    ```
    python3 cabin_render.py --input cabin_XXXX.jsonl \
-       --map ../../maps/all.yaml --out /tmp/all_with_cabin
+       --map ../../maps/floor5.yaml --out /tmp/all_with_cabin
    ```
    필터 값이 마음에 안 들면 `--sector-deg`, `--box`, `--box-center`, `--l-occ`,
    `--l-free`를 바꿔 **몇 번이든 다시 돌린다.** 다시 찍을 필요가 없다.

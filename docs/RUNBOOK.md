@@ -180,7 +180,7 @@ python3 cabin_render.py
 | 파일 | 내용 |
 |---|---|
 | `$PKG/config/location.yaml` | 목적지 이름 → Nav2 좌표 매핑 |
-| `$PKG/maps/*.pgm` + `*.yaml` | 사전 생성 실내 지도 (`all` · `itrc` · `coex` · `floor3` · `floor4` · `center` · `cabin_run`) |
+| `$PKG/maps/*.pgm` + `*.yaml` | 사전 생성 실내 지도 (층별 `floor1`~`floor5` · `itrc` · `cabin_run` · 백업 `all_backup_20260902` · `all_with_cabin`) |
 | `$APP/elevator_button_press/button_layout.json` | 버튼 패널 배치 |
 | `$APP/elevator_button_press/aim_trim.json` | 조준 보정값 |
 | `~/.ros/fastdds_no_shm.xml` | FastDDS SHM 비활성 (UDP 강제) |

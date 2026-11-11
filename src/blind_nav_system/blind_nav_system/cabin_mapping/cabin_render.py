@@ -31,7 +31,7 @@ PGM 행 순서: 이미지 0행 = y 최대다. row = height-1-int((y-origin_y)/re
 
 사용 예:
   python3 cabin_render.py --input cabin_20260902_161500.jsonl \
-      --map ../../maps/all.yaml --out /tmp/all_with_cabin
+      --map ../../maps/floor5.yaml --out /tmp/all_with_cabin
 """
 
 import argparse

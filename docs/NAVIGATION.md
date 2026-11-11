@@ -133,6 +133,10 @@ LB(버튼 4)를 누르고 있어야 움직이는 데드맨이고, 속도는 0.25
 곳**이라, 참조를 고치는 방식은 한 곳만 빠뜨려도 조용히 어긋난다. 파일을 갈아끼우면
 고칠 참조가 0개가 된다.
 
+> **2026-11-11 변경:** 층별 지도로 갈라졌다. `all.pgm/yaml` → `floor5.pgm/yaml`(5층, 기준 지도),
+> `floor1~4`는 각 층을 LIMO로 따로 찍고(2.3) floor5 조각으로 빈 곳을 채운 뒤(2.4) **floor5 좌표계로
+> 옮긴** 지도다. 그래서 엘리베이터(문앞·캐빈·하차) 좌표는 다섯 층이 같고, 호실 좌표만 층마다 다르다.
+
 **앞으로 SLAM을 할 때는 `SerializePoseGraph` 서비스로 포즈그래프도 같이 저장하라.**
 
 ```bash
@@ -149,6 +153,52 @@ ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGrap
 ros2 run nav2_map_server map_saver_cli \
   -f ~/GitHub/visually-impaired-navigation-robot/src/blind_nav_system/maps/맵이름
 ```
+
+### 2.3 LIMO로 지도 만들기 (2026-11-11, 1~4층)
+
+LIMO(ROS1, 사용자 `wego`) 바탕화면 아이콘 3개가 각각 스크립트를 실행한다.
+스크립트 위치: `~/limo_start_shortcut/bashes/`
+
+| 순서 | 아이콘 | 스크립트 | 하는 일 |
+|---|---|---|---|
+| 1 | limo_bringup_without_tf | `limo_bringup_without_tf.sh` | 로봇 · 센서 켜기 (창을 닫지 말 것) |
+| 2 | lidar_mapping | `lidar_mapping.sh` | 맵핑. RViz를 보며 조종해 공간을 천천히 한 바퀴 |
+| 3 | save_map | `save_map.sh` | `roscd limo_bringup/maps` → `rosrun map_server map_saver -f test_map` |
+
+- **1 · 2번을 켜 둔 채로 저장한다.** 맵핑을 먼저 끄면 저장할 지도가 없다. 저장 후 2 → 1 순서로 `Ctrl+C`.
+- 아이콘 3번은 항상 `test_map`으로 **덮어쓴다.** 이름을 붙이려면 터미널에서 직접 저장한다.
+  ```bash
+  rosrun map_server map_saver -f "$(xdg-user-dir DESKTOP)/floor3_map"   # 바탕화면 (한글이면 ~/바탕화면)
+  ```
+- RViz에서는 저장할 수 없다(맵핑이 slam_toolbox가 아니면 저장 버튼 없음).
+- ⚠ LIMO의 `map_saver`는 yaml의 `image:`를 **절대 경로**(`/home/wego/Desktop/1.pgm`)로 쓴다.
+  저장소에 넣을 때 `image: floorN.pgm`으로 고쳐야 Stretch에서 열린다.
+- LIMO 원본(1~4.pgm/yaml)은 사용자 바탕화면 `시각장애인맵들/`에 있다.
+
+### 2.4 지도 편집 — floor5 조각 붙이기 → floor5 좌표계로 옮기기 (2026-11-11)
+
+LIMO 지도는 층마다 원점 · 방향이 제각각이고 일부 구역 · 캐빈 안쪽이 비어 있었다.
+완성본인 floor5(캐빈 포함)를 기준으로 채우고, 마지막에 floor5 좌표계로 옮겼다.
+도구: `src/blind_nav_system/blind_nav_system/tools/map_align/`
+
+1. **정렬본 만들기** — `align_to_floor5.py --target floorN.yaml --out <폴더>`
+   - 전체 정렬(길 겹침 최대) 후, 엘리베이터 주변만 다시 맞춰 **후보 그림**을 낸다.
+   - ⚠ 복도의 비슷한 오목한 공간 때문에 1등 후보가 틀릴 수 있다(1층: 화장실 자리).
+     후보 그림을 사람이 보고 `--pick N`으로 고른다.
+2. **GIMP로 붙이기** (GIMP 3 기준)
+   - 대상 지도와 정렬본을 **각각 열기** → 정렬본에서 선택(R 사각형 / F 자유 선택) → 복사
+   - 대상 창에서 **편집 → 제자리에 붙여넣기**(Cmd+Option+V). 그냥 붙여넣기는 위치가 어긋난다.
+   - **레이어 → 아래로 합치기**. (Mac에서 Cmd+H는 앱 숨기기다)
+   - 손질은 **연필(N)만**: 붓 "2. Hardness 100", **Enable dynamics 해제**
+   - 색: 길 `FEFEFE`(254) · 벽 `000000`(0) · 모름 `CDCDCD`(205). 직선은 Shift+클릭
+   - 이미지 크기 변경 · 자르기 금지(origin이 틀어진다)
+   - 이미지 → 모드 → 회색조 확인 → 파일 → 다른 이름으로 내보내기 → `.pgm` → **Raw**
+3. **검사 · 정리** — 값이 0/205/254만 있는지, 크기가 같은지, 문앞↔캐빈이 이어지는지.
+   흰색을 253 · 255로 칠한 칸은 map_server 해석(≤89 벽, >205 길, 나머지 모름)대로 254로 정리했다.
+4. **floor5 좌표계로 옮기기** — `reproject_to_floor5.py --src floorN.yaml --affine transforms_20261111.json --floor floorN`
+   - 캐빈을 붙일 때 쓴 정렬의 역변환이라 캐빈이 floor5와 같은 좌표에 온다.
+   - 한 칸을 3×3으로 읽고 벽이 하나라도 걸리면 벽(45° 회전 시 1칸 벽이 끊기는 것 방지).
+   - 결과: `docs/images/floor-maps-in-floor5-frame.png`, `docs/images/floor-maps-elevator-check.png`
 
 ---
 
