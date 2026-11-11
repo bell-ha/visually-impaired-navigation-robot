@@ -126,6 +126,7 @@ def _normalize_tts(text: str) -> str:
     text = text.replace("POSTECH", "포스텍")
     text = text.replace("UNIST", "유니스트")
     text = text.replace("ITRC", "아이티알씨")
+    text = text.replace("GS25", "지에스 이십오")
     return text
 
 def _dest_tts(name: str) -> str:
@@ -247,9 +248,14 @@ def _offline_plan(text: str, locations: List[str], state_name: str) -> Dict[str,
     }
 
     t = _normalize_tts(text).lower().strip()
+    # 2026-11-11 — 같은 호수의 두 번째 문을 '316다시1호'로 부른다. 그런데 '다시'는 PAUSED 의
+    #   재개 키워드라 "316 다시 1호로 바꿔"가 재개로 잡힌다. 숫자 사이의 '다시'(또는 '-')는
+    #   방 이름으로 보고 재개 키워드 검사에서 뺀다.
+    t_compact = re.sub(r"(\d)\s*(?:다시|-)\s*(\d)", r"\1다시\2", t).replace(" ", "")
+    room_dasi = re.search(r"\d다시\d", t_compact) is not None
 
     # ── PAUSED 상태: 재개/종료/변경 키워드 우선 처리 ──────
-    if state_name == "PAUSED":
+    if state_name == "PAUSED" and not room_dasi:
         resume_kw = ["계속", "다시", "재개", "그냥 가", "출발", "가자"]
         abort_kw  = ["종료", "그만", "끝", "멈춰", "취소"]
         change_kw = ["바꿔", "변경", "다른"]
@@ -263,8 +269,12 @@ def _offline_plan(text: str, locations: List[str], state_name: str) -> Dict[str,
     # ── 목적지 매칭 ────────────────────────────────────────
     norm_map = {_normalize_tts(l).lower(): l for l in locations}
 
+    # 0단계: 띄어쓰기를 지운 발화에 목적지 이름이 통째로 들어 있으면 그것 (가장 긴 이름 우선)
+    #   예: "316 다시 1호로 가줘" → '316다시1호' (1단계였다면 '316호'와 함께 걸려 되묻는다)
+    whole = sorted((orig for norm, orig in norm_map.items() if norm.replace(" ", "") in t_compact),
+                   key=lambda o: -len(o))
     # 1단계: 단어 단위 포함 검색 (예: "카이스트" → KAIST 포함 목적지)
-    hits = [
+    hits = whole[:1] or [
         orig for norm, orig in norm_map.items()
         if any(w in norm for w in t.split() if len(w) >= 2)
     ]
@@ -632,6 +642,7 @@ class GPTPlanner:
             "change_dest_request, change_dest_propose, ask_again\n\n"
             "[PAUSED 해석 규칙]\n"
             "- '다시 가/계속/재개/그냥 가' → resume_propose, button_action=resume\n"
+            "  단, '다시'가 **숫자 사이**에 있으면 재개가 아니라 방 이름이다 ('삼백십육 다시 일호' → 316다시1호).\n"
             "- '종료/그만/끝/멈춰' → abort_propose, button_action=abort\n"
             "- '바꾸고 싶어/다른 곳/변경' (새 목적지 없음) → change_dest_request, button_action=change_ready\n"
             "- 목적지 이름이 발화에 포함된 경우 (예: '삼백 오호', '301호로 바꿔', '백오호로 가줘') → change_dest_propose, button_action=change_start, destination=해당목적지\n"
@@ -641,8 +652,12 @@ class GPTPlanner:
             "- 목적지는 '<층><방번호>호' 세 자리 호수다. 한글 수사를 **자리별로 끊어** 숫자로 바꿔라.\n"
             "- 맨 앞이 층이다: 백=1, 이백=2, 삼백=3, 사백=4, 오백=5.\n"
             "- 그 뒤가 방번호 두 자리다: 공=0, 일=1 … 구=9, 십=10, 십일=11, 이십=20, 이십팔=28.\n"
-            "- 예: '백오호'→105호 / '백이십팔호'→128호 / '이백십호'→210호 /\n"
-            "      '삼백이십호'→320호 / '오백일호'→501호 / '오백사호'→504호(연구실) / '오백십호'→510호\n"
+            "- 예: '백오호'→105호 / '이백십호'→210호 / '삼백이십호'→320호 / '사백이십이호'→422호 /\n"
+            "      '오백일호'→501호 / '오백사호'→504호(연구실) / '오백십호'→510호 / '오백이십팔호'→528호\n"
+            "- 같은 호수의 두 번째 문은 '<호수>다시<번호>호' 이름이다. 발화는 '삼백십육 다시 일호',\n"
+            "  '316 다시 1호', '316-1호' 등으로 온다 → 목록의 '316다시1호'로 매칭.\n"
+            "  '삼백십육호'만 들리면 '316호'다 ('316다시1호'와 섞지 말 것).\n"
+            "- 호수가 아닌 목적지도 있다: '공과대학 라운지', '107호(GS25)'('GS25'·'편의점'으로 불릴 수 있음).\n"
             "- [경고] 층 자리를 방번호로 흘리지 마라. '백오호'는 105호이고 505호가 아니다.\n"
             "  '오백사호'는 504호이고 505호가 아니다. '오백일호'는 501호이고 505호가 아니다.\n"
             "- 자리를 하나씩 읽기도 한다: '일공오호' → 일-공-오 → 105호.\n"
@@ -1567,6 +1582,8 @@ class InterfaceApp:
     #   엘리베이터를 타지 않고 **5층 지도의 그 좌표**(505호 자리)로 가서
     #   "105호에 도착했습니다" 라고 말한다 — 층이 라벨뿐이고 좌표가 공용이라
     #   무경고로 틀린 곳에 도착한다. 이 저장소가 지표로 삼은 '틀린 층 도착 선언'이다.
+    #   (2026-11-11부터 층별 지도·층별 좌표지만, 지도는 현재 층 것만 올라가 있으니
+    #    다른 층 목적지를 _go_nav 로 바로 보내면 여전히 틀린 곳으로 간다 — 여정을 쓴다.)
     #   층 비교·엘베·지도전환은 대시보드 _auto_run 에 **이미 전부 있다.** 그것을 쓴다.
     #
     #   🔴 대시보드를 눈으로 봐야 출발할 수 있으면 음성 안내의 의미가 없다(사용자).

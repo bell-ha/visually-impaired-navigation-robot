@@ -874,7 +874,8 @@ function loadLocations() {
     }).join('');
     // 🔴 클릭은 **여정**(/auto_goto)으로 보낸다. 예전에는 /goto(Nav2 단일 목표)라서
     //    5층에서 '305호'를 누르면 엘리베이터를 타지 않고 층이 공유하는 같은 좌표로
-    //    직행한 뒤 "도착"이 떴다(층은 라벨뿐이고 28개 좌표를 5개 층이 공유한다).
+    //    직행한 뒤 "도착"이 떴다(당시 층은 라벨뿐이고 28개 좌표를 5개 층이 공유했다.
+    //    2026-11-11부터 층별 지도·층별 호실 좌표다 — 그래도 다른 층은 여정으로 가야 한다).
     //    /auto_goto 는 목적지 floor 와 현재 층을 비교해 같은 층이면 바로 주행하고
     //    다른 층이면 엘리베이터 여정을 돈다 — 화면 입력의 "바로 출발"은 그대로다.
     el.querySelectorAll('.loc-item').forEach(div => div.onclick = () => {
@@ -1350,7 +1351,7 @@ setInterval(_syncElevAuthority, 3000);
 //   '엘리베이터 문앞' 이 남아 있어서 **목록 첫 항목 = 기본 목적지**가 돼 있었다.
 //   셋 다 여정이 알아서 거쳐 가는 자리이고 사람이 고를 목적지가 아니다.
 // 기본 선택은 아래 _DEST_DEFAULT. 못 찾으면 첫 항목 그대로 둔다.
-const _DEST_DEFAULT = '118호';
+const _DEST_DEFAULT = '504호(연구실)';   // 2026-11-11: 118호는 1층 재등록으로 없어짐 → 실험 경로 도착지
 fetch('/locations').then(r => r.json()).then(d => {
   const sel = document.getElementById('auto-dest');
   if (!sel) return;
