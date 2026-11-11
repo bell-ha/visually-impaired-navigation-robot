@@ -1086,7 +1086,7 @@ function toggleSocialNav() {
 // toggleObstaclePush 제거 (2026-07-24) — UI 토글 삭제됨
 
 // 🗺 층 확정 / 지도 전환 — 같은 버튼이 상황에 따라 다른 일을 한다.
-// 누르기 전에 무슨 일이 일어날지 라벨·툴팁에 미리 쓴다(사람이 6초 멈춤과 즉시 확정을
+// 누르기 전에 무슨 일이 일어날지 라벨·툴팁에 미리 쓴다(사람이 지도 재로딩과 즉시 확정을
 // 구분할 수 있어야 한다). 판정은 서버가 한다 — loaded_floor 는 "실제로 올라간 지도"다.
 let _loadedFloor = null;      // 서버가 말하는 실제 로드된 층 (모르면 null)
 // 🔴 층 칩과 출발층 줄은 **이것**을 쓴다 — loaded_floor 가 아니다.
@@ -1095,7 +1095,7 @@ let _loadedFloor = null;      // 서버가 말하는 실제 로드된 층 (모�
 //   파라미터가 영구히 어긋나 loaded_floor 가 null 로 굳는다. 그 값으로 칩을 그리면
 //   지도가 제대로 바뀌어도 화면만 "층 ?" 이 된다(= 층 이동 뒤 층이 안 뜨는 증상).
 //   서버의 floor 는 "사람이 확정한 현재 층"이고 칩이 보여줘야 할 값은 그쪽이다.
-//   loaded_floor 는 원래 목적인 **버튼 라벨**(지도를 6초 다시 읽을지 안내)에만 남긴다.
+//   loaded_floor 는 원래 목적인 **버튼 라벨**(지도를 다시 읽을지 안내)에만 남긴다.
 let _currentFloor = null;     // 서버가 들고 있는 현재 층 (모르면 null)
 let _floorConfirmed = false;  // 현재 층이 "사람이 고른 값"인가
 function paintFloorBtn() {
@@ -1107,8 +1107,8 @@ function paintFloorBtn() {
   b.title = same
     ? `${sel.value}층 지도가 이미 올라와 있습니다 — 지도는 그대로 두고 현재 층만 확정합니다(즉시)`
     : (_loadedFloor === null
-        ? '지금 올라간 지도를 확인할 수 없습니다 — 안전하게 지도를 다시 읽습니다(약 6초)'
-        : `지금은 ${_loadedFloor}층 지도입니다 — ${sel.value}층으로 전환합니다(약 6초)`);
+        ? '지금 올라간 지도를 확인할 수 없습니다 — 안전하게 지도를 다시 읽습니다(0.5초 이내)'
+        : `지금은 ${_loadedFloor}층 지도입니다 — ${sel.value}층으로 전환합니다(0.5초 이내)`);
   // 미확정이면 버튼을 눈에 띄게 — 엘베 여정이 막혀 있는 이유가 여기라서.
   b.style.background = _floorConfirmed ? 'var(--neutral-bg)' : '#4a3a1a';
   b.style.color      = _floorConfirmed ? 'var(--text)' : '#fd8';
@@ -1129,7 +1129,7 @@ function switchMap() {
   const same = (_loadedFloor !== null && _loadedFloor === f);
   const q = same
     ? `${f}층으로 확정할까요? (지도는 이미 ${f}층 — 다시 읽지 않습니다)`
-    : `${f}층 지도로 전환할까요? (약 6초)`;
+    : `${f}층 지도로 전환할까요? (0.5초 이내)`;
   if (!confirm(q)) return;
   fetch('/switch_map', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({floor: f})})
