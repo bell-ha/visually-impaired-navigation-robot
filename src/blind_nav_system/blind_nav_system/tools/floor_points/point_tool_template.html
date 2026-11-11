@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>층별 좌표 찍기</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#1d2433;--muted:#667085;--line:#d9dee7;--accent:#1f5fd6;--danger:#c0362c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 -apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;height:100vh;display:flex;flex-direction:column}
+header{display:flex;gap:8px;align-items:center;padding:10px 14px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{font-size:16px;margin:0 10px 0 0}
+.tab{border:1px solid var(--line);background:#fff;padding:6px 14px;border-radius:999px;cursor:pointer;font-size:14px}
+.tab.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.tab .n{font-size:11px;opacity:.8;margin-left:4px}
+.sp{flex:1}
+button.b{border:1px solid var(--line);background:#fff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px}
+button.b.pri{background:var(--accent);color:#fff;border-color:var(--accent)}
+main{flex:1;display:flex;min-height:0}
+#wrap{flex:1;overflow:auto;position:relative;background:#e9ecf1}
+#stage{position:relative;transform-origin:0 0}
+#stage img{display:block;user-select:none;-webkit-user-drag:none}
+#ov{position:absolute;left:0;top:0;cursor:crosshair}
+aside{width:360px;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+#info{padding:10px 14px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}
+#info b{color:var(--ink)}
+#list{flex:1;overflow:auto;padding:6px 10px}
+.row{display:grid;grid-template-columns:1fr 58px 58px 48px 62px 22px;gap:4px;align-items:center;padding:5px 2px;border-bottom:1px solid #eef0f4}
+.row input{width:100%;border:1px solid var(--line);border-radius:6px;padding:3px 5px;font-size:13px}
+.row .x{border:none;background:none;color:var(--danger);cursor:pointer;font-size:16px}
+.hd{font-size:11px;color:var(--muted);border-bottom:1px solid var(--line)}
+.help{padding:10px 14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+.help kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;background:#f3f4f6}
+#coord{position:fixed;pointer-events:none;background:rgba(20,24,33,.85);color:#fff;font-size:12px;padding:3px 7px;border-radius:6px;display:none;z-index:9}
+</style></head><body>
+<header><h1>층별 좌표 찍기</h1><div id="tabs"></div><div class="sp"></div>
+<button class="b" id="zout">－</button><button class="b" id="zfit">맞춤</button><button class="b" id="zin">＋</button>
+<button class="b" id="undo">마지막 점 지우기</button><button class="b" id="copy">YAML 복사</button><button class="b pri" id="save">YAML 저장</button><button class="b" id="savej">JSON 저장</button></header>
+<main><div id="wrap"><div id="stage"><img id="img"><canvas id="ov"></canvas></div></div>
+<aside><div id="info">층을 고르고 표시한 자리를 <b>클릭</b>하세요.</div>
+<div class="row hd"><div>이름</div><div>x [m]</div><div>y [m]</div><div>방향°</div><div>벽 여유</div><div></div></div>
+<div id="list"></div>
+<div class="help"><b>클릭</b> = 점 찍기 (방향 0°) · <b>드래그</b> = 그 방향으로 점 찍기<br>
+오른쪽 위 <b>확대 그림</b>을 클릭해도 같은 좌표로 바뀝니다 · 회색 점 = 엘리베이터 기준(내보내지 않음)<br>
+목록에서 이름·좌표·방향을 바로 고칠 수 있어요 · 자동 저장(이 브라우저)<br><b>사각형</b> = 로봇+뒤따르는 사용자(뒤 0.98 m, 왼쪽 0.56 m) · <span style="color:#1a8f3c">초록</span> 여유 충분 · <span style="color:#d97706">주황</span> 가까움 · <span style="color:#c0362c">빨강</span> 벽에 닿음</div></aside></main>
+<div id="coord"></div>
+<script>
+const D=__DATA__;
+const ELEV=D.elev;
+
+const FP=D.fp;   // 로봇+사용자 모양 (로봇 기준 x앞 y왼) — common.py 와 같은 값
+const DM={};
+function loadDM(f,cb){if(DM[f]) return cb(); const m=D.dmaps[f], im=new Image(); im.onload=()=>{const c=document.createElement("canvas"); c.width=m.w; c.height=m.h; const g=c.getContext("2d"); g.drawImage(im,0,0); const px=g.getImageData(0,0,m.w,m.h).data; const dist=new Uint8Array(m.w*m.h), unk=new Uint8Array(m.w*m.h); for(let i=0;i<m.w*m.h;i++){dist[i]=px[i*4]; unk[i]=px[i*4+1]>127?1:0} DM[f]={...m,dist,unk}; cb()}; im.src=m.png}
+function cell(m,x,y){const c=Math.round((x-m.ox)/m.res), r=Math.round(m.h-1-(y-m.oy)/m.res); if(c<0||r<0||c>=m.w||r>=m.h) return -1; return r*m.w+c}
+function check(f,p){const m=DM[f]; if(!m) return null; const a=p.yaw*Math.PI/180, ca=Math.cos(a), sa=Math.sin(a);
+ let minD=999, hit=false, unk=0, n=0; const ic=cell(m,p.x,p.y); const center=ic<0?0:m.dist[ic]/100;
+ for(let fx=D.fpb.rear;fx<=D.fpb.front+0.001;fx+=0.05) for(let fy=D.fpb.right;fy<=D.fpb.left+0.001;fy+=0.05){const x=p.x+fx*ca-fy*sa, y=p.y+fx*sa+fy*ca, i=cell(m,x,y); n++;
+  if(i<0){hit=true; continue} const d=m.dist[i]/100; if(d<=0.001) hit=true; if(d<minD) minD=d; if(m.unk[i]) unk++}
+ const st=hit?"bad":(minD<D.warn.min||center<D.warn.center?"warn":"ok"); return {st,minD:hit?0:minD,center,unk:unk/n}}
+const COL={ok:"#1a8f3c",warn:"#d97706",bad:"#c0362c"};
+function fpPoly(g,p){const a=p.yaw*Math.PI/180; return FP.map(([fx,fy])=>w2p(g,p.x+fx*Math.cos(a)-fy*Math.sin(a),p.y+fx*Math.sin(a)+fy*Math.cos(a)))}
+let cur="floor1", zoom=1, pts={}; D.order.forEach(f=>pts[f]=[]);
+try{const s=localStorage.getItem(D.storeKey); if(s){const o=JSON.parse(s); D.order.forEach(f=>{if(Array.isArray(o[f]))pts[f]=o[f]})}}catch(e){}
+const img=document.getElementById("img"), ov=document.getElementById("ov"), ctx=ov.getContext("2d"), stage=document.getElementById("stage"), wrap=document.getElementById("wrap");
+function persist(){try{localStorage.setItem(D.storeKey,JSON.stringify(pts))}catch(e){}}
+function tabs(){const t=document.getElementById("tabs"); t.innerHTML=""; D.order.forEach(f=>{const b=document.createElement("button"); b.className="tab"+(f===cur?" on":""); b.innerHTML=D.label[f]+'<span class="n">'+pts[f].length+'</span>'; b.onclick=()=>{cur=f;load()}; t.appendChild(b)})}
+function load(){img.onload=()=>{ov.width=img.naturalWidth; ov.height=img.naturalHeight; fit(); loadDM(cur,()=>{draw(); list()})}; img.src=D.imgs[cur]; tabs(); list();
+ document.getElementById("info").innerHTML="<b>"+D.label[cur]+"</b> — 표시한 자리를 클릭하세요. "+" (지도에 미리 그려진 파랑 점 = 만들 때 location.yaml 에 있던 좌표)"}
+function setZoom(z){zoom=Math.max(.2,Math.min(4,z)); stage.style.width=img.naturalWidth*zoom+"px"; stage.style.height=img.naturalHeight*zoom+"px"; img.style.width=img.naturalWidth*zoom+"px"; ov.style.width=img.naturalWidth*zoom+"px"; ov.style.height=img.naturalHeight*zoom+"px"}
+function fit(){setZoom(Math.min(wrap.clientWidth/img.naturalWidth, wrap.clientHeight/img.naturalHeight))}
+function axesAt(px,py){const W=img.naturalWidth,H=img.naturalHeight;
+ for(const k of ["inset","main"]){const g=D.geo[cur][k],[l,b,w,h]=g.pos; const x0=l*W,x1=(l+w)*W,y0=(1-b-h)*H,y1=(1-b)*H;
+  if(px>=x0&&px<=x1&&py>=y0&&py<=y1) return {g,k,x0,x1,y0,y1}} return null}
+function p2w(a,px,py){const g=a.g; return [g.xl[0]+(px-a.x0)/(a.x1-a.x0)*(g.xl[1]-g.xl[0]), g.yl[1]-(py-a.y0)/(a.y1-a.y0)*(g.yl[1]-g.yl[0])]}
+function w2p(g,x,y){const W=img.naturalWidth,H=img.naturalHeight,[l,b,w,h]=g.pos; return [(l+(x-g.xl[0])/(g.xl[1]-g.xl[0])*w)*W,(1-(b+(y-g.yl[0])/(g.yl[1]-g.yl[0])*h))*H]}
+function evPix(e){const r=ov.getBoundingClientRect(); return [(e.clientX-r.left)/zoom,(e.clientY-r.top)/zoom]}
+function draw(){ctx.clearRect(0,0,ov.width,ov.height);
+ for(const k of ["main","inset"]){const g=D.geo[cur][k]; const s=k==="inset"?1.6:1;
+  ELEV.forEach(([n,x,y])=>{const [X,Y]=w2p(g,x,y); ctx.beginPath(); ctx.arc(X,Y,3*s,0,7); ctx.fillStyle="rgba(120,120,120,.55)"; ctx.fill()});
+  pts[cur].forEach((p,i)=>{const r=check(cur,p); const col=r?COL[r.st]:"#d61f69";
+   const poly=fpPoly(g,p); ctx.beginPath(); poly.forEach(([X,Y],j)=>j?ctx.lineTo(X,Y):ctx.moveTo(X,Y)); ctx.closePath(); ctx.fillStyle=col+"33"; ctx.fill(); ctx.lineWidth=1.6; ctx.strokeStyle=col; ctx.stroke();
+   const [X,Y]=w2p(g,p.x,p.y); const L=(k==="inset"?34:22), a=p.yaw*Math.PI/180;
+   ctx.strokeStyle=col; ctx.lineWidth=2.2; ctx.beginPath(); ctx.moveTo(X,Y); ctx.lineTo(X+L*Math.cos(a),Y-L*Math.sin(a)); ctx.stroke();
+   ctx.beginPath(); ctx.arc(X,Y,5*s,0,7); ctx.fillStyle=col; ctx.fill(); ctx.lineWidth=1.5; ctx.strokeStyle="#fff"; ctx.stroke();
+   ctx.font="bold "+(12*s)+"px -apple-system,'Apple SD Gothic Neo',sans-serif"; ctx.lineWidth=3.5; ctx.strokeStyle="#fff"; ctx.strokeText(p.name,X+8,Y-8); ctx.fillStyle=col; ctx.fillText(p.name,X+8,Y-8)})}}
+function list(){const L=document.getElementById("list"); L.innerHTML="";
+ pts[cur].forEach((p,i)=>{const r=document.createElement("div"); r.className="row";
+  const mk=(v,cb,num)=>{const t=document.createElement("input"); t.value=num?(+v).toFixed(num==="y"?1:3):v; t.onchange=()=>{cb(t.value); persist(); draw(); tabs(); list()}; return t};
+  r.appendChild(mk(p.name,v=>p.name=v)); r.appendChild(mk(p.x,v=>p.x=+v,"x")); r.appendChild(mk(p.y,v=>p.y=+v,"x")); r.appendChild(mk(p.yaw,v=>p.yaw=+v,"y"));
+  const r0=check(cur,p), c=document.createElement("div"); c.style.fontSize="12px"; c.style.fontWeight="600";
+  if(r0){c.style.color=COL[r0.st]; c.textContent=r0.st==="bad"?"벽 닿음":(r0.minD.toFixed(2)+" m"); c.title="로봇 모양에서 벽까지 최소 "+r0.minD.toFixed(2)+" m · 중심에서 벽까지 "+r0.center.toFixed(2)+" m"+(r0.unk>0.2?" · 모르는 영역 "+Math.round(r0.unk*100)+"%":"")} r.appendChild(c);
+  const x=document.createElement("button"); x.className="x"; x.textContent="×"; x.title="삭제"; x.onclick=()=>{pts[cur].splice(i,1); persist(); list(); draw(); tabs()}; r.appendChild(x); L.appendChild(r)});
+ if(!pts[cur].length) L.innerHTML='<div style="color:#98a2b3;padding:14px 4px">아직 찍은 점이 없어요.</div>'}
+let down=null;
+ov.addEventListener("mousedown",e=>{const [px,py]=evPix(e); const a=axesAt(px,py); if(!a) return; down={px,py,a}});
+window.addEventListener("mouseup",e=>{if(!down) return; const d=down; down=null; const [px,py]=evPix(e);
+ const [x,y]=p2w(d.a,d.px,d.py); let yaw=0; const dx=px-d.px, dy=py-d.py;
+ if(Math.hypot(dx,dy)>8) yaw=Math.round(Math.atan2(-dy,dx)*180/Math.PI*10)/10;
+ const rr=check(cur,{x,y,yaw}); const msg=rr?(rr.st==="bad"?"⚠ 로봇 모양이 벽에 닿아요 — 위치나 방향을 바꾸세요":(rr.st==="warn"?"⚠ 벽에 가까워요 (여유 "+rr.minD.toFixed(2)+" m)":"여유 "+rr.minD.toFixed(2)+" m")):"";
+ const name=prompt(D.label[cur]+" — 이름 (예: 104호)\n좌표 ("+x.toFixed(2)+", "+y.toFixed(2)+"), 방향 "+yaw+"°\n"+msg, "");
+ if(name===null||name.trim()==="") return; pts[cur].push({name:name.trim(),x:+x.toFixed(3),y:+y.toFixed(3),yaw}); persist(); list(); draw(); tabs()});
+ov.addEventListener("mousemove",e=>{const c=document.getElementById("coord"); const [px,py]=evPix(e); const a=axesAt(px,py);
+ if(!a){c.style.display="none"; return} const [x,y]=p2w(a,px,py); const m=DM[cur]; const i=m?cell(m,x,y):-1; c.textContent="x "+x.toFixed(2)+"  y "+y.toFixed(2)+(i>=0?"  · 벽까지 "+(m.dist[i]/100).toFixed(2)+" m":"")+(a.k==="inset"?"  (확대)":""); c.style.display="block"; c.style.left=(e.clientX+14)+"px"; c.style.top=(e.clientY+12)+"px"});
+ov.addEventListener("mouseleave",()=>document.getElementById("coord").style.display="none");
+wrap.addEventListener("wheel",e=>{if(e.ctrlKey||e.metaKey){e.preventDefault(); setZoom(zoom*(e.deltaY<0?1.15:1/1.15))}},{passive:false});
+document.getElementById("zin").onclick=()=>setZoom(zoom*1.25); document.getElementById("zout").onclick=()=>setZoom(zoom/1.25); document.getElementById("zfit").onclick=fit;
+document.getElementById("undo").onclick=()=>{pts[cur].pop(); persist(); list(); draw(); tabs()};
+function yamlText(){let s="# 층별 좌표 찍기 결과 — location.yaml 형식 (yaw → z,w)\n# 좌표계: floor5 (다섯 층 지도 공통)\n";
+ D.order.forEach(f=>{if(!pts[f].length) return; const fl=+f.slice(-1); s+="\n # ── "+D.label[f]+"\n";
+  pts[f].forEach(p=>{const a=p.yaw*Math.PI/360; s+=" "+p.name+":\n   x: "+p.x+"\n   y: "+p.y+"\n   z: "+Math.sin(a).toFixed(6)+"\n   w: "+Math.cos(a).toFixed(6)+"\n   floor: "+fl+"\n\n"})}); return s}
+function dl(name,text,type){const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([text],{type})); a.download=name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000)}
+document.getElementById("save").onclick=()=>dl("층별좌표.yaml",yamlText(),"text/yaml");
+document.getElementById("savej").onclick=()=>dl("층별좌표.json",JSON.stringify(pts,null,1),"application/json");
+document.getElementById("copy").onclick=()=>{navigator.clipboard.writeText(yamlText()).then(()=>alert("YAML을 복사했어요."),()=>alert("복사가 막혀 있어요. 'YAML 저장'을 쓰세요."))};
+window.addEventListener("resize",()=>{});
+load();
+</script></body></html>
