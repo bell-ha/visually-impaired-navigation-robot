@@ -91,9 +91,17 @@ try:
         from nav2_msgs.srv import LoadMap   # 지도(층) 전환용 — 없어도 나머지는 동작
     except ImportError:
         LoadMap = None
+    try:
+        # map_server 의 yaml_filename 조회용. 종전에는 `ros2 param get` **서브프로세스**를
+        # 띄웠는데 그 한 줄이 지도 전환 소요의 90% 였다(2026-11-11 실측: 1,266ms·느릴 때
+        # 3s+ / 같은 값을 rclpy 서비스로 읽으면 0.2~1.1ms).
+        from rcl_interfaces.srv import GetParameters
+    except ImportError:
+        GetParameters = None
 except ImportError:
     _ROS_OK = False
     LoadMap = None
+    GetParameters = None
 
 # ── 로그 버퍼 ─────────────────────────────────────────────────────────────────
 _LOG_BUF: collections.deque = collections.deque(maxlen=800)
@@ -500,6 +508,7 @@ _floor_confirmed = False
 # (_current_floor 로 판단하면 미확정 초기값을 근거로 쓰는 순환이 된다).
 _loaded_map_path = None
 _map_client = None     # /map_server/load_map 서비스 클라이언트
+_map_param_client = None   # /map_server/get_parameters 서비스 클라이언트
 _init_pub   = None     # /initialpose 퍼블리셔 (AMCL 재정위치용)
 
 def _load_exit_point():
@@ -767,7 +776,7 @@ def _readiness_poll_loop():
         time.sleep(3.0)
 
 def init_ros():
-    global _cmd_node, _cmd_pub, _map_client, _init_pub, _arm_client, _lc_loc_client, _lc_nav_client, _diag_st, _nav_mode_client
+    global _cmd_node, _cmd_pub, _map_client, _map_param_client, _init_pub, _arm_client, _lc_loc_client, _lc_nav_client, _diag_st, _nav_mode_client
     if not _ROS_OK:
         return
     rclpy.init()
@@ -791,6 +800,9 @@ def init_ros():
     # 지도(층) 전환: map_server load_map 클라이언트 + AMCL 재정위치 퍼블리셔
     if LoadMap is not None:
         _map_client = _cmd_node.create_client(LoadMap, "/map_server/load_map")
+    if GetParameters is not None:
+        _map_param_client = _cmd_node.create_client(
+            GetParameters, "/map_server/get_parameters")
     _init_pub = _cmd_node.create_publisher(PoseWithCovarianceStamped,
                                            "/initialpose", 10)
     # 팔 수납(armleft 대체) — 트래젝토리 액션 클라이언트 (엘베와 동일 서버)
@@ -1216,24 +1228,48 @@ def _map_server_yaml():
     """map_server 가 **런치 때 읽은** 지도 경로(문자열) 또는 None.
 
     _nav_param_get 과 따로 둔 이유: 그쪽은 값을 float 로 캐스팅한다(padding 전용).
-    ※ 이 파라미터는 load_map 서비스로 지도를 바꿔도 갱신되지 **않을 수 있다**.
-      그래서 이 값만으로 "지금 로드된 지도"를 단정하지 않는다 — _map_loaded_floor 참고.
+    ※ 이 파라미터는 load_map 서비스로 지도를 바꿔도 갱신되지 **않는다** — 2026-11-11
+      실측 확증(floor1 을 올린 뒤에도 floor5 를 가리켰다). 종전 주석의 "않을 수 있다"는
+      이제 "않는다"다. 그래서 이 값만으로 "지금 로드된 지도"를 단정하지 않는다
+      — _map_loaded_floor 가 GID 로 중재한다.
+
+    🔴 2026-11-11 — `ros2 param get` 서브프로세스를 rclpy 서비스 호출로 바꿨다.
+      서브프로세스는 1,266ms(느릴 때 3s+)였고 그게 지도 전환 소요의 90% 였다. 지도
+      로딩 자체는 59~350ms 다(층 크기 비례). 같은 값을 같은 노드에서 0.2~1.1ms 에 읽는다.
+      ros2 CLI 반복 호출이 DDS 참가자 churn 을 만드는 문제(U1 이 /robot_speed 에 적어 둔
+      "주기 폴링 안 한다" 규칙)도 같이 사라진다.
+      🔴 spin_until_future_complete 금지 — 스핀은 공유 백그라운드 스레드다.
+         _query_lc 와 같은 add_done_callback + Event 패턴을 쓴다.
     """
     _jt0 = time.monotonic()
-    try:
-        r = subprocess.run(["ros2", "param", "get", "/map_server", "yaml_filename"],
-                           capture_output=True, timeout=5, text=True)
-        _jr("gate", "map_server_yaml", rc=r.returncode,
-            stdout_head=(r.stdout or "")[:200], stderr_head=(r.stderr or "")[:200],
+    c = _map_param_client
+    if c is None or not c.service_is_ready():
+        # map_server 가 없거나 아직 안 떴다 = 부팅 정상창. '모름'으로 돌려보낸다.
+        _jr("gate", "map_server_yaml", ready=False,
             latency_ms=round((time.monotonic() - _jt0) * 1000))
-        if r.returncode != 0:
+        return None
+    try:
+        req = GetParameters.Request()
+        req.names = ["yaml_filename"]
+        fut = c.call_async(req)
+        ev = threading.Event()
+        fut.add_done_callback(lambda f: ev.set())   # 본문은 set() 만 (공유 스핀 스레드)
+        if not ev.wait(timeout=2.0):
+            c.remove_pending_request(fut)           # 필수 — pending 무한 누적 방지
+            _jr("gate", "map_server_yaml", timeout=True,
+                latency_ms=round((time.monotonic() - _jt0) * 1000))
             return None
-        v = (r.stdout or "").rsplit(":", 1)[-1].strip()
+        res = fut.result()
+        vals = list(getattr(res, "values", None) or [])
+        v = (vals[0].string_value or "").strip() if vals else ""
+        _jr("gate", "map_server_yaml", value=v[:200],
+            latency_ms=round((time.monotonic() - _jt0) * 1000))
         return v or None
     except Exception as _je:
         _jr("gate", "map_server_yaml", exc=repr(_je),
             latency_ms=round((time.monotonic() - _jt0) * 1000))
         return None
+
 
 
 def _floor_of_map(path):
@@ -1264,21 +1300,39 @@ def _map_loaded_floor():
     우리가 바꿨는데 P 가 그대로면, P 가 낡은 것인지(load_map 이 파라미터를 안 고친다)
     아니면 R 이 낡은 것인지(nav2 가 재시작돼 런치값으로 돌아갔다) **구분할 수 없다**.
     그래서 **둘이 어긋나면 모른다고 답한다** → 호출부가 안전하게 load_map 을 한다.
-    이 논리는 load_map 이 파라미터를 갱신하든 안 하든 둘 다 맞다:
-      갱신한다면 R == P 로 일치해 생략이 되고, 갱신 안 하면 한 번 바꾼 뒤부터는
-      (조금 낭비지만) 항상 실제 load_map 을 한다.
+
+    🔴 2026-11-11 실측 — "load_map 이 파라미터를 안 고친다"가 **확증됐다**(floor1 을
+      올린 뒤에도 P 는 floor5 를 가리켰다). 그래서 층을 한 번 바꾸면 이 함수는 그 뒤
+      **항상** `불일치 → None` 을 돌려준다. 그 대가는 이미 이 설계가 감수하기로 한
+      "중복 load_map"이고, 지금은 그 비용이 0.1~0.4s 다(옛 1.3~3.3s).
+      ⚠ 그 '모름' 안에는 성질이 다른 두 상황이 섞여 있고, 이 함수는 못 가른다:
+        ① 우리가 바꿔서 P 가 낡았다(정상·거의 전부)  ② nav2 재시작으로 R 이 낡았다
+      ②를 못 집어내므로 `_floor_confirm_revalidate` 가 확정을 풀지 못한다 — 런치만
+      재시작하면 **지도는 5층인데 대시보드는 옛 층 확정**이 남는다(실측 재현). 운영으로
+      닫는다: 런치를 다시 띄웠으면 대시보드에서 층 버튼을 한 번 누른다(그게 설계다).
+
+    🔴 `/map` 발행자 GID 로 ①②를 가르려 **시도했고 실패했다**(2026-11-11). GID 는
+      프로세스마다 다르고 load_map 으로는 안 바뀌어서 이론상 맞는 신호다(새 노드로
+      재시작 전후를 재니 `…c631aaeb` → `…f87d3c13` 로 바뀌었다). 그런데 **오래 산
+      참가자에서는 `get_publishers_info_by_topic` 이 죽은 발행자를 계속 돌려준다**
+      — 이 로봇의 상습 고장인 유령 참가자다(서비스 호출은 정상이었다: 재시작된
+      map_server 에 load_map 이 111ms 로 성공했다). 그래서 가드가 늘 "같다"로 통과해
+      아무것도 막지 못했다. 작동하지 않는 가드는 **없는 가드보다 나쁘다**(주석이
+      믿게 만든다) — 그래서 되돌렸다. 다시 시도할 거면 "죽은 발행자가 안 사라진다"를
+      먼저 해결해야 한다. `/map` 을 구독해 origin 으로 판정하는 안은 데이터 도착이
+      양성 증거라 유령에 강하지만, 전송 5MB + 손으로 쓴 CDR 파싱이 비용이다.
     """
     p_floor = _floor_of_map(_map_server_yaml())
     r_floor = _floor_of_map(_loaded_map_path)
     if r_floor is None:
         return (p_floor, "map_server 파라미터") if p_floor else (None, "확인 불가")
     if p_floor is None:
-        # 🔴 R 단독을 믿지 않는다 — 이 함수의 독스트링이 "둘 다 혼자서는 못 믿는다"인데
-        #    예전 구현은 여기서 R 을 믿었다. **P 가 없어지는 것은 예외가 아니라 상시다**:
-        #    `ros2 param get` 은 ros2 데몬이 있어야 답하고, 2026-09-10 하루에 데몬
-        #    staleness 를 두 번 겪었다(`ros2 daemon stop/start` 로 고쳤다).
+        # 🔴 R 단독을 믿지 않는다. **P 가 없어지는 것은 예외가 아니라 상시다** — 종전에는
+        #    `ros2 param get` 이 ros2 데몬에 매달려 있어서 더 잦았다(2026-09-10 하루에
+        #    데몬 staleness 2회). 지금은 rclpy 서비스라 데몬과 무관하지만, map_server 가
+        #    안 떠 있거나 응답이 없으면 여전히 None 이다.
         #    사고 경로: 3층으로 바꿈(R=3) → nav2 재시작(실제 지도=런치 기본 5층)
-        #              → 데몬 다운(P=None) → R 을 믿어 load_map 생략 + 확정
+        #              → P 를 못 읽음 → R 을 믿어 load_map 생략 + 확정
         #              → AMCL 이 **5층 지도에서 3층이라고 믿는다**.
         #    대가는 중복 load_map 한 번이고, 그건 이 함수가 이미 감수하기로 한 비용이다.
         return None, f"기록({r_floor}층)은 있으나 파라미터를 못 읽어 확인 불가"
@@ -4106,8 +4160,10 @@ def _http_self(path, payload):
         return False
 
 
-# /switch_map 핸들러의 최악 소요 ≈ 13s = _map_loaded_floor 의 ros2 param get(timeout 5s)
-# + load_map 대기(6.0s) + 엘베앱 /floor 통보(timeout 2s). _http_self 의 10s 로는 정상 전환도
+# /switch_map 핸들러의 최악 소요 ≈ 10s = _map_loaded_floor 의 파라미터 조회(timeout 2s)
+# + load_map 대기(6.0s) + 엘베앱 /floor 통보(timeout 2s). (2026-11-11 이전에는 파라미터
+# 조회가 `ros2 param get` 서브프로세스 5s 여서 최악 13s 였다. 평소 소요는 1.3~3.3s →
+# 0.1~0.4s 로 줄었다 — 지도 로딩 자체만 남았다.) _http_self 의 10s 로는 정상 전환도
 # 시간초과로 끊긴다(2026-09-11 verifier A3 재현: 10.05s 'timed out' 뒤 지도 전환은 뒤늦게 성공).
 # 시간초과가 '실패'가 아니라 '아직 모름'이 되지 않게 핸들러 최악의 2배 넘게 둔다.
 _SWITCH_MAP_TIMEOUT = 30.0
