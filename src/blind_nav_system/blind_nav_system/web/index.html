@@ -1089,6 +1089,14 @@ function toggleSocialNav() {
 // 누르기 전에 무슨 일이 일어날지 라벨·툴팁에 미리 쓴다(사람이 6초 멈춤과 즉시 확정을
 // 구분할 수 있어야 한다). 판정은 서버가 한다 — loaded_floor 는 "실제로 올라간 지도"다.
 let _loadedFloor = null;      // 서버가 말하는 실제 로드된 층 (모르면 null)
+// 🔴 층 칩과 출발층 줄은 **이것**을 쓴다 — loaded_floor 가 아니다.
+//   load_map 서비스는 map_server 의 yaml_filename 파라미터를 **갱신하지 않는다**
+//   (2026-11-11 실측 확증). 그래서 층을 한 번 바꾸면 서버의 _loaded_map_path(기록)와
+//   파라미터가 영구히 어긋나 loaded_floor 가 null 로 굳는다. 그 값으로 칩을 그리면
+//   지도가 제대로 바뀌어도 화면만 "층 ?" 이 된다(= 층 이동 뒤 층이 안 뜨는 증상).
+//   서버의 floor 는 "사람이 확정한 현재 층"이고 칩이 보여줘야 할 값은 그쪽이다.
+//   loaded_floor 는 원래 목적인 **버튼 라벨**(지도를 6초 다시 읽을지 안내)에만 남긴다.
+let _currentFloor = null;     // 서버가 들고 있는 현재 층 (모르면 null)
 let _floorConfirmed = false;  // 현재 층이 "사람이 고른 값"인가
 function paintFloorBtn() {
   const b = document.getElementById('map-switch-btn');
@@ -1108,6 +1116,7 @@ function paintFloorBtn() {
 function pollFloorBtn() {
   fetch('/switch_map').then(r => r.json()).then(d => {
     _loadedFloor = (d.loaded_floor === undefined ? null : d.loaded_floor);
+    _currentFloor = (d.floor === undefined ? null : d.floor);
     _floorConfirmed = !!d.confirmed;
     paintFloorBtn();
   }).catch(() => {});
@@ -1511,18 +1520,18 @@ function renderJourneyView(d) {
   //   값은 이미 /switch_map 을 3초마다 폴링해서 들고 있다 — 새 호출 0.
   const _fl = document.getElementById('jv-floor');
   if (_fl) {
-    if (_loadedFloor == null) {
+    if (_currentFloor == null) {
       _fl.textContent = '층 ?';
       _fl.className = 'jv-floor unconfirmed';
-      _fl.title = '지도가 아직 안 읽혔습니다 (map_server·런치 확인)';
+      _fl.title = '대시보드가 층을 알려주지 않습니다 (서버·런치 확인)';
     } else if (!_floorConfirmed) {
       // 🔴 "우연히 맞은 층"과 "사람이 고른 층"을 가른다 — 부팅 초기값이 5 라서
       //   숫자만 보여주면 확정된 것으로 오해한다(엘베 여정은 미확정이면 거부된다).
-      _fl.textContent = _loadedFloor + '층?';
+      _fl.textContent = _currentFloor + '층?';
       _fl.className = 'jv-floor unconfirmed';
       _fl.title = '미확정 — 지도(층)에서 현재 층을 확인해야 엘리베이터를 쓸 수 있습니다';
     } else {
-      _fl.textContent = _loadedFloor + '층';
+      _fl.textContent = _currentFloor + '층';
       _fl.className = 'jv-floor';
       _fl.title = '확정된 현재 층';
     }
@@ -1538,9 +1547,9 @@ function renderJourneyView(d) {
     return;
   }
   dest.textContent = `🎯 ${d.dest || ''}`;
-  // 출발층은 이미 폴링 중인 /switch_map 값(_loadedFloor)을 쓴다 — 새 호출 없음. 미확정이면 안 적는다.
-  const dep = (d.dest_floor && _floorConfirmed && _loadedFloor != null)
-            ? `<b>${_loadedFloor}층</b> ${(+d.dest_floor < +_loadedFloor) ? '▼' : '▲'} ` : '';
+  // 출발층은 이미 폴링 중인 /switch_map 값(_currentFloor)을 쓴다 — 새 호출 없음. 미확정이면 안 적는다.
+  const dep = (d.dest_floor && _floorConfirmed && _currentFloor != null)
+            ? `<b>${_currentFloor}층</b> ${(+d.dest_floor < +_currentFloor) ? '▼' : '▲'} ` : '';
   // 🔴 단계 경과 — `#jv-elapsed` 는 여태 영구 공백이었다("/auto_status 에 시작시각이
   //   없어 비워 둔다"). 그런데 2026-09-23 사고를 식별한 값이 바로 이것이다(한 단계에서
   //   4분 22초를 버렸다). 서버에 step_t0 를 추가해 채운다.
