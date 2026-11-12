@@ -2908,13 +2908,27 @@ def _auto_wait_arrival(name, tol=0.10, settle=1.0, timeout=None, check_yaw=False
 # 2026-09-23 실기: ⑤ 에서 elev_wait_ready 가 45.3s 만에 실패한 뒤에도 같은 문구로 **2분 19초**
 # 더 기다렸다(1회차는 2분 40초). 여정을 끊지는 않는다 — 사람이 정렬하는 중일 수 있다. 문구만 바꾼다.
 _ALIGN_NUDGE_SEC = 60.0
+# 🔴 2026-11-12 — ⑤ 층선택 정렬 실패 뒤의 대기(초). 다른 단계의 900초와 **다르게** 둔다.
+#   여기는 시각장애인이 로봇을 잡고 **캐빈 안에 서 있는** 자리다. 15분을 기다리는 것은
+#   대기가 아니라 갇힌 것이다. 2분이면 패널을 더듬어 누르기엔 충분하고, 못 누르면 그만큼
+#   빨리 '나가는' 쪽(_auto_exit_cabin_unmoved)으로 넘어간다. (사용자 결정 2026-11-12)
+#   같은 값을 2단계의 문열림 확인 대기에도 쓴다 — 2분 동안 층 버튼을 눌러 줄 사람이
+#   없었으면 문열림을 눌러 줄 사람도 없다. 두 상한을 따로 둘 근거가 없다.
+AUTO_SELF_PRESS_SEC = 120.0
 # 🔴 이 문자열은 **트리거**다. 아래 _auto_wait_confirm 이 `_ALIGN_FAIL_MARK in msg` 로
 #   "정렬 실패로 열린 대기인가" 를 가린다. 그래서 실패 문구와 이 마크를 **같은 상수로
 #   묶는다** — 2026-11-05 에 실패 문구를 `🚨 정렬 3회 실패 …` 로 바꾸면서 종전 트리거
 #   `"자동정렬 실패"` 가 더는 안 맞게 됐고, 그러면 60초 넛지가 **조용히 영구 사망**한다.
 #   (죽은 가드는 없는 가드보다 나쁘다 — 주석이 있다는 이유로 믿게 되기 때문이다.)
 _ALIGN_FAIL_MARK = "정렬 실패"
-_ALIGN_NUDGE_MSG = ("⚠ 정렬 실패 후 60초 경과 — 엘베앱 조종 패드로 맞춘 뒤 '다음', "
+# 🔴 2026-11-12 — 이 문구가 ⑤ 의 "직접 눌러 주세요" 를 **덮어쓴다**(60초에 _AUTO["msg"]
+#   를 갈아끼운다). 종전에는 조종 패드만 적혀 있어서, 사용자가 할 수 있는 조치가 화면에서
+#   사라졌다 — 사용자 지적("왜 엘베앱 조종 패드로 맞춰야 해? 시각장애인을 위한 건데")
+#   그대로다. 그래서 사람이 직접 누르는 쪽을 **먼저** 적는다.
+#   ⚠ ①(복도 호출)과 ⑤(캐빈 층선택)이 **같은 문구를 공유**한다. 그래서 "2분 뒤 자동으로
+#     나갑니다" 처럼 ⑤ 에만 해당하는 말은 넣지 않는다 — ① 에서는 거짓이 된다.
+_ALIGN_NUDGE_MSG = ("⚠ 정렬 실패 후 60초 경과 — 사람이 버튼을 직접 누르고 '다음', "
+                    "또는 엘베앱 조종 패드로 맞춘 뒤 '다음'. "
                     "안 되면 '✖ 취소' (씬 변경 금지)")
 
 
@@ -4205,6 +4219,95 @@ def _auto_abort_elev():
     _auto_set("취소", "여정 취소됨 — 엘베앱 종료·제어권 회수")
     _http_self("/elevator_app", {"running": False})
 
+
+def _auto_exit_cabin_unmoved(dest_floor, why: str):
+    """2단계 — 층 버튼을 누르지 못한 채 **엘리베이터에서 나온다.**
+
+    🔴 왜 생겼나. 종전 결말은 `_auto_abort_elev()` 하나였다 — 엘베앱을 종료하고
+    여정을 끝낸다. 그러면 **로봇과 사용자가 캐빈 안에 남고**, 조종 패드까지 같이
+    사라진다. 시각장애인이 혼자 엘리베이터에 갇히는 것이 이 소프트웨어의 최악
+    결말이고, '탔던 층 복도' 는 거기보다 낫다. (사용자 승인 2026-11-12)
+
+    🔴 **층을 확정하지 않는다.** 층 버튼을 누르지 못했으니 엘리베이터는 움직이지
+    않았고 로봇은 **탔던 층** 에 그대로 있다. 그래서 정상 ⑥ 경로의 꼬리를 한 줄도
+    타지 않는다 — `_current_floor = dest_floor` / `_floor_confirmed = True` /
+    지도 전환 / `/goto`. 그 꼬리의 근거는 "사람이 귀로 듣고 목적층에 내렸다"(2026-09-11
+    사용자 결정)인데 여기서는 그 전제가 **거짓**이다. 타면 CLAUDE.md 뿌리 B
+    (틀린 층에 "도착" 선언)가 되고, 전 층 좌표가 같아서 AMCL 이 반박해 주지도 않는다
+    (floors-share-one-map). 그래서 이 함수는 여정을 **성공으로 닫지 않는다** —
+    사용자에게 "층 이동은 하지 못했다"고 말하고 끝낸다.
+
+    문 — 로봇은 캐빈 문이 열렸는지 **모른다**. `door_open` 기준선(`door_base`)은
+    씬 ③(복도)에 들어갈 때 재고 캐빈 안에서는 유효하지 않다. 그래서 묻는다:
+    문열림을 눌러 달라고 하고 확인을 기다린다.
+    로봇이 문열림을 스스로 누르지는 **않는다** — 방금 이 캐빈에서 정렬이
+    ALIGN_TRY_MAX 회 실패했고 절대 예산(BASE_TRAVEL_HARD_MAX)도 썼다. 즉시 재실패하고
+    몇 분을 버리는데, 그 사이 사용자는 계속 서 있다.
+
+    실패하면 **오늘과 같은 결말**이다 — 문을 열어 줄 사람이 없으면 후진을 아예 내지
+    않고, 내고도 못 나오면 `_exit_failed` 로 간다(제어권 유지 = 구조용 조종 패드 보존).
+    즉 이 경로는 오늘보다 나빠질 수 없다: 성공하면 밖, 실패하면 오늘 그 자리다."""
+    global _rescue_hold
+    _log("AUTO", f"⑤→2단계 캐빈 탈출 시작 — {why} (층 이동 없음 · 층 확정 안 함)")
+    _jr("gate", "exit_unmoved", dest=dest_floor, why=why, floor=_current_floor)
+    _auto_set("⑤ 층선택",
+              f"🚪 {dest_floor}층 버튼을 누르지 못했습니다 — 엘리베이터에서 나갑니다. "
+              "'문열림' 을 누르고 문이 열리면 '다음'", wait=True, phase="moving")
+    _auto_notify(f"{dest_floor}층 버튼을 누르지 못했습니다. 엘리베이터에서 나가겠습니다. "
+                 "문열림 버튼을 누르고, 문이 열리면 손잡이 버튼을 눌러 주세요")
+    if not _auto_wait_confirm(timeout=AUTO_SELF_PRESS_SEC):
+        if _AUTO.get("cancel"):
+            # 사람이 명시적으로 취소했다 — 그 판단을 뒤집지 않는다.
+            _auto_notify("안내를 종료했습니다")
+            _auto_abort_elev()
+            _auto_set("취소", "여정 취소 — 로봇이 엘리베이터 안에 있습니다")
+            return
+        # 문을 열어 줄 사람이 없다. **닫힌 문으로 후진하지 않는다** — 후진 라이다
+        # 가드에 맡기지 않고 여기서 멈춘다(가드는 별도 브레이크가 아니라 여유거리
+        # 검사일 뿐이고, ⑥ 은 guard_off=True 로 돈다).
+        _rescue_hold = True
+        _auto_notify("엘리베이터에서 나가지 못했습니다. 도움을 요청하세요")
+        _auto_set("오류", "🚨 캐빈 탈출 포기 — 문열림 확인 없음 · 제어권 유지(조종 패드 보존)")
+        _log("AUTO", "⑤→2단계 — 문열림 확인 없음 → 후진 내지 않음(닫힌 문 위험). 제어권 유지")
+        return
+    # 팔은 ⑤ 에서 뻗지 않았을 것이다(정렬만 하다 실패) — 그래도 **재서** 확인한다.
+    # 이 게이트의 근거는 2026-09-30 사고다: arm_safe=True 를 믿고 팔 37cm 로 23초 달렸다.
+    _ok, _why = _elev_arm_stowed()
+    if not _ok:
+        _http_self("/stow_arm", {})
+        _ok, _why = _elev_wait_arm_stowed()
+    _log("AUTO", f"⑤→2단계 하차 직전 팔 상태 — {_why}")
+    if not _ok:
+        _rescue_hold = True
+        _auto_notify("팔이 안전한지 확인되지 않아 움직이지 않습니다. 도움을 요청하세요")
+        _auto_set("오류", "🚨 팔 수납 미확인 — 캐빈 탈출 거부 · 제어권 유지")
+        return
+    if not _auto_hold("⑥ 하차(층 미이동)"):
+        _auto_abort_elev()
+        return
+    _auto_set("⑥ 하차", "하차(후진) 중... — 층 이동 없음", phase="exit")
+    _sent, _seq = _elev_scene(5)
+    if not _sent or _seq is None:
+        # 정상 ⑥ 과 같은 처리 — /step_stop 이 먼저 나가고 구조 경로를 남긴다.
+        _exit_failed("post" if not _sent else "noseq", None, None)
+        return
+    _r, _res, _cm = _elev_wait_exit_done(_seq)
+    _jr("ev", "amcl", where="exit_unmoved", exit_reason=_r, pose=_jr_pose(),
+        elev=_jr("elev_brief"))
+    if _r not in ("done", "fallback"):
+        _exit_failed(_r, _cm, _res)
+        return
+    # 🔴 나왔다. 여기서 **끝낸다** — 위 독스트링의 '꼬리를 타지 않는다'가 이 줄들이다.
+    #    리스는 반납한다(라이다 가드 복구). 실패해도 로봇은 이미 캐빈 밖이라 기록만 남긴다.
+    if not _grant_elev_lease(False, "캐빈 탈출(층 미이동)"):
+        _log("AUTO", "🚨 캐빈 탈출 뒤 리스 반납 실패 — 가드 미복원 상태로 종료")
+    _auto_abort_elev()          # 순서: abort 가 "취소" 문구를 세우므로 아래에서 덮는다
+    _auto_notify("엘리베이터에서 나왔습니다. 층 이동은 하지 못했습니다. 도움을 요청하세요")
+    _auto_set("오류", f"🚪 캐빈 탈출 완료({_r}) — {dest_floor}층 이동 실패 · "
+                      f"탔던 층({_current_floor})에 있습니다 · 여정 종료")
+    _log("AUTO", f"⑤→2단계 캐빈 탈출 완료({_r}) — 층 미이동. "
+                 f"_current_floor={_current_floor} 확정={_floor_confirmed} 유지(건드리지 않았다)")
+
 # ── 여정 활성 중 서버측 잠금 (2026-09-11 advisor §6) ────────────────────────────────
 # UI 비활성만으로는 막히지 않는다 — 키보드 단축키(숫자키 5 = 엘베앱 토글), 열어 둔 옛 탭,
 # 직접 POST 가 그대로 통과한다. 캐빈 안에서 엘베앱이 꺼지면 조종 패드가 사라지고, ② Nav2 구간에
@@ -4789,22 +4892,76 @@ def _auto_run(dest):
         if not _auto_hold("⑤ 층 버튼 선택"): _auto_abort_elev(); return
         # 선택+정렬을 재시도까지 묶어서 돈다 (위 _elev_align_with_retry 주석)
         _align_ok = _elev_align_with_retry(dest_floor, "⑤ 층선택", f"{dest_floor}층")
+        _self_pressed = False     # 사용자가 직접 눌렀다 → 로봇 누르기를 건너뛴다
         if _align_ok:
             _auto_set("⑤ 층선택", f"정렬 완료 ✅ — '다음' 누르면 {dest_floor}층 누름", wait=True)
         else:
-            _auto_set("⑤ 층선택", f"🚨 {_ALIGN_FAIL_MARK} ({ALIGN_TRY_MAX}회 시도) — 사람이 도와야 합니다 "
-                                  "(엘베앱 조종 패드로 맞춘 뒤 '다음')", wait=True)
-        # 정렬 성공일 때만 자동으로 넘긴다. 실패는 사람이 엘베UI 에서 맞춰야 풀린다.
-        if not _auto_wait_confirm(auto_ok=_align_ok): _auto_abort_elev(); return
-        if not _press_or_pass():                # 다음 → 층버튼 누르기
-            _auto_abort_elev(); return
-        _auto_set("⑤ 층선택", f"{dest_floor}층 버튼 누르는 중... (팔 복귀까지 대기)")
-        # 눌림+팔복귀 완료까지 대기. 접촉 판정 실패면 사람 확인으로 간다(① 과 같은 처리).
-        if not _press_done_or_confirm(_elev_wait_press_done(), "⑤ 층선택",
-                                      4, dest_floor):
-            _auto_abort_elev(); return
-        arm_safe = True                         # 유일한 release 지점 (2/2)
-        _AUTO["arm_safe"] = arm_safe
+            # 🔴 2026-11-12 — **1단계: 사용자에게 직접 눌러 달라고 한다.**
+            #   종전 문구는 "엘베앱 조종 패드로 맞춘 뒤 '다음'" 뿐이었다. 사용자 지적:
+            #   "왜 엘베앱 조종 패드로 맞춰야 해? 시각장애인을 위한 건데." 맞다 — 로봇을
+            #   잡고 캐빈 안에 서 있는 사람은 화면을 볼 수 없다. 그 사람이 **할 수 있는**
+            #   조치는 패널을 더듬어 버튼을 누르는 것이고, 그건 실제로 가능하다.
+            #   조종 패드 경로를 **버리지는 않는다** — 확인을 받은 뒤 press_ready 를 물어
+            #   둘을 가른다(아래). 새 버튼·새 라우트 0개.
+            _auto_set("⑤ 층선택",
+                      f"🚨 {_ALIGN_FAIL_MARK} ({ALIGN_TRY_MAX}회 시도) — "
+                      f"{dest_floor}층 버튼을 직접 눌러 주세요 — 누르셨으면 '다음' "
+                      f"(엘베앱 패드로 맞춘 뒤 '다음' 도 그대로 동작)", wait=True)
+            _auto_notify(f"버튼을 누르지 못했습니다. {dest_floor}층 버튼을 눌러 주세요. "
+                         "누르셨으면 손잡이 버튼을 눌러 주세요")
+        # 정렬 성공일 때만 자동으로 넘긴다. 실패는 사람의 손을 기다린다.
+        # 🔴 실패 뒤 대기 상한은 900초가 아니라 AUTO_SELF_PRESS_SEC(2분)다 — 그 상수 주석.
+        if not _auto_wait_confirm(auto_ok=_align_ok,
+                                  timeout=(900 if _align_ok else AUTO_SELF_PRESS_SEC)):
+            if _align_ok or _AUTO.get("cancel"):
+                _auto_abort_elev(); return
+            # 2단계 — 아무도 누르지 않았다. **캐빈 안에 두고 끝내지 않는다.**
+            _auto_exit_cabin_unmoved(dest_floor, "층 버튼을 누를 사람이 없었습니다")
+            return
+        if not _align_ok:
+            # 사람이 '다음' 을 눌렀다. 뜻이 둘이고 **물어서** 가린다 — 추측하면 둘 다 틀린다:
+            #   · ready(centered && press_ready) = 누군가 패드로 정렬을 고쳤다
+            #       → 로봇이 누른다 (종전 동작 그대로 보존)
+            #   · 아니면 = 사용자가 직접 눌렀다
+            #       → 로봇 누르기를 **건너뛴다**. 틀어진 채 /press 를 쏘면 허공을 누르거나
+            #         옆 버튼을 누른다. 그리고 **켜진 버튼을 다시 누르면 호출이 취소된다**
+            #         (사용자 확정) — 이미 눌린 버튼에 팔을 쏘는 것은 되돌리는 일이다.
+            _st5 = _elev_status()
+            if _st5 is None:
+                _self_pressed = True
+                _log("AUTO", "⑤ 정렬 실패 뒤 확인 — 엘베앱 상태 불명 → 누르기 생략"
+                             "(모르면 팔을 쏘지 않는다)")
+            elif _st5.get("ready"):
+                _log("AUTO", "⑤ 정렬 실패 뒤 확인 — ready 복구(패드로 교정됨) → 로봇이 누른다")
+            else:
+                _self_pressed = True
+                _log("AUTO", "⑤ 정렬 실패 뒤 확인 — ready 아님 → 사용자가 직접 누른 것으로 "
+                             "보고 누르기 생략")
+        if _self_pressed:
+            # 🔴 arm_safe 의 **두 번째** release 지점이다(종전에는 아래 한 곳뿐).
+            #   무조건 True 로 놓지 않는다 — `_elev_arm_stowed()` 로 **재서** 푼다.
+            #   그래서 종전 release 보다 근거가 약하지 않다(그쪽은 무조건 True 였다).
+            #   못 재면 arm_safe 는 False 로 남고, ⑥ 직전 게이트가 이동을 거부한다 —
+            #   2026-09-30(팔 37cm 로 23초 주행)이 그 게이트를 만든 사고다.
+            _ok5, _why5 = _elev_arm_stowed()
+            _log("AUTO", f"⑤ 사용자 직접 누름 — 팔 상태 {_why5}")
+            if not _ok5:
+                _http_self("/stow_arm", {})
+                _ok5, _why5 = _elev_wait_arm_stowed()
+                _log("AUTO", f"⑤ 사용자 직접 누름 — 수납 요청 결과 {_why5}")
+            arm_safe = bool(_ok5)
+            _AUTO["arm_safe"] = arm_safe
+            _auto_set("⑤ 층선택", f"{dest_floor}층 — 사용자가 직접 누름 (로봇 누르기 생략)")
+        else:
+            if not _press_or_pass():                # 다음 → 층버튼 누르기
+                _auto_abort_elev(); return
+            _auto_set("⑤ 층선택", f"{dest_floor}층 버튼 누르는 중... (팔 복귀까지 대기)")
+            # 눌림+팔복귀 완료까지 대기. 접촉 판정 실패면 사람 확인으로 간다(① 과 같은 처리).
+            if not _press_done_or_confirm(_elev_wait_press_done(), "⑤ 층선택",
+                                          4, dest_floor):
+                _auto_abort_elev(); return
+            arm_safe = True                         # release 지점 (2/2) — 위 _self_pressed 와 둘
+            _AUTO["arm_safe"] = arm_safe
         # (1/2) 와 같은 이유의 기록. ⑥ 은 씬 이동이라 자세 전환이 _elev_scene(5) **안에**
         # 붙어 있어 여기서 게이트를 걸면 정상 여정을 막는다 — 재서 남기기만 한다.
         _ok2, _why2 = _elev_arm_stowed()
