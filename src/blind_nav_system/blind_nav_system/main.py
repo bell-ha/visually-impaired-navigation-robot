@@ -587,21 +587,29 @@ def _cmdvel_callback(msg):
 def _query_lc(client):
     """lifecycle_manager의 is_active를 논블로킹으로 질의. spin_until_future_complete
     금지(공유 스핀 스레드 데드락) — add_done_callback + Event만 사용."""
+    # 🔴 `why` 는 **기계가 읽는 사유**다. detail 은 사람이 읽는 문구라 손대기 쉬운데,
+    #   거기에 문자열 비교를 걸면 문구를 다듬는 순간 판정이 조용히 죽는다.
+    #   특히 "서비스 자체가 없다(no_service)"와 "있는데 안 답한다(no_reply)"는
+    #   같은 status(unknown)로 뭉뚱그려지지만 **뜻이 전혀 다르다** — 앞은 프로세스
+    #   부재(재기동 신호)고 뒤는 과부하다(이 로봇은 nav+엘베 동시에 상습적으로 느려진다).
     if client is None or not client.service_is_ready():
-        return {"status": "unknown", "detail": "기동중"}   # 서비스 자체 없음 = 부팅 정상창
+        return {"status": "unknown", "detail": "기동중",
+                "why": "no_service"}   # 서비스 자체 없음 = 부팅 정상창 / 프로세스 부재
     fut = client.call_async(Trigger.Request())
     ev = threading.Event()
     fut.add_done_callback(lambda f: ev.set())   # 콜백 본문은 set()만 — 로깅·락·HTTP 금지(공유 스핀 스레드)
     if not ev.wait(timeout=0.5):
         client.remove_pending_request(fut)      # 필수 — 안 하면 pending 요청이 무한 누적
-        return {"status": "unknown", "detail": "응답없음(매니저 멈춤 의심)"}
+        return {"status": "unknown", "detail": "응답없음(매니저 멈춤 의심)",
+                "why": "no_reply"}
     try:
         res = fut.result()
     except Exception:
-        return {"status": "unknown", "detail": "응답오류"}
+        return {"status": "unknown", "detail": "응답오류", "why": "error"}
     if res is not None and res.success:
-        return {"status": "ok", "detail": "활성"}   # "정상"은 아님 — is_active는 내부 멈춤을 못 잡음
-    return {"status": "bad", "detail": "비활성"}
+        # "정상"은 아님 — is_active는 내부 멈춤을 못 잡음
+        return {"status": "ok", "detail": "활성", "why": "active"}
+    return {"status": "bad", "detail": "비활성", "why": "inactive"}
 
 def _diag_fresh() -> bool:
     """HB 캐시(_diag_st)가 방금 잰 값인지. HB가 멈췄거나 그래프 질의가 계속
@@ -699,30 +707,55 @@ def _obs_brief(obs) -> str:
 #     것보다 압도적으로 싸다. 안전한 쪽으로 틀린다.
 _LOC_RESTART_STREAK = 3      # 연속 비정상 폴링 횟수(×3초). 이 이상 뒤 ok 복귀 = 재기동
 _loc_down_streak = 0
+# 🔴 끊긴 동안 **확실히 서비스 불가**였던 순간을 봤는가.
+#   이게 없으면 "죽었다 살아났다"와 "바빠서 0.5초 안에 못 답했다"가 구별되지 않는다.
+#   후자는 이 로봇의 상습 상태다 — nav + 엘베앱 + OCR 이 겹치면 최악 지연이 2배가 되고
+#   `_query_lc` 의 응답 대기는 0.5초뿐이다. 그걸 재기동으로 오인하면 **여정 도중에**
+#   층 확정이 풀려 엘베 단계가 거부된다(지도는 멀쩡한데도).
+#   무엇을 '확실히'로 셀지:
+#     no_service — 서비스가 안 보인다. 느린 것으로 설명되지 않는다(프로세스 부재).
+#     inactive   — 매니저가 **답을 하면서** 비활성이라고 말했다. 느림이 아니라 상태다.
+#                  노드가 내려갔다 올라오면 map_server 가 런치 파라미터로 다시 읽힐 수 있다.
+#   제외: no_reply·error — 과부하·일시 장애로 설명된다. 이걸 넣으면 (b)의 의미가 사라진다.
+_LOC_HARD_DOWN = ("no_service", "inactive")
+_loc_saw_hard_down = False
 
 
-def _floor_confirm_on_loc_cycle(loc_status: str) -> bool:
+def _floor_confirm_on_loc_cycle(loc: dict) -> bool:
     """폴러가 매 사이클 부른다. 층 확정을 풀었으면 True.
 
-    상태 전이만 본다 — 지금 ok 인지가 아니라 **직전에 얼마나 끊겼었는지**가 근거다.
+    상태 전이만 본다 — 지금 ok 인지가 아니라 **직전에 어떻게 끊겼었는지**가 근거다.
+    해제 조건은 두 개를 **모두** 요구한다:
+      ① 연속 _LOC_RESTART_STREAK 회 이상 비정상이었다  (짧은 히컵 배제)
+      ② 그 동안 **확실히 서비스 불가**였던 적이 있다   (과부하 지연 배제, _LOC_HARD_DOWN)
     """
-    global _loc_down_streak, _floor_confirmed
-    if loc_status != "ok":
+    global _loc_down_streak, _loc_saw_hard_down, _floor_confirmed
+    if loc.get("status") != "ok":
         _loc_down_streak += 1
+        if loc.get("why") in _LOC_HARD_DOWN:
+            _loc_saw_hard_down = True
         return False
     streak, _loc_down_streak = _loc_down_streak, 0
+    saw_hard, _loc_saw_hard_down = _loc_saw_hard_down, False
     if streak < _LOC_RESTART_STREAK:
+        return False
+    if not saw_hard:
+        # 끊긴 내내 "있는데 안 답함"이었다 = 과부하다. 지도는 그대로이므로 확정을 둔다.
+        # 로그는 남긴다 — 나중에 "왜 안 풀렸나"와 "왜 풀렸나"를 둘 다 설명할 수 있어야 한다.
+        _log("MAP", f"측위 응답이 {streak * 3}초 느렸다 복구됐다(서비스는 계속 보이고 "
+                    f"활성이었다) — 과부하로 보고 {_current_floor}층 확정을 유지한다")
         return False
     if not _floor_confirmed:
         # 이미 미확정 — 부팅 직후가 늘 이 경우다(런치가 뜨는 동안 계속 비정상이었다).
         # 조용히 지난다. 여기서 로그를 남기면 매 부팅마다 가짜 사고로 보인다.
         return False
     _floor_confirmed = False
-    _log("MAP", f"🚨 측위 스택이 {streak * 3}초 끊겼다 재기동됐다 — 지도가 런치 기본으로 "
-                f"돌아갔을 수 있어 {_current_floor}층 확정을 푼다. "
-                "대시보드에서 현재 층을 다시 고르세요")
+    _log("MAP", f"🚨 측위 스택이 {streak * 3}초 끊겼다 복구됐다(그 동안 서비스 부재 "
+                f"또는 비활성이었다) — 지도가 런치 기본으로 돌아갔을 수 있어 "
+                f"{_current_floor}층 확정을 푼다. 대시보드에서 현재 층을 다시 고르세요")
     _jr("gate", "floor_confirm_revoked", recorded=_current_floor, loaded=None,
-        loaded_why=f"측위 스택 재기동(연속 {streak}회 비정상 뒤 복귀)", why="loc_restart")
+        loaded_why=f"측위 스택 재기동(연속 {streak}회 비정상 + 확실한 서비스 불가 관측)",
+        why="loc_restart")
     try:
         _elev_post("/floor", {"floor": _current_floor, "confirmed": False}, timeout=2)
     except Exception:
@@ -746,7 +779,7 @@ def _readiness_poll_loop():
                            else f"측위 {loc['detail']} / 주행 {nav['detail']}")}
             # 🔴 측위 스택이 죽었다 살아났으면 층 확정을 푼다(위 함수 주석에 근거).
             #   worst 가 아니라 loc 를 넘긴다 — 플래너 재시작은 지도를 바꾸지 않는다.
-            _floor_confirm_on_loc_cycle(loc["status"])
+            _floor_confirm_on_loc_cycle(loc)
 
             try:
                 import requests   # 로컬 import — urllib과 달리 프록시 우회(proxies=)가 명시적
