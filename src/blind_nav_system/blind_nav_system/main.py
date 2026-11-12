@@ -675,6 +675,61 @@ def _obs_brief(obs) -> str:
     return " · ".join(bad) if bad else "관측 정상"
 
 
+# ── 측위 스택 재기동 → 층 확정 해제 ────────────────────────────────────────────
+# 🔴 2026-11-12 — `_floor_confirmed` 가 거짓으로 살아남는 구멍을 닫는다.
+#   사고 경로(실측 재현): 런치만 재시작하면 map_server 가 런치 기본 지도로 돌아가는데
+#   대시보드는 살아 있어서 옛 층 확정을 그대로 들고 있다. 그 상태에서 목적층을 고르면
+#   `up = int(dest) > int(_current_floor)` 가 **엉뚱한 기준층**으로 계산돼 ▲▼ 를 거꾸로
+#   누른다(지도는 5층인데 3층 확정 → 4층 요청 → 4>3 로 ▲, 실제로는 5→4 니까 ▼가 맞다).
+#   `_floor_confirm_revalidate` 는 이걸 못 잡는다 — load_map 이 yaml_filename 을 갱신하지
+#   않아서 _map_loaded_floor() 가 '모름(None)'을 돌려주고, 모를 때는 풀지 않는 설계다.
+#
+#   왜 이 신호인가: `/map` 발행자 GID 로 재기동을 잡으려다 **실패했다**(같은 날). GID 는
+#   맞는 신호인데 오래 산 참가자에서 토픽 디스커버리가 죽은 발행자를 계속 돌려줬다
+#   — 이 로봇의 상습 고장인 유령 참가자다. 반면 **서비스는 멀쩡했다**(재기동된
+#   map_server 에 load_map 이 111ms 로 성공). 그래서 이미 서비스로 도는 준비상태
+#   폴러를 쓴다. 새 인프라 0, 디스커버리 묵음과 무관.
+#
+#   설계 근거:
+#   · `loc`(lifecycle_manager_localization = map_server+amcl)만 본다. `nav`(플래너)가
+#     재시작해도 지도는 안 바뀌므로 그쪽까지 보면 오탐만 늘어난다.
+#   · 연속 _LOC_RESTART_STREAK 회를 요구한다. 폴링이 3초이고 `_query_lc` 의 응답 대기는
+#     0.5초라, 한 번짜리 히컵은 1회로 끝난다. 런치 재기동은 10~30초라 확실히 넘는다.
+#   · 오탐의 대가는 "층 버튼을 한 번 더 누른다"다 — 거짓확정으로 반대 버튼을 누르는
+#     것보다 압도적으로 싸다. 안전한 쪽으로 틀린다.
+_LOC_RESTART_STREAK = 3      # 연속 비정상 폴링 횟수(×3초). 이 이상 뒤 ok 복귀 = 재기동
+_loc_down_streak = 0
+
+
+def _floor_confirm_on_loc_cycle(loc_status: str) -> bool:
+    """폴러가 매 사이클 부른다. 층 확정을 풀었으면 True.
+
+    상태 전이만 본다 — 지금 ok 인지가 아니라 **직전에 얼마나 끊겼었는지**가 근거다.
+    """
+    global _loc_down_streak, _floor_confirmed
+    if loc_status != "ok":
+        _loc_down_streak += 1
+        return False
+    streak, _loc_down_streak = _loc_down_streak, 0
+    if streak < _LOC_RESTART_STREAK:
+        return False
+    if not _floor_confirmed:
+        # 이미 미확정 — 부팅 직후가 늘 이 경우다(런치가 뜨는 동안 계속 비정상이었다).
+        # 조용히 지난다. 여기서 로그를 남기면 매 부팅마다 가짜 사고로 보인다.
+        return False
+    _floor_confirmed = False
+    _log("MAP", f"🚨 측위 스택이 {streak * 3}초 끊겼다 재기동됐다 — 지도가 런치 기본으로 "
+                f"돌아갔을 수 있어 {_current_floor}층 확정을 푼다. "
+                "대시보드에서 현재 층을 다시 고르세요")
+    _jr("gate", "floor_confirm_revoked", recorded=_current_floor, loaded=None,
+        loaded_why=f"측위 스택 재기동(연속 {streak}회 비정상 뒤 복귀)", why="loc_restart")
+    try:
+        _elev_post("/floor", {"floor": _current_floor, "confirmed": False}, timeout=2)
+    except Exception:
+        pass
+    return True
+
+
 def _readiness_poll_loop():
     global _elev_started_mono, _elev_no_ocr
     order = {"bad": 0, "unknown": 1, "ok": 2}
@@ -689,6 +744,9 @@ def _readiness_poll_loop():
                 "status": worst["status"],
                 "detail": (f"측위·주행 {loc['detail']}" if loc["detail"] == nav["detail"]
                            else f"측위 {loc['detail']} / 주행 {nav['detail']}")}
+            # 🔴 측위 스택이 죽었다 살아났으면 층 확정을 푼다(위 함수 주석에 근거).
+            #   worst 가 아니라 loc 를 넘긴다 — 플래너 재시작은 지도를 바꾸지 않는다.
+            _floor_confirm_on_loc_cycle(loc["status"])
 
             try:
                 import requests   # 로컬 import — urllib과 달리 프록시 우회(proxies=)가 명시적
