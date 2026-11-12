@@ -3902,7 +3902,9 @@ class ElevatorTracker(Node):
 
     def _clearance(self, direction: float, half_ang: float = GUARD_HALF_ANG):
         """이동 방향(+1 전진 / -1 후진) ±half_ang 섹터의 최소 장애물 거리(m).
-        로봇 자기 몸(SELF_HIT_MIN 미만)은 무시. 스캔 없으면 None.
+        로봇 자기 몸(SELF_HIT_MIN 미만)은 무시. **모르면 None** — 스캔이 없을 때와
+        섹터의 유효 레이가 하나도 없을 때(전부 자기몸/무효) 둘 다다. 호출처는 전부
+        `None → 이동 거부` 다(4028·4039·5018·5054).
         기본 ±30°는 이동 가드용. 문 열림 감지는 ±10°로 좁혀 호출할 것 —
         30°는 0.95m에서 좌우 55cm씩 퍼져 문 옆 벽을 계속 잡는다."""
         s = self._scan
@@ -3919,7 +3921,15 @@ class ElevatorTracker(Node):
         diff = np.abs((base_ang - target + np.pi) % (2 * np.pi) - np.pi)
         sector = diff < half_ang
         m = sector & np.isfinite(r) & (r > SELF_HIT_MIN)
-        val = float(r[m].min()) if m.any() else 99.0
+        # 🔴 2026-11-12 — 유효 레이가 0개일 때 99.0(=3m 이상 뚫림)을 돌려주던 것을
+        #   None(=모름)으로 바꿨다. **방향이 거꾸로였다**: m 이 비었다는 건 "그 방향
+        #   전부가 25cm 안에 있다"는 뜻이고, 그건 가장 위험한 판독인데 모든 가드를
+        #   통과시켰다(99.0 > 어떤 임계보다 큼). 사람 옆에서 움직이는 로봇이라
+        #   모를 때의 기본값이 '전진'이면 안 된다.
+        #   위험 0으로 바꿀 수 있던 근거: 로그 전수 6,750개 집계창에서 99.0 반환이
+        #   **0회**였고(None 은 24개 창에서 1~4회), None 가드는 네 호출처에 이미
+        #   다 있었다. 작동 중인 경로를 건드린 게 아니라 안 터진 지뢰를 뽑은 것이다.
+        val = float(r[m].min()) if m.any() else None
         # 계측은 판정 뒤에, 그리고 판정에 절대 영향을 주지 않는다 — 여기서 예외가
         # 나도 반환값은 위에서 이미 정해졌고 아래 try가 삼킨다.
         try:
@@ -3980,14 +3990,20 @@ class ElevatorTracker(Node):
             w = self._scan_win = {"t0": time.monotonic(), "b": {}}
         b = w["b"].setdefault(key, {"n": 0, "noscan": 0, "total": 0, "finite": 0,
                                     "valid": 0, "inf": 0, "nan": 0, "zero": 0,
-                                    "below_self": 0, "r99": 0, "rnone": 0})
+                                    "below_self": 0, "r99": 0, "rnone": 0,
+                                    "rself": 0})
         b["n"] += 1
         for k in ("noscan", "total", "finite", "valid", "inf", "nan", "zero", "below_self"):
             b[k] += st[k]
         if st["ret"] is None:
             b["rnone"] += 1
+            # 🔴 None 이 두 가지 뜻을 갖게 됐으니(위 _clearance 주석) 로그에서 갈라 센다.
+            #   스캔 자체가 없는 것(라이다 끊김)과 섹터가 전부 자기몸인 것(로봇이 뭔가에
+            #   바짝 붙음)은 **대처가 완전히 다르다**. 한 칸에 섞으면 다음 진단이 추측이 된다.
+            if not st["noscan"]:
+                b["rself"] += 1
         elif st["ret"] >= 99.0:
-            b["r99"] += 1
+            b["r99"] += 1      # 더 이상 나오지 않아야 한다 — 나오면 누가 되돌린 것이다
         now = time.monotonic()
         if now - w["t0"] >= SCAN_LOG_PERIOD:
             # 새 창으로 먼저 교체하고, 순회는 스냅샷(list)으로 한다. 교체만으로는
@@ -3997,7 +4013,8 @@ class ElevatorTracker(Node):
             self._scan_win = {"t0": now, "b": {}}
             for k, v in list(w["b"].items()):
                 d = v["n"] - v["noscan"]      # 무스캔은 평균의 분모에서 뺀다
-                tail = (f" — 반환 99.0 {v['r99']}회 / None {v['rnone']}회")
+                tail = (f" — 반환 99.0 {v['r99']}회 / None {v['rnone']}회"
+                        f"(그중 섹터전부자기몸 {v['rself']}회)")
                 if d <= 0:
                     self._dlog(f"[SCAN] {k} {v['n']}회 — 전부 무스캔(스캔 없음)" + tail)
                     continue
@@ -4026,6 +4043,16 @@ class ElevatorTracker(Node):
             c = self._clearance(direction)
             # 이동량 비례 가드: 이동 후에도 CLEAR_MARGIN 이격이 남으면 허용
             if c is None or c < abs(move_m) + CLEAR_MARGIN:
+                # 🔴 2026-11-12 — 종전에는 **말 없이** False 만 돌려줬다. 호출처 둘 중
+                #   7388 은 보고하지만 7245 는 반환값을 버려서, 거부가 아무 흔적도 남기지
+                #   않고 시퀀스가 '이동했다'는 듯이 이어졌다(뿌리 A·B). 제어 흐름은
+                #   건드리지 않고 **거부 사실만 보이게** 한다 — 로그와 UI 에 남으면
+                #   다음 실패를 로그로 설명할 수 있다.
+                self._set_align_note(
+                    f"{'전방' if direction > 0 else '후방'} 여유 "
+                    f"{'확인 불가' if c is None else f'{c:.2f}m'} — "
+                    f"이동 {abs(move_m)*100:.1f}cm 거부 "
+                    f"(필요 {(abs(move_m)+CLEAR_MARGIN)*100:.0f}cm)")
                 return False
         # 오도메트리 피드백: 실제 이동 거리를 재면서 목표 도달 시 정지
         # (시간 제어는 정지마찰 때문에 5mm 명령→2mm 실주행 같은 언더슈트 발생 — 실측)
@@ -5016,7 +5043,12 @@ class ElevatorTracker(Node):
             if not guard_off:
                 clear = self._clearance(direction)
                 if clear is None:
-                    self._set_align_note("라이다 미수신 — 이동 불가"); return
+                    # 문구에 두 경우를 같이 적는다 — None 은 "스캔 없음"과 "섹터의
+                    # 유효 레이 0개(전부 자기몸/무효)" 둘 다다(_clearance 주석).
+                    # 전자만 적으면 후자일 때 운영자가 라이다를 엉뚱하게 의심한다.
+                    self._set_align_note(
+                        "이동 방향 여유를 확인할 수 없음 "
+                        "(라이다 미수신 또는 섹터 전부 근접) — 이동 불가"); return
                 # 이동량 비례 가드: 이동 후에도 CLEAR_MARGIN 이격이 남으면 허용
                 if clear < abs(move_m) + CLEAR_MARGIN:
                     self._set_align_note(
