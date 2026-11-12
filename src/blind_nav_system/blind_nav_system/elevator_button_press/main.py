@@ -7492,8 +7492,35 @@ class ElevatorTracker(Node):
                 return
 
             # D. 누르기: (남은 거리 - 손끝 스탠드오프) + 버튼 스트로크
-            push = max(ARM_EXT_MIN, min(ARM_EXT_MAX,
-                       near_ext + (d2 - FINGER_STANDOFF) + PRESS_DEPTH))
+            need = near_ext + (d2 - FINGER_STANDOFF) + PRESS_DEPTH
+            push = max(ARM_EXT_MIN, min(ARM_EXT_MAX, need))
+            # 🔴 2026-11-12 — 상한에 깎였으면 **누르지 않는다.**
+            #   종전에는 min(ARM_EXT_MAX, ...) 이 부족분을 조용히 삼켰다. 팔이 물리적으로
+            #   버튼에 닿을 수 없는 상태인데 누르기를 그대로 진행하고, 뒤의 측정은
+            #   "명령 vs 실제 차이 0" 으로 나와 **일반 허공과 구별되지 않았다** — 로그만
+            #   보면 조준 문제로 보인다. 실제 원인은 "로봇이 너무 멀다"다.
+            #   로그 전수 29건 중 2건이 이것이었다(둘 다 100% 실패가 보장된 상태였다):
+            #     09/04  near 0.480 + 0.072 = 0.552 → 0.500 으로 깎임 (부족 52mm)
+            #     10/07  near 0.455 + 0.071 = 0.526 → 0.500 으로 깎임 (부족 26mm)
+            #   문턱은 발명하지 않고 상수에서 끌어낸다: 부족분이 PRESS_DEPTH 이하면
+            #   손끝이 버튼 표면에는 닿는다(스트로크만 줄어든다). 그걸 넘으면 표면에도
+            #   못 닿는다 = 확실한 허공이다. 관측된 두 건은 26·52mm 로 둘 다 넘는다.
+            if need - push > PRESS_DEPTH:
+                _short_mm = (need - push) * 1000
+                st(f"❌ 팔 상한 초과 — 베이스를 버튼에 더 붙여야 합니다 "
+                   f"(필요 {need:.3f}m, 상한 {ARM_EXT_MAX:.2f}m, {_short_mm:.0f}mm 부족) "
+                   "— 복귀")
+                self._dlog(f"[PRESS] ⛔ 팔 상한 초과 — 누르지 않는다. 필요 {need:.3f}m "
+                           f"= 현재뻗음 {near_ext:.3f} + (거리 {d2:.3f} - 손끝 "
+                           f"{FINGER_STANDOFF:.3f}) + 스트로크 {PRESS_DEPTH:.3f} · "
+                           f"상한 {ARM_EXT_MAX:.2f}m · 부족 {_short_mm:.0f}mm "
+                           f"(> 스트로크 {PRESS_DEPTH*1000:.0f}mm 라 버튼 표면에도 못 닿는다)")
+                # 대시보드(scene_press_failed)가 먹는 신호 — 다른 누르기 실패 출구와 같게
+                # 찍는다. 안 찍으면 여정이 이 실패를 못 보고 조용히 넘어간다.
+                with state_lock:
+                    state["press_fail_ts"] = time.time()
+                self._move_joint_wait(ARM_JOINT, start_ext, 4, 12.0)
+                return
             st(f"4/6 누르는 중… →{push:.3f}m")
             if not self._move_joint_wait(ARM_JOINT, push, 2, 8.0):
                 # return이 없으면 아래 접촉감지로 그대로 진입 — 팔이 안 움직였으니
