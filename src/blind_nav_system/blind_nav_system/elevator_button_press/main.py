@@ -6907,14 +6907,28 @@ class ElevatorTracker(Node):
         # 오차가 허용 밖에 오래 머무는데 줄일 수단이 막혀 있으면 그 사실을 말한다.
         # 2026-09-10 에 두 번 겪었다 — 클램프가 서보를 자른 건(15:29)과 모양 추론이라
         # 높이 보정이 꺼진 건(14:54). 둘 다 **사용자가 눈으로 먼저 봤다.**
-        if abs(ex) > dz or abs(ey) > dz:
+        # 🔴 2026-11-12 — 고정 모드(표가 높이를 정함)에서는 **세로를 이 경보에서 뺀다.**
+        #   왜: 고정 모드면 ey 로 높이를 고치지 않고(_lift_pin_skip: "높이는 표가 정한다"),
+        #   누르기 판정에서도 세로가 빠진다(start_press 쪽 주석). 즉 ey 가 허용 밖인 것은
+        #   고장이 아니라 **설계**다. 그런데 이 경보는 그걸 "ey: 모양 추론 … 글자가 읽혀야
+        #   재개" 로 보고했고, 그 문구가 state["align_block"] 을 타고 대시보드의 사람 지시
+        #   (_press_block_help)까지 올라갔다 — **틀린 원인을 지목하는 지시**다.
+        #   실측도 같은 방향이다: 차내 표본에서 ey>28mm 3건 중 2건이 **성공**했고
+        #   ey≤28mm 6건 중 5건이 실패했다. 큰 ey 는 고장 신호가 아니다.
+        #   그리고 로그 집계가 오해를 키웠다 — "모양 추론" 경보 84건의 43%가 표 도입 전
+        #   한 세션(09/23, 고정모드 0건)이었다. 버전이 섞인 집계였다.
+        #   고정 모드의 큰 세로 차이에는 이미 **전용 진단**이 따로 있다: 위
+        #   `[READY] 표와 세로가 Nmm 다르다 … 층을 잘못 알았거나 라벨이 옆 행이다`.
+        #   그쪽이 사유를 정확히 말하므로 여기서 중복으로, 그것도 틀리게 말하지 않는다.
+        _ey_blocks = abs(ey) > dz and _pin_h is None
+        if abs(ex) > dz or _ey_blocks:
             if getattr(self, "_offdz_since", None) is None:
                 self._offdz_since = time.time()
             _held = time.time() - self._offdz_since
             if _held > 8.0 and time.time() - getattr(self, "_offdz_log_ts", 0) > 8.0:
                 self._offdz_log_ts = time.time()
                 _blk = []
-                if abs(ey) > dz and det.get("shape"):
+                if _ey_blocks and det.get("shape"):
                     _blk.append("ey: 모양 추론(앵커 0)이라 높이 보정 생략 — 글자가 읽혀야 재개")
                 if abs(ex) > dz:
                     with state_lock:
