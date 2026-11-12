@@ -1139,9 +1139,23 @@ BASE_TRAVEL_MAX  = 0.15   # m — 누적 이동 상한 (넘으면 정지, 주차
 #       수렴하고 있었다(허용 ±8px). **10px 모자라서** 실패했다.
 #   마지막 ROTATE(-4.4°) 에서 리셋했다면 누적은 7.4cm 였고 예산이 절반 남았다.
 # ⚠ 리셋만 두면 "회전 → 리셋 → 15cm → 회전 → 리셋 → 15cm" 로 무한히 흐를 수 있다.
-#   그래서 **리셋되지 않는 절대 상한**을 따로 둔다. 회전은 _rot_count<4 라 리셋만
+#   그래서 **리셋되지 않는 절대 상한**을 따로 둔다. 회전은 ROT_TRY_MAX(4)회라 리셋만
 #   있으면 최대 4×15=60cm 까지 흐르는데 캐빈 폭이 152cm 다. 30cm 로 묶는다.
 BASE_TRAVEL_HARD_MAX = 0.30   # m — 회전 리셋을 포함한 **절대** 누적 상한
+# 🔴 2026-11-12 — **수렴 중이면 기본 예산을 조금 더 준다** (사용자 지시: "끊긴 정렬이
+#   실패가 아니면 조금 더 수렴하게 하면 되는 거잖아").
+#   근거는 바로 위 325호 실측이다 — ex 가 -120 → +79 → -46 → **-18px** 로 줄고 있었고
+#   허용은 ±8px 였다. 1틱 이동량은 ex 18px·d 0.30m 에서 ~9mm 이므로 **2~4cm** 만 더
+#   있으면 닿았다. 그런데 거리 예산은 "오차가 줄고 있는지"를 모른다 — 그래서 끊겼다.
+#   ⚠ 두 가지를 깨지 않는다:
+#     ① 연장 상한 < 절대 상한(30cm). 캐빈 폭 152cm 에서 밖으로 밀려나지 않는 보장이
+#        이 부등식 하나에서 나온다. 절대 상한 검사가 **먼저** 돈다(_maybe_base_nudge).
+#     ② 연장분도 base_travel_total 을 그대로 먹는다 — 총 이동량은 안 늘고, 시도2 의
+#        몫에서 빌려 쓰는 것이다. 수렴 중이던 시도1 을 살리는 쪽이 이득이라는 판단.
+#   "수렴 중"의 정의는 아래 _maybe_base_nudge 의 _conv 식에 있다 (최초 대비 절반 이하
+#   + 지금도 최소치 근처). 처음부터 오차가 작았는데 15cm 를 썼다면 연장 안 한다 —
+#   그건 수렴이 아니라 다른 고장이다.
+BASE_TRAVEL_CONV_MAX = 0.22   # m — 수렴 중일 때만 허용하는 연장 예산
 # ── 평행이 먼저다 ────────────────────────────────────────────────────────────
 # 🔴 2026-11-05 사용자 관찰: "각도가 너무 틀어지면 왔다갔다 했다 — 평행하지 못해서
 #   그런 것 같다." 그날 ⑤ 층선택 로그가 그대로 뒷받침한다:
@@ -1161,6 +1175,18 @@ ALIGN_TILT_FIRST_DEG     = 4.0    # ° — 이보다 기울면 수직 정렬을 
 ALIGN_TILT_DEFER_MAX_SEC = 12.0   # s — 그 보류의 상한. 넘으면 기울어진 채로라도 진행
 #   (상한이 필요한 이유: 회전이 다른 조건으로 막힐 수 있다. 상한이 없으면 회전도 못 하고
 #    횡정렬도 안 하는 교착이 되고, 증상은 "로봇이 캐빈 안에서 15분 서 있는다" 다.)
+# 🔴 2026-11-12 — 회전 예산 둘. 운용과 근거는 `_rot_budget_ok` 독스트링에 적었다.
+#   ROT_PROGRESS_RATIO 0.85 를 고른 이유 — 2026-10-12 실측 시퀀스를 그대로 재생해서
+#   골랐다(elevator_20261012_125225_pid95205.log, 12:56:07~12:57:26):
+#       +12.0 → +6.8 → +6.7 → +4.1 → +4.4 → +3.6
+#     0.80 이면 마지막 3.6 이 4.4×0.80=3.52 를 못 넘어 "정체"로 세어 4/4 소진.
+#     0.85 면 3.6 < 4.4×0.85=3.74 → 수렴으로 보고 예산을 남긴다(실제 3/4 소비).
+#     그러면서도 6.8→6.7(0.99배)·4.1→4.4(악화)는 **정체로 제대로 센다.**
+#   즉 "거의 그대로"와 "줄었다"를 가르는 자리다. 더 높이면(0.95) 정체를 수렴으로
+#   오인해 ROT_ABS_MAX 까지 흐르고, 더 낮추면 실제 수렴을 끊는다.
+ROT_TRY_MAX        = 4     # 회 — "줄지 않은" 회전만 세는 예산 (/select 로 리셋)
+ROT_ABS_MAX        = 8     # 회 — 씬 전환까지의 **절대** 회전 횟수 (/select 로 안 리셋)
+ROT_PROGRESS_RATIO = 0.85  # 직전 기울기의 이 배수 미만이면 "줄었다" → 예산 보존
 # 🔴 2026-10-06 — 옛 주석("0.02는 정지 마찰을 못 이겨 바퀴가 헛돈다")은 **n=31 실측에서
 # 재현되지 않았다.** 세 세션 독립분석(로그 전수) 결과:
 #   🔴 **2026-10-12 갱신 — 아래 0.83/0.52 는 폐기한다. 그리고 그 줄의 "odom" 은 오기였다.**
@@ -2488,7 +2514,8 @@ def select():
         node._roi_miss  = 0   # 새 타겟 → ROI 집중 추적 즉시 재개 가능
         node._croi_miss = 0   # 군집 추적도 리셋
         node._target_lock = None   # 위치 잠금도 새로 시작
-        node._rot_count   = 0      # 수직 정렬 시도 횟수 리셋
+        node._rot_count   = 0      # 수직 정렬 시도 횟수 리셋 (절대 상한 _rot_total 은 유지)
+        node._rot_tilt_prev = None # 비교 기준도 버린다 — 새 타겟의 첫 회전은 '정체'로
         node._dlog(f"[TARGET] '{text}' 선택 — 탐색·정렬·접근 시작")
         # 인터락: 팔 고정(armleft)과의 트래젝토리 goal 선점 전쟁 방지 —
         # 타겟 작업 시작 시 대시보드에 자동 해제 요청 (꺼져 있으면 조용히 무시)
@@ -3072,6 +3099,12 @@ def scene_set():
             #   자리이므로 누적을 유지한다 — scene_acc 와 같은 규칙이다.
             state["base_travel_total"] = 0.0
             state["base_travel"]       = 0.0
+            if node is not None:
+                # 절대 회전 상한(ROT_ABS_MAX)도 **여기서만** 리셋한다 — 위 블록과 같은
+                # 근거다. 씬 전환 = 로봇이 다른 자리로 옮겨간 순간 = 기울기 기준이 새로
+                # 서는 유일한 지점. /select(타겟 변경)는 같은 자리이므로 리셋 안 한다.
+                node._rot_total     = 0
+                node._rot_tilt_prev = None
             if n == 2:                   # ③ 문대기: 닫힌 문 기준선 새로 측정
                 state["door_base"]   = None
                 state["door_open"]   = False
@@ -4970,7 +5003,7 @@ class ElevatorTracker(Node):
             return
         # 🔴 평행 먼저 — 위 ALIGN_TILT_FIRST_DEG 주석이 근거다(2026-11-05 실측).
         #   교착 방지 세 겹. 하나라도 빼면 "아무것도 안 움직이는" 상태가 된다:
-        #     ① 회전 예산(_rot_count<4)이 남아 있을 때만 보류한다
+        #     ① 회전 예산(_rot_budget_ok)이 남아 있을 때만 보류한다
         #     ② 팔이 접혀 있을 때만 — 회전 게이트는 뻗은 팔로는 회전을 거부한다
         #        (회전이 팔을 접으므로 접근을 통째로 버리게 되기 때문)
         #     ③ 보류 자체에 시간 상한 — 넘으면 기울어진 채로라도 횡정렬을 진행한다
@@ -4980,7 +5013,7 @@ class ElevatorTracker(Node):
             _ext_n  = state["arm_ext"]
         if (_flat_n and _tilt_n is not None
                 and abs(_tilt_n) > ALIGN_TILT_FIRST_DEG
-                and getattr(self, "_rot_count", 0) < 4
+                and self._rot_budget_ok()
                 and (_ext_n is None or _ext_n < 0.05)):
             _t0 = getattr(self, "_align_defer_ts", 0.0) or time.time()
             self._align_defer_ts = _t0
@@ -4999,7 +5032,21 @@ class ElevatorTracker(Node):
             self._align_defer_ts = 0.0
             self._align_defer_logged = False
             self._align_defer_gaveup = False
+        # ── 수렴 추적 (2026-11-12) ──────────────────────────────────────────
+        # 아래 예산 게이트가 "줄고 있는 중인데 끊긴" 것인지 가리기 위한 재료.
+        # 예산 리셋(travel 이 줄어든 순간 = /select·토글·씬전환)을 새 시도의 시작으로
+        # 본다 — 리셋 지점이 네 군데라 거기마다 손대지 않고 여기서 감지한다. 그래야
+        # 리셋 경로가 하나 더 생겨도 이 추적이 조용히 틀리지 않는다.
+        _tv_prev = getattr(self, "_conv_tv_prev", None)
+        if _tv_prev is None or travel < _tv_prev - 1e-9:
+            self._conv_ex_first = abs(ex)
+            self._conv_ex_best  = abs(ex)
+            self._conv_logged   = False
+        self._conv_tv_prev = travel
+        self._conv_ex_best = min(getattr(self, "_conv_ex_best", abs(ex)), abs(ex))
         # 🔴 절대 상한을 먼저 본다 — 이쪽은 회전으로 리셋되지 않는다.
+        #   순서가 중요하다: 연장 예산(BASE_TRAVEL_CONV_MAX)이 이 검사를 넘어설 수
+        #   없다는 보장이 "먼저 본다" 에서 나온다.
         with state_lock:
             _tot = state.get("base_travel_total", 0.0)
         if _tot >= BASE_TRAVEL_HARD_MAX:
@@ -5011,15 +5058,36 @@ class ElevatorTracker(Node):
                 f"상한({BASE_TRAVEL_HARD_MAX*100:.0f}cm)이다. 주차 위치를 옮겨야 한다.")
             return
         if travel >= BASE_TRAVEL_MAX:
-            # 상한 도달 → X정렬 자동 OFF (메시지 반복 방지). 재활성화하면 누적 리셋됨.
-            with state_lock:
-                state["base_align"] = False
-                state["align_auto_off"] = True   # 예산 소진 OFF — 사용자 OFF와 구분,
-                                                 # 새 타겟 선택 시 자동 재활성 대상
-            self._set_align_note(
-                f"누적 이동 {travel*100:.0f}cm 초과 — X정렬 자동 OFF. "
-                "로봇 주차 위치를 옮긴 뒤 다시 켜세요. (새 타겟 선택 시 자동 복구)")
-            return
+            # 🔴 2026-11-12 — 수렴 중이면 BASE_TRAVEL_CONV_MAX 까지 연장한다.
+            #   근거·안전 부등식은 그 상수 주석에 있다. 조건 셋을 **모두** 만족해야 한다:
+            _first = getattr(self, "_conv_ex_first", 0.0)
+            _best  = getattr(self, "_conv_ex_best", 0.0)
+            _conv  = (travel < BASE_TRAVEL_CONV_MAX          # ① 연장 상한 안
+                      and _first >= 2.0 * max(_best, 1.0)    # ② 최초 대비 절반 이하로 줄었다
+                      and abs(ex) <= _best + 4.0)            # ③ 지금도 최소치 근처(발산 아님)
+            #   ②가 없으면 "처음부터 오차가 작았는데 15cm 를 쓴" 경우까지 연장된다 —
+            #     그건 수렴이 아니라 다른 고장(기울기·px환산·바퀴 미끄럼)이고 더 가면 악화다.
+            #   ③이 없으면 한 번 좋았다가 발산한 경우에 연장이 붙는다. 허용 ±8px 보다
+            #     살짝 넉넉한 4px 를 둔 것은 진동 1틱으로 연장이 끊기지 않게 하려는 것.
+            if _conv:
+                if not getattr(self, "_conv_logged", False):
+                    self._conv_logged = True   # 틱마다 찍지 않는다(_set_align_note 가 로그도 남긴다)
+                    self._set_align_note(
+                        f"누적 {travel*100:.0f}cm — 기본 예산 {BASE_TRAVEL_MAX*100:.0f}cm 를 "
+                        f"넘었지만 오차가 {_first:.0f}→{abs(ex):.0f}px (최소 {_best:.0f}px)로 "
+                        f"수렴 중 — {BASE_TRAVEL_CONV_MAX*100:.0f}cm 까지 연장한다")
+            else:
+                # 상한 도달 → X정렬 자동 OFF (메시지 반복 방지). 재활성화하면 누적 리셋됨.
+                with state_lock:
+                    state["base_align"] = False
+                    state["align_auto_off"] = True   # 예산 소진 OFF — 사용자 OFF와 구분,
+                                                     # 새 타겟 선택 시 자동 재활성 대상
+                # 숫자를 싣는다 — "왜 실패했나"가 예산 부족인지 발산인지 로그만으로 갈리게.
+                self._set_align_note(
+                    f"누적 이동 {travel*100:.0f}cm 초과 — X정렬 자동 OFF "
+                    f"(오차 {_first:.0f}→{abs(ex):.0f}px, 최소 {_best:.0f}px). "
+                    "로봇 주차 위치를 옮긴 뒤 다시 켜세요. (새 타겟 선택 시 자동 복구)")
+                return
         d = dist if (dist and 0.1 < dist < 1.0) else 0.30
         # 이득 0.7: 오차 전부가 아니라 70%만 이동 (과보정→반대편 튐→진동 방지)
         move_m = BASE_X_SIGN * ex * d / 420.0 * 0.7
@@ -6388,6 +6456,31 @@ class ElevatorTracker(Node):
                        + ") — 높이는 표가 정한다")
         return True
 
+    def _rot_budget_ok(self) -> bool:
+        """수직 정렬 회전 예산이 남았나 — 회전 게이트와 X정렬 보류가 **같이** 쓴다.
+
+        🔴 두 곳이 반드시 같은 술어여야 한다. 숫자가 벌어지면 "회전도 안 하고 횡정렬도
+        안 하는" 교착이 생긴다(ALIGN_TILT_FIRST_DEG 주석의 경고). 그래서 함수로 묶었다.
+
+        예산이 둘인 이유:
+          · `_rot_count < ROT_TRY_MAX` — **줄지 않은** 회전만 세는 쪽.
+            2026-10-12 실측(elevator_20261012_125225_pid95205.log):
+                12:56:07 +12.0° / 12:56:44 +6.8° / 12:56:50 +6.7°
+                12:57:00 +4.1°  / 12:57:06 +4.4° ← 4/4 소진, 임계는 4.0°
+            12° → 4° 로 **줄고 있었는데** 한 걸음 나빠진 것까지 예산으로 세서 끊겼고,
+            그 뒤 코드는 "기울어진 채로 X정렬 진행" 으로 넘어갔다. 끊긴 수렴은 실패가
+            아니다 — 줄어든 걸음은 예산에서 깎지 않는다.
+          · `_rot_total < ROT_ABS_MAX` — 그걸 악용 못 하게 하는 절대 상한.
+            기울기 측정 잡음으로 '줄었다'가 번갈아 뜨면 `_rot_count` 가 영원히 안 오를
+            수 있다. 그때 회전도 X정렬도 못 하는 교착을 끝내는 backstop 이 이쪽이다.
+            회전 1회는 팔 접기+회전+재측정으로 ~10초다 — 8회면 최악 ~80초, 2026-10-12
+            에 실제로 6회/79초를 쓴 적이 있으니 그 구간을 덮는 값이다.
+            `/select` 로는 리셋되지 않는다(BASE_TRAVEL_HARD_MAX 와 같은 규칙).
+            리셋 지점은 씬 전환 한 곳뿐이다 — 로봇이 다른 자리로 옮겨간 순간.
+        """
+        return (getattr(self, "_rot_count", 0) < ROT_TRY_MAX
+                and getattr(self, "_rot_total", 0) < ROT_ABS_MAX)
+
     def _servo_step(self, detections, lift):
         if not _authority_ok():
             return   # 제어권 없음 — 서보·스캔·자동접근 전부 침묵 (관찰만)
@@ -6409,7 +6502,7 @@ class ElevatorTracker(Node):
                 # 통째로 버리게 됨. READY 직후 CENTERED 한 프레임 깜빡임을 회전이
                 # 비집고 들어와 동결을 뚫던 실측 사례(10:26:45) 차단
                 and (_ext_rot is None or _ext_rot < 0.05)
-                and getattr(self, "_rot_count", 0) < 4
+                and self._rot_budget_ok()
                 and self._may_explore()
                 and time.time() - getattr(self, "_rot_ts", 0) > 3.0):
             # [진동 방지] 정지 상태에서 잰 기울기 2회가 부호 일치 + 3° 이내로 일관해야 회전
@@ -6431,15 +6524,38 @@ class ElevatorTracker(Node):
                                "몸체이동 OFF — 회전 생략 (켜면 자동 정렬)")
             else:
                 self._rot_ts = time.time()
-                self._rot_count = getattr(self, "_rot_count", 0) + 1
-                self._dlog(f"[ROTATE] 벽 수직 정렬 {self._rot_count}/4: "
-                           f"{_tilt:+.1f}° (팔 접고 회전 — 원자적 실행)")
+                self._rot_total = getattr(self, "_rot_total", 0) + 1
+                # 🔴 2026-11-12 — **줄어든 회전은 예산에서 깎지 않는다** (_rot_budget_ok 참고).
+                #   첫 회전은 비교 대상이 없으니(_prev None) 정체로 세어 1 을 소비한다 —
+                #   "한 번 돌려 봤는데 아무 변화가 없는" 경우를 놓치지 않기 위해서다.
+                _prev = getattr(self, "_rot_tilt_prev", None)
+                _progress = (_prev is not None
+                             and abs(_tilt) < abs(_prev) * ROT_PROGRESS_RATIO)
+                self._rot_tilt_prev = float(_tilt)
+                if _progress:
+                    # 줄고 있다 → X정렬 보류 시계(ALIGN_TILT_DEFER_MAX_SEC)도 되돌린다.
+                    #   그 12초는 "회전이 막혀 아무 일도 안 일어난다"를 끝내려고 둔 상한이다.
+                    #   회전이 실제로 기울기를 줄이고 있는 동안에는 그 전제가 거짓이고,
+                    #   거기서 X정렬을 시작하면 _last_motion_ts 가 밀려 기울기 재측정이
+                    #   늦어지고 `not self._nudging` 게이트가 다음 회전을 막는다 —
+                    #   2026-11-05 에 "순서가 거꾸로였다"고 적어 둔 그 경쟁 그대로다.
+                    self._align_defer_ts     = 0.0
+                    self._align_defer_logged = False
+                    self._align_defer_gaveup = False
+                else:
+                    self._rot_count = getattr(self, "_rot_count", 0) + 1
+                self._dlog(
+                    f"[ROTATE] 벽 수직 정렬 {self._rot_count}/{ROT_TRY_MAX}"
+                    f" (총 {self._rot_total}/{ROT_ABS_MAX}): {_tilt:+.1f}°"
+                    + (f" ↓수렴({_prev:+.1f}→{_tilt:+.1f}) — 예산 보존" if _progress else "")
+                    + " (팔 접고 회전 — 원자적 실행)")
                 threading.Thread(target=self._rotate_seq,
                                  args=(float(np.radians(_tilt)),),
                                  daemon=True).start()
                 return
         if _flat and _tilt is not None and abs(_tilt) <= 3.0:
             self._rot_count = 0   # 수직 유지 중이면 카운터 회복
+            self._rot_tilt_prev = None   # 다음 계열의 첫 회전은 다시 '정체'로 센다
         det = next((d for d in detections
                     if d["text"] == target and not d.get("suspect")), None)
         # ── [최소 박스 추적] 라벨이 이 프레임에 없을 때만, 잠금 위치에서 가장
