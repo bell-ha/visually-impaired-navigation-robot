@@ -1,0 +1,30 @@
+{
+ "tag": "A_before",
+ "ts": 1794544548.551056,
+ "time": "2026-11-13T13:35:48",
+ "scene": 4,
+ "target": "3",
+ "press_status": "✅ 누르기 완료",
+ "lift": 0.9906083082596332,
+ "arm_ext": 0.16862809635643108,
+ "frame_source": "raw_full(rotated)",
+ "rot_grip": 0,
+ "letterbox": {
+  "scale": 0.7547169811320755,
+  "off_x": 0,
+  "off_y": 59
+ },
+ "roi_ocr": null,
+ "jpeg_quality": 75,
+ "missing": [],
+ "roi_raw": null,
+ "target_dist_m": 0.254,
+ "start_ext": 0.16862809635643108,
+ "note": "누르기 직전 — 조준 끝, 팔 아직 안 나감",
+ "image": "A_before.jpg",
+ "frame_hw": [
+  480,
+  848
+ ],
+ "frame_mean": 119.342
+}
