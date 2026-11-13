@@ -4219,6 +4219,148 @@ def _exit_failed(reason: str, cur, res=None):
                          if reason != "noapp" else ""))
 
 
+# 🔴 2026-11-13 — **여정 시작부에 위치 검사가 한 줄도 없었다.**
+#   그래서 로봇이 캐빈 안인 채로 여정을 부르면 첫 동작이 `/goto`(Nav2)다:
+#     dest_floor ≠ 현재층 → `/goto 엘리베이터 탑승지점`  = 캐빈에서 복도로 몰고 나간다
+#     dest_floor = 현재층 → `/goto <호실>`              = 캐빈에서 호실로 몰고 나간다
+#   ④⑤⑥ 가 Nav2 를 쓰지 않는 이유가 정확히 그것이다 — footprint 뒤 0.9m 꼬리는
+#   footprint_clearing 으로 **동반자를 코스트맵에서 지우는** 장치라, 캐빈에서 Nav2 로
+#   나가면 로봇을 잡고 있는 시각장애인이 '없는 것'이 된다(location.yaml 문앞 주석).
+#   들어오는 입구는 사고가 아니라 **정상 절차**다: ④/⑤ 구조 모드의 해제 방법이
+#   "엘베앱을 끄면 해제됩니다" 라서, 운영자가 그렇게 풀면 로봇은 캐빈 안인데 여정은
+#   없는 상태가 된다. 그 다음 호출이 이 경로다.
+#
+# 반경 90cm 의 근거 — 캐빈 자리(scene_targets "3")에서 가장 가까운 **다른** 지점:
+#     ② 문앞 / ⑥ 하차목표  187.8cm   · 복도 탑승지점 209.6cm · 하차지점 216.5cm
+#   90cm 는 가장 가까운 187.8cm 의 절반(93.9cm)보다 작다. AMCL↔TF 실측 어긋남 최대
+#   193mm(scene_targets 헤더)를 빼도 168cm 가 남아 **문앞을 캐빈으로 오인할 수 없다.**
+#   반대 방향 한계도 적는다: 캐빈 폭이 152cm 라 안에서 목표에서 90cm 넘게 떨어져 설 수
+#   있고, 그러면 이 게이트가 **놓친다**. 놓치면 기존 동작(=오늘)으로 떨어진다 — 이
+#   게이트는 거부만 더하지 새 동작을 강요하지 않는다. 완화이지 보장이 아니다.
+_CABIN_START_RADIUS_M = 0.90
+
+
+def _cabin_target():
+    """scene_targets.yaml "3"(④ 캐빈 안 = 버튼 패널 앞)의 (x, y). 못 읽으면 None.
+
+    엘베앱이 소유한 파일을 **읽기만** 한다 — 목표가 옮겨지면 이 판정도 같이 옮겨져야
+    하므로 값을 복사해 두지 않는다(복사하면 조용히 갈라진다)."""
+    try:
+        # 🔴 `import yaml` 은 **함수 안**에서 한다 — 이 파일은 모듈 최상위에 yaml 도 math 도
+        #   import 하지 않는다(_loc·_load_exit_point 가 같은 모양). 2026-11-13 하네스가
+        #   `NameError: _yaml` 을 잡았고, except 가 그것을 삼켜 **게이트가 영구 '모름'**
+        #   이었다 — 죽은 가드는 없는 가드보다 나쁘다.
+        import yaml as _yaml
+        _t = (_yaml.safe_load(open(THIS_DIR / "elevator_button_press/scene_targets.yaml",
+                                   encoding="utf-8")) or {}).get("targets") or {}
+        _c = _t.get("3") or {}
+        return float(_c["x"]), float(_c["y"])
+    except Exception as e:
+        _log("AUTO", f"캐빈 좌표(scene_targets \"3\")를 읽지 못했다 — {type(e).__name__}: {e}")
+        return None
+
+
+def _in_cabin():
+    """측위가 캐빈 안을 가리키나. (판정, 사유) — 판정은 True / False / **None(모름)**.
+
+    🔴 None 은 "아니다"가 아니다. 호출부는 None 에서 **기존 동작**으로 간다.
+    ⚠ 자세 출처는 `/amcl_pose` 다(대시보드는 TF 를 안 본다). 그 값은 update_min_d/a
+      때문에 **정지 중에는 갱신되지 않는다** — 즉 낡은 값이다. 이 용도에서는 그게
+      오히려 맞다: 마지막으로 *움직여서 도착한* 자리가 캐빈이면 가만히 있는 지금도
+      캐빈이다. 다만 전원이 꺼졌다 켜졌거나 누가 로봇을 밀었으면 틀린다 — 그래서
+      이 판정만으로 움직이지 않는다(호출부가 사람 확인을 받는다)."""
+    tgt = _cabin_target()
+    if tgt is None:
+        return None, "캐빈 좌표를 읽을 수 없다"
+    x, y = _robot_pose.get("x"), _robot_pose.get("y")
+    if x is None or y is None:
+        return None, "측위 좌표가 아직 없다"
+    d = _math_auto.hypot(x - tgt[0], y - tgt[1])
+    age = time.monotonic() - (_ready.get("amcl") or 0)
+    return (d <= _CABIN_START_RADIUS_M,
+            f"캐빈 목표에서 {d*100:.0f}cm (기준 {_CABIN_START_RADIUS_M*100:.0f}cm · "
+            f"측위는 {age:.0f}초 전 값)")
+
+
+def _elev_app_up_and_lease(reason: str) -> bool:
+    """엘베앱 기동 + 제어권 리스 부여. 성공 True, 실패면 화면·음성을 남기고 False.
+
+    🔴 **두 곳이 같은 절차를 써야 한다**(여정 시작, 그리고 캐빈에서 시작한 하차).
+    종전에는 _auto_run 안에 인라인이었고, 캐빈 경로를 붙이면서 복사하면 둘이
+    조용히 갈라진다 — 특히 아래 `_nav_release_wheels` 게이트가 한쪽에서만 빠지면
+    2026-09-30(팔 뻗은 채 Nav2 주행)과 같은 모양이 된다. 그래서 함수로 묶었다."""
+    global _elev_started_mono
+    _auto_set("엘베시작", "엘리베이터 앱 시작 + 제어권 부여...", phase="app")
+    if not _elev_app_running():
+        proc = subprocess.Popen(
+            [sys.executable, "-u", str(THIS_DIR / "elevator_button_press/main.py")],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        _procs["elevator"] = proc
+        _elev_started_mono = time.monotonic()   # 고립 판정 유예 기준(=기동 시각)
+        _jr("proc", "elev", proc.pid, str(THIS_DIR / "elevator_button_press/main.py"))
+        threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
+    if not _wait_elev_app_up(20):
+        _auto_set("오류", "엘베앱 기동 실패")
+        return False
+    # 🔴 첫 제어권 부여도 같다 — 승차지점 '도착'은 xy 만 본 판정이라 Nav2 가 아직
+    #    제자리 회전 중일 수 있다(A2). 확인 못 하면 제어권을 주지 않는다.
+    if not _nav_release_wheels(True, reason):
+        _auto_notify("로봇이 멈췄는지 확인하지 못해 안내를 종료했습니다. 도움을 요청하세요")
+        _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 엘베앱 제어권 부여 거부")
+        return False
+    if not _grant_elev_lease(True, reason):
+        _auto_set("오류", "제어권 부여 실패 — 여정 중단")
+        return False
+    return True
+
+
+def _auto_cabin_start_exit(dest, dest_floor, why: str) -> None:
+    """여정 시작 시 로봇이 캐빈 안 — **Nav2 로 내보내지 않고** 먼저 하차한다.
+
+    🔴 움직이기 전에 **사람 확인을 두 번** 받는다(여기 1회 + 하차의 문열림 1회).
+       측위 하나로는 "엘리베이터 안"을 보장할 수 없고(위 _in_cabin 주석), 오판으로
+       하차를 돌리면 복도에서 **눈 없는 188cm 후진**이 된다. 로봇을 잡고 서 있는
+       사람은 자기가 엘리베이터 안인지 **안다** — 그 사람이 두 번째 증인이다.
+       그래서 문구가 "엘리베이터 안이 맞으면" 으로 조건부다.
+
+    🔴 **층 확정을 푼다.** 좌표가 다섯 층 공용이라(floors-share-one-map) 위치는
+       "어떤 캐빈 안"만 말하고 몇 층인지는 못 말한다. 게다가 엘베앱이 죽어 있던
+       사이에 **다른 사람이 엘리베이터를 탔을 수 있다** — `_auto_exit_cabin_unmoved`
+       가 기대는 "엘베가 안 움직였으니 탔던 층" 전제가 여기서는 성립하지 않는다.
+       그래서 하차 **전에** 미리 푼다: 하차가 중간에 실패해도 '모름'으로 남아야 한다.
+       푼 뒤에는 대시보드가 '층 ?' 로 보이고 다음 엘베 여정은 스스로 거부된다 —
+       사람이 층을 확정하면 복도에서 정상 시작이다. (별도 음성 안내는 넣지 않는다)
+
+    이어하기(⑤부터 재개)는 하지 않는다: 층 버튼을 이미 눌렀는지 기록하는 곳이 한
+    군데도 없고, **켜진 버튼을 다시 누르면 호출이 취소된다**(사용자 확정). 추측이
+    들어가는 재개보다 한 번 더 타는 쪽이 낫다."""
+    global _floor_confirmed
+    _log("AUTO", f"🛗 여정 시작 보류 — 측위가 캐빈 안을 가리킨다 ({why}). "
+                 f"Nav2 주행을 내지 않는다 [목적지 {dest}={dest_floor}층]")
+    _jr("gate", "start_in_cabin", dest=dest, dest_floor=dest_floor, why=why,
+        floor=_current_floor, pose=_jr_pose())
+    _auto_set("확인", f"🛗 로봇이 엘리베이터 안으로 보입니다 ({why}) — 주행 전에 먼저 "
+                      "나가야 합니다. 엘리베이터 안이 맞으면 '다음'",
+              wait=True, phase="board")
+    _auto_notify("로봇이 엘리베이터 안에 있는 것 같습니다. 먼저 나가겠습니다. "
+                 "엘리베이터 안이 맞으면 손잡이 버튼을 눌러 주세요")
+    if not _auto_wait_confirm(timeout=AUTO_SELF_PRESS_SEC):
+        _auto_notify("확인이 없어 안내를 시작하지 않았습니다. 도움을 요청하세요")
+        _auto_set("오류", "🛗 캐빈 안 추정 — 사용자 확인 없음. 주행·하차 둘 다 하지 않았다")
+        _log("AUTO", "🛗 캐빈 시작 — 확인 없음. 아무것도 움직이지 않았다(fail-closed)")
+        return
+    if not _elev_app_up_and_lease("캐빈에서 시작 — 하차 먼저"):
+        return
+    _floor_confirmed = False
+    _log("AUTO", f"🗺 층 확정 해제 — 캐빈에서 시작했고 그 사이 엘베가 움직였는지 모른다 "
+                 f"(표시층 {_current_floor} 는 유지, 확정만 품)")
+    try:
+        _elev_post("/floor", {"floor": _current_floor, "confirmed": False}, timeout=2)
+    except Exception:
+        pass
+    _auto_exit_cabin_unmoved(dest_floor, "여정 시작 시 로봇이 캐빈 안이었다")
+
+
 def _auto_wait_next(timeout, ignore_cancel: bool = False):
     """'다음' 대기. ignore_cancel=False 면 평소 경로(_auto_wait_confirm) 그대로다.
 
@@ -4735,6 +4877,21 @@ def _auto_run(dest):
         if not _floor_confirmed:
             _log("AUTO", f"⚠ 현재 층 미확정(부팅 초기값 {_current_floor}층 그대로) — "
                          f"'{dest}'={dest_floor}층 판정을 그 값으로 한다")
+        # 🔴 캐빈 안에서 시작하면 Nav2 를 내지 않는다 (_in_cabin / _auto_cabin_start_exit).
+        #    같은 층 분기보다 **앞**에 둔다 — 그쪽도 첫 동작이 `/goto` 라 똑같이 위험하고,
+        #    층 미확정 거부보다도 앞이어야 "층을 모르는 채 캐빈에 갇힌" 경우가 풀린다.
+        _cab_in, _cab_why = _in_cabin()
+        # 🔴 **세 결과를 모두 남긴다.** False 만 조용하면 "검사가 돌고 아니었다"와
+        #    "검사가 아예 안 돌았다"가 로그에서 구분되지 않는다 — 2026-11-13 하네스에서
+        #    실제로 그 둘을 가리지 못했다. 여정당 1줄이라 소음이 아니다.
+        _log("AUTO", "🛗 시작 위치 검사 — 캐빈 안? "
+                     + {True: "예", False: "아니오"}.get(_cab_in, "모름")
+                     + f" · {_cab_why}")
+        if _cab_in:
+            _auto_cabin_start_exit(dest, dest_floor, _cab_why)
+            return
+        if _cab_in is None:
+            _log("AUTO", "캐빈 여부를 모르므로 기존 동작으로 진행한다(거부만 추가하는 게이트다)")
         # 같은 층이면 엘베 없이 바로
         if dest_floor == _current_floor:
             with _auto_lock:
@@ -4814,25 +4971,8 @@ def _auto_run(dest):
             _auto_set("도착", "승차지점 도착 ✅", phase="board")
 
         # 2) 엘베앱 ON + 제어권 리스 부여 (한 여정에 1회 — 유일한 자동 grant 지점)
-        _auto_set("엘베시작", "엘리베이터 앱 시작 + 제어권 부여...", phase="app")
-        if not _elev_app_running():
-            proc = subprocess.Popen(
-                [sys.executable, "-u", str(THIS_DIR / "elevator_button_press/main.py")],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-            _procs["elevator"] = proc
-            _elev_started_mono = time.monotonic()   # 고립 판정 유예 기준(=기동 시각)
-            _jr("proc", "elev", proc.pid, str(THIS_DIR / "elevator_button_press/main.py"))
-            threading.Thread(target=_capture, args=(proc, "ELEV"), daemon=True).start()
-        if not _wait_elev_app_up(20):
-            _auto_set("오류", "엘베앱 기동 실패"); return
-        # 🔴 첫 제어권 부여도 같다 — 승차지점 '도착'은 xy 만 본 판정이라 Nav2 가 아직
-        #    제자리 회전 중일 수 있다(A2). 확인 못 하면 제어권을 주지 않는다.
-        if not _nav_release_wheels(True, "승차지점"):
-            _auto_notify("로봇이 멈췄는지 확인하지 못해 안내를 종료했습니다. 도움을 요청하세요")
-            _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 엘베앱 제어권 부여 거부")
+        if not _elev_app_up_and_lease("엘베 여정 시작"):
             return
-        if not _grant_elev_lease(True, "엘베 여정 시작"):
-            _auto_set("오류", "제어권 부여 실패 — 여정 중단"); return
 
         # ── 엘리베이터 6 시나리오 ──────────────────────────────────────────
         #   버튼 선택(상/하행·층)·정렬 = 자동 / 누르기(press) = '다음'에 포함.
