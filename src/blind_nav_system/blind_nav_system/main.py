@@ -2421,6 +2421,11 @@ def _dist_to(x, y):
 
 _AUTO = {"active": False, "dest": "", "step": "", "msg": "",
          "waiting": False, "cancel": False,
+         # 🔴 confirm_n: '다음'이 **접수된 횟수**. waiting 플래그로는 부족하다 —
+         #   `/auto_cancel`(= 손잡이 당김)도 waiting 을 내리기 때문에, 취소 뒤의 대기가
+         #   "두 번째 당김"을 '다음'으로 잘못 읽는다. 당김은 "멈춰"이지 "나가자"가
+         #   아니다. 그래서 캐빈 안 취소 대기는 이 **번호가 바뀌는 것**만 확인으로 본다.
+         "confirm_n": 0,
          # force: '강제로 넘어가기' 1회용 신호. 안무가 도는 동안 '다음'이 잠겨 있을 때
          # 사람이 그래도 진행시키려고 누르는 버튼이다. 누른 쪽(/auto_force)이 로봇을
          # '먼저' 멈추고 나서 이걸 세운다 — 순서가 바뀌면 이 버튼이 막으려던 위험이 된다.
@@ -4214,13 +4219,80 @@ def _exit_failed(reason: str, cur, res=None):
                          if reason != "noapp" else ""))
 
 
+def _auto_wait_next(timeout, ignore_cancel: bool = False):
+    """'다음' 대기. ignore_cancel=False 면 평소 경로(_auto_wait_confirm) 그대로다.
+
+    🔴 ignore_cancel=True 는 **이미 취소된 뒤**에 쓴다. `_auto_wait_confirm` 은 첫 줄에서
+       cancel 을 보고 바로 False 를 돌려주므로, 취소된 여정이 "나갈까요?"를 물을 수 없다.
+       그래서 그 경우만 cancel 을 무시하고 **confirm_n 이 바뀌는 것**을 기다린다.
+       waiting 플래그를 안 보는 이유는 `/auto_cancel` 이 그것도 내리기 때문이다 —
+       두 번째 당김이 '하차 승인'으로 읽히면 "멈춰"라고 당긴 사람을 움직이게 한다.
+       멈춤(paused)은 그대로 존중한다 — 멈춤 중에는 /auto_confirm 이 접수되지 않으므로
+       번호가 오르지 않고, 여기서도 자동으로 기다리게 된다."""
+    if not ignore_cancel:
+        return _auto_wait_confirm(timeout=timeout)
+    with _auto_lock:
+        n0 = _AUTO.get("confirm_n", 0)
+        _AUTO["waiting"] = True
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        with _auto_lock:
+            if _AUTO.get("confirm_n", 0) != n0:
+                _AUTO["waiting"] = False
+                return True
+        time.sleep(0.2)
+    return False
+
+
 def _auto_abort_elev():
     """여정 취소 시 안전 정리: 엘베앱 종료(→제어권 회수→가드 복구)."""
     _auto_set("취소", "여정 취소됨 — 엘베앱 종료·제어권 회수")
     _http_self("/elevator_app", {"running": False})
 
 
-def _auto_exit_cabin_unmoved(dest_floor, why: str):
+def _auto_cancel_in_cabin(dest_floor, where: str):
+    """캐빈 안에서 여정이 끊겼다 — **엘베앱을 죽이지 않는다.**
+
+    🔴 왜. 종전에는 ⑤·이동중·⑥ 의 모든 중단이 `_auto_abort_elev()` 로 갔다 =
+    엘베앱 SIGTERM. 그러면 제어권이 회수되고 **조종 패드가 사라진다** — 로봇과
+    사용자는 캐빈 안에 남는다. ④(진입)와 ⑥(하차)은 2026-10-12 에 이미 이 비대칭을
+    없애고 `_rescue_hold` 로 앱을 살려 뒀는데, **그 사이 단계들만 빠져 있었다.**
+
+    🔴 그리고 이 자리의 '취소'는 대부분 **손잡이 당김**이다. 당김은 화면 ✖ 취소와
+    같은 신호로 묶여 있었지만 뜻이 다르다 — `_handle_pull` 주석이 "눈 없는 유일한
+    정지 수단"이라고 적어 둔 그 입력이고, 시각장애인이 놀라서 당기면 결과가
+    "엘리베이터에 갇힘"이 됐다. (사용자 승인 2026-11-13)
+
+    그래서: 바퀴를 멈추고 → 제어권을 유지하고 → **나갈 길을 음성으로 제시**한다.
+    당김은 "멈춰"이지 "나가자"가 아니므로 후진을 자동으로 시작하지 않는다.
+    손잡이 **버튼**('다음')을 받으면 하차한다 — 층은 확정하지 않는다
+    (`_auto_exit_cabin_unmoved` 와 같은 규칙: 엘베가 안 움직였으니 탔던 층이다).
+
+    확인이 없으면 **멈춘 채로 끝낸다** — 제어권을 유지하므로 운영자 패드가 남고,
+    이것이 종전(앱 종료)보다 나쁠 수 없는 이유다."""
+    global _rescue_hold
+    _rescue_hold = True
+    stopped = _elev_post("/step_stop", {}, timeout=3) is not None
+    _log("AUTO", f"⏹ 캐빈 안 중단 [{where}] — 바퀴 정지 요청 "
+                 + ("전송됨" if stopped else "🚨 전송 실패")
+                 + " · 엘베앱 유지(조종 패드 보존) · 층 확정 안 함")
+    _jr("gate", "cancel_in_cabin", where=where, dest=dest_floor, floor=_current_floor)
+    _auto_notify("안내를 멈췄습니다. 엘리베이터 안입니다. "
+                 "나가려면 손잡이 버튼을 눌러 주세요")
+    _auto_set("멈춤", f"⏹ {where} 중단 — 로봇이 엘리베이터 안에 있습니다. "
+                      "'다음' = 하차(층 이동 없음) · 제어권 유지(조종 패드 보존)",
+              wait=True, phase="ride")
+    if not _auto_wait_next(AUTO_SELF_PRESS_SEC, ignore_cancel=True):
+        _auto_notify("엘리베이터 안에 멈춰 있습니다. 도움을 요청하세요")
+        _auto_set("오류", f"🚨 캐빈 안 정지 유지 [{where}] — 하차 확인 없음 · "
+                          "제어권 유지(조종 패드 보존). 엘베앱을 끄면 해제됩니다")
+        _log("AUTO", f"캐빈 안 중단 [{where}] — 하차 확인 없음, 후진 내지 않음. _rescue_hold=True")
+        return
+    _auto_exit_cabin_unmoved(dest_floor, f"{where} 중단 뒤 사용자 하차 요청",
+                             ignore_cancel=True)
+
+
+def _auto_exit_cabin_unmoved(dest_floor, why: str, ignore_cancel: bool = False):
     """2단계 — 층 버튼을 누르지 못한 채 **엘리베이터에서 나온다.**
 
     🔴 왜 생겼나. 종전 결말은 `_auto_abort_elev()` 하나였다 — 엘베앱을 종료하고
@@ -4255,8 +4327,8 @@ def _auto_exit_cabin_unmoved(dest_floor, why: str):
               "'문열림' 을 누르고 문이 열리면 '다음'", wait=True, phase="moving")
     _auto_notify(f"{dest_floor}층 버튼을 누르지 못했습니다. 엘리베이터에서 나가겠습니다. "
                  "문열림 버튼을 누르고, 문이 열리면 손잡이 버튼을 눌러 주세요")
-    if not _auto_wait_confirm(timeout=AUTO_SELF_PRESS_SEC):
-        if _AUTO.get("cancel"):
+    if not _auto_wait_next(AUTO_SELF_PRESS_SEC, ignore_cancel):
+        if _AUTO.get("cancel") and not ignore_cancel:
             # 사람이 명시적으로 취소했다 — 그 판단을 뒤집지 않는다.
             _auto_notify("안내를 종료했습니다")
             _auto_abort_elev()
@@ -4285,6 +4357,17 @@ def _auto_exit_cabin_unmoved(dest_floor, why: str):
     if not _auto_hold("⑥ 하차(층 미이동)"):
         _auto_abort_elev()
         return
+    if ignore_cancel:
+        # 🔴 취소를 **해제한다.** 사용자가 "멈춰"(당김) 뒤에 "나가자"(버튼)를 눌렀으니
+        #   스스로 취소를 뒤집은 것이다. 해제하지 않으면 `_elev_wait_exit_done` 이 첫
+        #   검사에서 cancel 을 보고 즉시 "cancel" 을 돌려줘 — **후진을 시작하자마자
+        #   멈춘다.** 그게 제일 나쁜 결말이다(문턱에 걸친 채 정지).
+        #   여정을 되살리는 것이 아니다: 이 함수는 하차만 하고 끝나고, _auto_run 의
+        #   finally 는 cancel 을 읽지 않는다(리스는 _rescue_hold 로만 판단).
+        with _auto_lock:
+            _AUTO["cancel"] = False
+        _log("AUTO", "⑥ 하차(층 미이동) — 사용자가 하차를 요청해 취소 플래그를 해제한다 "
+                     "(당김=멈춰 → 버튼=나가자)")
     _auto_set("⑥ 하차", "하차(후진) 중... — 층 이동 없음", phase="exit")
     _sent, _seq = _elev_scene(5)
     if not _sent or _seq is None:
@@ -4887,9 +4970,12 @@ def _auto_run(dest):
                   phase="floor")
         arm_safe = False                        # 씬0과 같은 이유(위 주석 참고)
         _AUTO["arm_safe"] = arm_safe
-        if not _auto_hold("⑤ 인식 자세"): _auto_abort_elev(); return
+        # 🔴 ⑤ 이후의 중단은 **캐빈 안**이다 — 앱을 죽이지 않는다(_auto_cancel_in_cabin).
+        if not _auto_hold("⑤ 인식 자세"):
+            _auto_cancel_in_cabin(dest_floor, "⑤ 인식 자세"); return
         _elev_scene(4)                          # place=cab + 인식자세
-        if not _auto_hold("⑤ 층 버튼 선택"): _auto_abort_elev(); return
+        if not _auto_hold("⑤ 층 버튼 선택"):
+            _auto_cancel_in_cabin(dest_floor, "⑤ 층 버튼 선택"); return
         # 선택+정렬을 재시도까지 묶어서 돈다 (위 _elev_align_with_retry 주석)
         _align_ok = _elev_align_with_retry(dest_floor, "⑤ 층선택", f"{dest_floor}층")
         _self_pressed = False     # 사용자가 직접 눌렀다 → 로봇 누르기를 건너뛴다
@@ -4913,10 +4999,16 @@ def _auto_run(dest):
         # 🔴 실패 뒤 대기 상한은 900초가 아니라 AUTO_SELF_PRESS_SEC(2분)다 — 그 상수 주석.
         if not _auto_wait_confirm(auto_ok=_align_ok,
                                   timeout=(900 if _align_ok else AUTO_SELF_PRESS_SEC)):
-            if _align_ok or _AUTO.get("cancel"):
-                _auto_abort_elev(); return
-            # 2단계 — 아무도 누르지 않았다. **캐빈 안에 두고 끝내지 않는다.**
-            _auto_exit_cabin_unmoved(dest_floor, "층 버튼을 누를 사람이 없었습니다")
+            if _AUTO.get("cancel"):
+                # 취소(대부분 손잡이 당김) — 멈추고 나갈 길을 남긴다. 자동 후진은 안 한다.
+                _auto_cancel_in_cabin(dest_floor, "⑤ 층선택")
+            elif _align_ok:
+                # 정렬은 됐는데 900초 동안 아무도 '다음'을 안 눌렀다 = 사람이 없다.
+                # 여기서 앱을 죽이면 캐빈 안에 방치된다 — 같은 처리로 보낸다.
+                _auto_cancel_in_cabin(dest_floor, "⑤ 층선택 확인 없음")
+            else:
+                # 2단계 — 1단계(직접 누르기)도 응답이 없었다. **나간다.**
+                _auto_exit_cabin_unmoved(dest_floor, "층 버튼을 누를 사람이 없었습니다")
             return
         if not _align_ok:
             # 사람이 '다음' 을 눌렀다. 뜻이 둘이고 **물어서** 가린다 — 추측하면 둘 다 틀린다:
@@ -4954,12 +5046,12 @@ def _auto_run(dest):
             _auto_set("⑤ 층선택", f"{dest_floor}층 — 사용자가 직접 누름 (로봇 누르기 생략)")
         else:
             if not _press_or_pass():                # 다음 → 층버튼 누르기
-                _auto_abort_elev(); return
+                _auto_cancel_in_cabin(dest_floor, "⑤ 누르기 거부"); return
             _auto_set("⑤ 층선택", f"{dest_floor}층 버튼 누르는 중... (팔 복귀까지 대기)")
             # 눌림+팔복귀 완료까지 대기. 접촉 판정 실패면 사람 확인으로 간다(① 과 같은 처리).
             if not _press_done_or_confirm(_elev_wait_press_done(), "⑤ 층선택",
                                           4, dest_floor):
-                _auto_abort_elev(); return
+                _auto_cancel_in_cabin(dest_floor, "⑤ 누르기 미확인"); return
             arm_safe = True                         # release 지점 (2/2) — 위 _self_pressed 와 둘
             _AUTO["arm_safe"] = arm_safe
         # (1/2) 와 같은 이유의 기록. ⑥ 은 씬 이동이라 자세 전환이 _elev_scene(5) **안에**
@@ -4998,7 +5090,8 @@ def _auto_run(dest):
                   f"{dest_floor}층 버튼에 불이 켜졌는지 확인하고 '다음' — "
                   "안 켜졌으면 엘베UI에서 다시 누르세요",
                   wait=True, phase="moving")
-        if not _auto_wait_confirm(): _auto_abort_elev(); return
+        if not _auto_wait_confirm():
+            _auto_cancel_in_cabin(dest_floor, "이동중"); return
         if not arm_safe:
             _auto_notify("팔이 안전한지 확인되지 않아 안내를 종료했습니다", stow_hint=True)
             _auto_set("오류", "팔 복귀 미확인 — 베이스 이동 거부(⑥ 하차)")
@@ -5021,7 +5114,8 @@ def _auto_run(dest):
         #   추측하지 않고 _exit_failed 로 보낸다: 거기서 /step_stop 이 먼저 나가
         #   혹시 움직이고 있었다면 멈춘다.
         # 멈춘 채 '다음'(하차)을 눌러도 여기서 막힌다 — 정지가 하차보다 우선한다(추가 코드 없이).
-        if not _auto_hold("⑥ 하차"): _auto_abort_elev(); return
+        if not _auto_hold("⑥ 하차"):
+            _auto_cancel_in_cabin(dest_floor, "⑥ 하차"); return
         _sent5, _seq5 = _elev_scene(5)
         if not _sent5 or _seq5 is None:
             _exit_failed("post" if not _sent5 else "noseq", None, None)
@@ -5476,6 +5570,8 @@ def auto_confirm():
             locked = "busy"
         else:
             _AUTO["waiting"] = False
+            # 접수된 '다음'만 번호를 올린다 — 위 confirm_n 주석(당김과 구분).
+            _AUTO["confirm_n"] = _AUTO.get("confirm_n", 0) + 1
             locked = None
     if locked == "paused":
         _log("AUTO", f"'다음 확인' 무시 — [{step}] 멈춤 중이다 (▶ 재개 후 다시)")
