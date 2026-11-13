@@ -3098,6 +3098,19 @@ _NAV2_PARAMS_YAML = Path("/home/hello-robot/ament_ws/src/stretch_ros2/stretch_na
 _NAV2_PAD_NODE  = "/local_costmap/local_costmap"
 _NAV2_PAD_PARAM = "footprint_padding"
 
+# 🔴 2026-11-13: 조회가 한 번 미끄러진 것으로 여정을 끊지 않는다.
+#   실기 기록 — 하차·지도전환까지 다 성공한 여정이 마지막 안전검사에서 거부됐다.
+#     13:11:08  param_get rc=0  0.08  (1170ms)
+#     13:14:09  param_get rc=0  0.08  (3581ms)
+#     13:16:48  param_get rc=1  "Node not found"  → 주행 거부
+#   그런데 그 노드는 죽은 적이 없다(직후 확인: lifecycle active, footprint_padding
+#   = 0.08 평소값). 고칠 것이 없는데 못 읽어서 못 간 것이다. 바로 1초 전에 엘베앱을
+#   종료해 ROS 노드 한 무더기가 그래프에서 빠지는 중이었고, 성공한 호출조차 3581ms
+#   가 걸릴 만큼 탐색이 느렸다 — 즉 **판정 수단**이 미끄러진 것이다.
+#   거부(fail-closed)는 그대로 둔다. 거부하기 전에 몇 번 더 묻는 것만 바꾼다.
+_NAV_PARAM_TRY       = 3     # 회 — 읽기·쓰기 각각의 시도 상한
+_NAV_PARAM_RETRY_SEC = 1.0   # 초 — 시도 사이 간격(그래프가 가라앉을 시간)
+
 
 def _nav_normal_padding():
     """nav2 yaml 이 말하는 local costmap footprint_padding. 못 읽으면 None."""
@@ -3199,8 +3212,19 @@ def _nav_params_restore_normal(why=""):
                      "이 빌드는 엘베 파라미터를 바꾸지 않으므로 주행은 계속한다"
                      + (f" [{why}]" if why else ""))
         return True
-    cur = _nav_param_get(_NAV2_PAD_NODE, _NAV2_PAD_PARAM)
-    _jr("gate", "nav_padding_read", why=why, want=want, cur=cur)
+    cur, _rd_try = None, 0
+    while _rd_try < _NAV_PARAM_TRY:
+        _rd_try += 1
+        cur = _nav_param_get(_NAV2_PAD_NODE, _NAV2_PAD_PARAM)
+        if cur is not None:
+            break
+        if _rd_try < _NAV_PARAM_TRY:
+            _log("NAV2", f"⚠ {_NAV2_PAD_NODE} {_NAV2_PAD_PARAM} 조회 실패 "
+                         f"{_rd_try}/{_NAV_PARAM_TRY} — {_NAV_PARAM_RETRY_SEC:.0f}초 뒤 "
+                         "다시 묻는다(그래프 탐색이 미끄러질 수 있다)"
+                         + (f" [{why}]" if why else ""))
+            time.sleep(_NAV_PARAM_RETRY_SEC)
+    _jr("gate", "nav_padding_read", why=why, want=want, cur=cur, tries=_rd_try)
     if cur is not None and abs(cur - want) <= 1e-6:
         return True                 # 평소값이다 — 아무것도 쓰지 않는다(정상 경로)
     unknown = (cur is None)
@@ -3209,19 +3233,30 @@ def _nav_params_restore_normal(why=""):
                   f"🚨 {_NAV2_PAD_PARAM} 이 평소값과 다름 {cur} → {want} 복원 시도 "
                   "— 엘베값이 복도로 새어 나온 것이다. 원인을 찾아라")
                  + (f" [{why}]" if why else ""))
-    try:
-        w = subprocess.run(["ros2", "param", "set", _NAV2_PAD_NODE, _NAV2_PAD_PARAM,
-                            str(want)], capture_output=True, timeout=5, text=True)
-        ok = (w.returncode == 0)
-        err = (w.stderr or w.stdout or "").strip()[:120]
-    except Exception as e:
-        ok, err = False, repr(e)
-    _jr("gate", "nav_padding_write", why=why, want=want, cur=cur, ok=ok, err=err)
+    ok, err, _wr_try = False, "", 0
+    while _wr_try < _NAV_PARAM_TRY:
+        _wr_try += 1
+        try:
+            w = subprocess.run(["ros2", "param", "set", _NAV2_PAD_NODE, _NAV2_PAD_PARAM,
+                                str(want)], capture_output=True, timeout=5, text=True)
+            ok = (w.returncode == 0)
+            err = (w.stderr or w.stdout or "").strip()[:120]
+        except Exception as e:
+            ok, err = False, repr(e)
+        if ok:
+            break
+        if _wr_try < _NAV_PARAM_TRY:
+            _log("NAV2", f"⚠ {_NAV2_PAD_PARAM} 재설정 실패 {_wr_try}/{_NAV_PARAM_TRY} "
+                         f"({err}) — {_NAV_PARAM_RETRY_SEC:.0f}초 뒤 다시 시도한다"
+                         + (f" [{why}]" if why else ""))
+            time.sleep(_NAV_PARAM_RETRY_SEC)
+    _jr("gate", "nav_padding_write", why=why, want=want, cur=cur, ok=ok, err=err,
+        tries=_wr_try)
     if ok:
         _log("NAV2", f"{_NAV2_PAD_PARAM} = {want} 재설정 성공"
                      + (f" [{why}]" if why else ""))
         return True
-    _log("NAV2", f"🚨 {_NAV2_PAD_PARAM} 재설정 실패 → 주행 거부. {err}"
+    _log("NAV2", f"🚨 {_NAV2_PAD_PARAM} 재설정 {_wr_try}회 모두 실패 → 주행 거부. {err}"
                  + (f" [{why}]" if why else ""))
     return False
 
@@ -5365,6 +5400,17 @@ def _auto_run(dest):
                          f"하차 확인으로 {_current_floor}층 확정 그대로다")
         time.sleep(2)
 
+        # 7.5) Nav2 파라미터 검사를 엘베앱 종료 **앞**으로 당긴다 (2026-11-13)
+        #   왜: 이 검사는 ros2 CLI 로 그래프에서 노드 이름을 찾는다. 8) 이 엘베앱을
+        #   죽이면 ROS 노드 한 무더기가 동시에 그래프에서 빠지고, 그 1초 뒤에 묻다가
+        #   "Node not found" 를 맞았다(2026-11-13 13:16:48 실기 — 노드는 살아 있었고
+        #   값도 이미 평소값이었다). 읽기·쓰기는 로봇을 움직이지 않으므로 엘베앱이
+        #   떠 있는 동안 해도 안전하다 — 결과만 들고 가서 8) 뒤에 거부한다.
+        #   🔴 거부 자리는 옮기지 않았다. 사람이 엘리베이터 밖에 선 뒤에 알린다.
+        #   (지도 전환이 이미 실패했으면 결과를 쓸 데가 없다 — 묻지 않는다. 안 물으면
+        #    재시도 대기만큼 사용자 통보가 늦어진다.)
+        _pad_ok = _nav_params_restore_normal(f"하차 후 {dest}") if _sw_ok else False
+
         # 8) 엘베앱 OFF (제어권 회수 + 종료)
         _auto_set("엘베종료", "엘리베이터 앱 종료 + 제어권 회수", phase="exit")
         _http_self("/elevator_app", {"running": False})
@@ -5381,16 +5427,18 @@ def _auto_run(dest):
                               "다시 하세요", phase="drive")
             return
 
-        # 9) 목적지 주행 (자동)
-        _auto_set("주행", f"{dest}로 이동 중...", phase="drive")
-        if not _nav_params_restore_normal(f"하차 후 {dest}"):
+        if not _pad_ok:
             # 하차는 끝났으니 사람은 엘리베이터 밖이다. 목적지까지는 못 간다 —
             # 조용히 서 있지 않고 사실대로 알린다(뿌리 B: 실패가 사용자에 전달 안 됨).
+            # 검사 자체는 7.5) 에서 이미 돌았다(엘베앱이 살아 있는 동안).
             _auto_notify("엘리베이터에서 나왔지만 목적지로 출발할 수 없습니다. "
                          "도움을 요청하세요")
             _auto_set("오류", "🚨 Nav2 파라미터 복원 실패 — 목적지 주행 거부 "
                               "(하차는 완료)", phase="drive")
             return
+
+        # 9) 목적지 주행 (자동)
+        _auto_set("주행", f"{dest}로 이동 중...", phase="drive")
         if not _auto_hold("목적지 주행"):
             _auto_set("완료", "목적지 도착 실패", phase="done"); return   # 도착 대기의 취소 결말과 같게
         _jr("ev", "amcl", where="before_dest_goto", pose=_jr_pose(), elev=_jr("elev_brief"))
