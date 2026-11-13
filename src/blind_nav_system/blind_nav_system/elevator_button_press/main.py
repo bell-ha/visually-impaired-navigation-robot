@@ -6434,6 +6434,32 @@ class ElevatorTracker(Node):
             threading.Thread(target=self._base_move, args=(val,),
                              daemon=True).start()
 
+    def _seek_pin_back(self, where, lift):
+        """지글을 없앤 자리에서, 표값을 벗어나 있으면 **표값으로 되돌린다.**
+
+        2026-11-13 에 인식 부스트 지글을 제거하면서 생긴 자리다. 지글이 사라졌으니
+        여기서 lift 가 떠내려갈 일 자체가 없지만, 다른 경로(탐색 스윕 등)가 남긴
+        편차를 이 자리에서 거둔다.
+
+        🔴 덮어쓰기 사고가 되지 않는 이유: 명령값이 `_servo_step` 의 '표값 복귀'와
+           **같은 `_lift_pin()` 값**이다. 단일-goal 서버에서 문제가 되는 것은 뒤에
+           온 goal 이 앞 goal 을 선점하는 것이 아니라 **다른 값**으로 선점하는
+           것이다. 같은 값이면 겹쳐도 결과가 같다.
+        표를 모르면(고정 모드 아님) 아무것도 하지 않는다 — 기존 동작 그대로.
+        """
+        h, band = _lift_pin()
+        if h is None or lift is None:
+            return
+        dev = float(lift) - h
+        if abs(dev) <= (band or LIFT_ROW_DEADBAND_M):
+            return
+        if time.time() - getattr(self, "_seek_pin_ts", 0.0) < 2.0:
+            return          # 2초 스로틀 — 명령이 목표에 닿을 시간을 준다
+        self._seek_pin_ts = time.time()
+        self._dlog(f"[LIFT] 표값 복귀 {float(lift):.3f}→{h:.3f} "
+                   f"({dev * 1000:+.0f}mm 벗어남 · {where})")
+        self._send_goal(["joint_lift"], [max(0.15, min(1.10, h))])
+
     def _lift_pin_skip(self, where, ey=None):
         """고정 모드면 True — **이 자리에서는 joint_lift 명령을 내지 않는다.**
 
@@ -6660,24 +6686,34 @@ class ElevatorTracker(Node):
                     # 신선도 12초: 앵커 판독 주기(5~10초 실측)보다 길게 — 3초였을 땐
                     # 판독 사이 공백에 군집 SEEK가 하이재킹해서 문열림을 놓침 (16:29 실측).
                     # 12초 넘게 정합이 끊기면(진짜 실종) 군집 SEEK가 재획득 담당.
-                    # 그 사이 이동은 지글(±22px)·정렬 스텝(±35px)뿐이라 ±45px 관용 내.
+                    # 그 사이 이동은 정렬 스텝(±35px)뿐이라 ±45px 관용 내.
+                    # (지글 ±22px 은 2026-11-13 제거 — 관용은 그대로 두어 더 넉넉해졌다)
                     and time.time() - getattr(self, "_map_cells_ts", 0) < 12.0):
                 gx, gy = _mc[target]
                 sex_m, sey_m = gx - CX, gy - CY
                 if abs(sey_m) < 45 and abs(sex_m) < 45:
-                    # 예상 위치 도달. 그냥 기다리면 정반사 각도에 얼어붙어 판독이 안
-                    # 나옴(1분/회 실측) → 인식 부스트 지글: lift ±1.2cm 교대로 반사
-                    # 각도를 계속 바꿔 판독 유도. 탐색 중재자(_may_explore)가
-                    # "이동→정지→인식" 리듬을 보장, 폭이 작아 맵 유도와 충돌 없음
+                    # 예상 위치 도달 — 고칠 것이 없으니 **대기**한다.
+                    #
+                    # 🔴 2026-11-13: 여기 있던 "인식 부스트 지글"(lift ±1.2cm 교대)을
+                    #    제거했다. 목적은 "정반사를 깨서 글자 판독을 유도"였는데,
+                    #    그 판독 자체를 못 믿는다는 것이 실측으로 확정됐다.
+                    #      · 11-13 13:33~13:35 차내 패널(배치 [[문열림,3,-],[-,2,5],
+                    #        [종,1,4]])에서 없는 글자가 읽혔다 — '^'×8 '9'×14 '7'×6 '11'×2.
+                    #      · 13:35:30 부터 **'2' 자리(y≈313, '2' 40건의 중앙값과 동일)가
+                    #        '3' 으로 읽혔고** 누르기가 그 박스를 잠갔다(lock=(336,312)).
+                    #      · 지글이 돈 55초 동안 진짜 '3'(y≈225)은 3번만 읽혔고
+                    #        13:34:04 이후로는 0번이다.
+                    #    대가는 확실했다. 기준점이 표값이 아니라 **측정값**이라
+                    #    (float(lift) + _js) 매 사이클 정착 오차가 중심에 쌓이는
+                    #    랜덤워크였다 — 밴드 중심이 0.985 → 1.000 으로 올라갔다
+                    #    (표값 0.991 대비 +9mm). 그래서 타겟을 시야에서 놓쳤다.
+                    #    (같은 지글이 만든 교착은 전에도 있었다 — 아래 '3분 지글 교착' 주석)
+                    #    사용자 결정(2026-11-13): "이제는 높이가 정해졌으니 흔드는 기능은
+                    #    없어도 되지 않을까" / "빼고 바로 그 리프트로 표로 갈 수 있게 하자".
                     if time.time() - getattr(self, "_mapwait_log_ts", 0) > 5.0:
                         self._mapwait_log_ts = time.time()
                         self._dlog(f"[SEEK] '{target}' 예상 위치 도달 — 재인식 대기 중")
-                    if self._may_explore():
-                        self._jiggle_dir = -getattr(self, "_jiggle_dir", -1)
-                        _js = 0.012 * self._jiggle_dir
-                        self._dlog(f"[SEEK] 인식 부스트 지글 (lift {_js*100:+.1f}cm)")
-                        self._send_goal(["joint_lift"],
-                                        [max(0.15, min(1.10, float(lift) + _js))])
+                    self._seek_pin_back("맵 예상 위치 대기", lift)
                     return
                 if not self._may_explore():
                     return
@@ -6710,7 +6746,8 @@ class ElevatorTracker(Node):
 
             # ── 패널 시야 가드: 배치 타겟 + 박스 3개 이상 보이면 군집의 "옆으로
             # 끌기"(높이/전후 중심 맞추기) 금지. 판독 가뭄이 아무리 길어도 예상
-            # 위치를 지키며 ①멀면 전진(판독 거리 확보) ②가까우면 지글만 한다.
+            # 위치를 지키며 ①멀면 전진(판독 거리 확보) ②가까우면 대기한다.
+            #   (②는 2026-11-13 까지 '지글' 이었다 — 위 제거 주석 참고)
             # 군집 추적은 패널을 정말 잃었을 때(박스<3)만 재획득용으로 발동.
             # (줄다리기로 예산 16cm 소진 반복 실측 — 시간 창 연장으로도 못 막던 것)
             _lay_toks = {tok for r in _layout_rows for tok in r if tok.strip()}
@@ -6727,7 +6764,7 @@ class ElevatorTracker(Node):
                 else:
                     if time.time() - getattr(self, "_panelwait_log_ts", 0) > 5.0:
                         self._panelwait_log_ts = time.time()
-                        self._dlog(f"[SEEK] 패널 시야 내 — '{target}' 자리 지킴 (전진/지글만)")
+                        self._dlog(f"[SEEK] 패널 시야 내 — '{target}' 자리 지킴 (전진만)")
                     if self._may_explore():
                         _wd = self._depth_at(CX, CY)
                         with state_lock:
@@ -6743,11 +6780,11 @@ class ElevatorTracker(Node):
                                 [max(ARM_EXT_MIN, min(ARM_EXT_MAX,
                                                       float(_ext_g) + _st_g))])
                         else:
-                            self._jiggle_dir = -getattr(self, "_jiggle_dir", -1)
-                            _js3 = 0.012 * self._jiggle_dir
-                            self._dlog(f"[SEEK] 인식 부스트 지글 (lift {_js3*100:+.1f}cm)")
-                            self._send_goal(["joint_lift"],
-                                            [max(0.15, min(1.10, float(lift) + _js3))])
+                            # 🔴 2026-11-13: 지글 제거 — 위 '맵 예상 위치 도달' 과 같은
+                            #    이유. 바로 위 '판독 거리 확보 전진'(팔)이 더 나은
+                            #    수단이고, 그 조건이 안 되면 대기한다. 이 블록에는 이미
+                            #    "자리 지킴 무성과 30초 → 군집 재센터링 1회" 탈출구가 있다.
+                            self._seek_pin_back("패널 시야 내 자리 지킴", lift)
                     return
 
             if len(boxes) >= 2:
