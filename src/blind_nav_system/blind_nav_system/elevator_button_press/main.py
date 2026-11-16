@@ -5340,6 +5340,55 @@ class ElevatorTracker(Node):
         with state_lock:
             return bool(state["centered"] and state.get("press_ready"))
 
+    # ── 표 고정 모드의 세로 행 게이트 (2026-11-16) ───────────────────────────
+    # 표에 고정하면 조준선은 **타겟 행 위**에 온다. 2026-11-13 실측이 그걸 보여준다:
+    # 타겟 '3'(행0, lift 0.98~1.00 = 표값 0.991)일 때 같은 행의 '문열림'이 ey=-6px
+    # 로 조준선에 얹혀 있었다. 그런데 잠금은 ey=+60px(+44mm, 한 행 아래) 박스에
+    # 걸려 45초 타임아웃까지 거기 앉아 있었다 — 그 박스는 OCR 이 '2'로도 읽은,
+    # 물리적으로 '2'인 버튼이다 (13:35:35 한 프레임에 '2'@(336,312)와
+    # '3'@(334,314)가 2px 차이로 공존. 그 창에 모양추론(S) 표식은 0건 =
+    # 격자 밀림이 아니라 진짜 OCR 오독이었다).
+    #
+    # 원인은 잠금 생성 조건이 `belief >= 0.45` **하나**였고 위치 검사가 전혀
+    # 없었던 것이다. 그래서 "조준선에서 반 행 간격 이상 벗어난 라벨은 다른 행의
+    # 버튼에 붙은 것"이라는 검사를 후보 단계에 넣는다. 높이는 이미 표가 정하므로
+    # 이 게이트는 높이를 바꾸지 않는다 — 잠금이 엉뚱한 행에 앉는 것만 막는다.
+    #
+    # 실측 판별 (2026-11-13 차내 전 프레임 중 lift 가 표값 ±8mm 인 93프레임):
+    #   기각 22건 = **전부 실패 사례**
+    #     '1' 13:15:21~27  ex=+133  +43mm  (딴 버튼, 7초 허비 후 스스로 이동)
+    #     '3' 13:33:20~24  ex=-178  -56mm  (딴 버튼, 그 여정 (5) 정렬 3/3 실패)
+    #     '3' 13:35:30~56  ex=  +0  +44mm  (한 행 아래 '2', 45초 타임아웃)
+    #   통과 71건에 **성공 누르기 프레임이 전부** 포함
+    #     '5' 14:13:55~14:14:00  22/22 통과 (최대 4.8mm) — 그 여정은 끝까지 성공
+    #     '1' 13:15:43~49  최종 잠금 전부 통과 (<=6.0mm)
+    # 문턱은 PRESS_EY_MAX_MM(19mm)이 아니라 **반 행 간격**이다. 19mm 로 조이면
+    # 접근 중의 정상 드리프트(13:15:38~41 에서 -23mm)까지 기각한다.
+    # 남는 위험 하나: 표의 행 높이 자체가 틀리면 올바른 후보가 영구 기각된다.
+    # 조용히 막히지는 않는다 — `[ROW] ... 후보 기각` 이 5초마다 찍히고, 그 뒤는
+    # 기존 45초 타임아웃 -> 사용자 확인 경로가 그대로 받는다.
+    def _row_gate_ok(self, det, tgt):
+        """후보 박스가 타겟 **행** 위에 있는지 세로로만 검사. 고정 모드 아니면 True."""
+        if _lift_pin()[0] is None:
+            return True          # 표를 모른다 = 고정 모드 아님 -> 기존 동작 그대로
+        ri = _row_of_label(tgt)
+        if ri is None or _lift_for_row(ri, len(_layout_rows)) is None:
+            return True          # 행 모델 밖(승강장 ^/s, 배치 변경) -> 검사 안 함
+        b = det.get("box") or {}
+        cy = (b.get("y1", 0) + b.get("y2", 0)) / 2
+        d = self._depth_at(int((b.get("x1", 0) + b.get("x2", 0)) / 2), int(cy))
+        _, oy = _aim_offsets(d)          # d=None 이면 _aim_offsets 가 기본값 처리
+        mm = _ey_mm(cy - (CY + oy), d)
+        half_mm = min(LIFT_ROW_PITCH_M) * 1000.0 / 2.0      # 28.4mm
+        if abs(mm) <= half_mm:
+            return True
+        if time.time() - getattr(self, "_row_gate_ts", 0.0) > 5.0:
+            self._row_gate_ts = time.time()
+            self._dlog(f"[ROW] '{tgt}' 후보 기각 — 조준선에서 {mm:+.0f}mm "
+                       f"(반 행 간격 {half_mm:.0f}mm 초과) = 다른 행의 버튼. "
+                       f"표 고정 중이므로 타겟 행은 조준선이다")
+        return False
+
     def _apply_button_map(self, detections, raw_dets, place0):
         """버튼 맵 정합: 탐지 박스들을 실물 배치(_layout_rows)에 사상해서
         글자가 안 읽힌 버튼의 정체를 위치로 확정한 합성 탐지를 추가.
@@ -6091,7 +6140,8 @@ class ElevatorTracker(Node):
             # 멀리서 갑자기 나타난 동명이인(예: '2'가 '3'으로 오독)은 참칭으로 무시.
             if tgt0:
                 cands = [d for d in detections
-                         if d["text"] == tgt0 and not d.get("suspect")]
+                         if d["text"] == tgt0 and not d.get("suspect")
+                         and self._row_gate_ok(d, tgt0)]
                 lk = getattr(self, "_target_lock", None)
                 chosen = None
                 if cands:
