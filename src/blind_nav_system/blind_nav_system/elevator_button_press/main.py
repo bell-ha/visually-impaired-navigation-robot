@@ -499,6 +499,15 @@ PRESS_RESID_MAX_MULT = 1.5
 # 🔴 좌우(ex)에는 쓰지 않는다 — 표에는 높이만 있고 x 는 없다(좌우는 폐루프 유지).
 PRESS_EY_MAX_MM = 19.0
 
+# ── 표값 lift 전송 재시도 (2026-11-18 실기) ──────────────────────────────────
+# 드라이버 트래젝토리 서버는 단일-goal 이고, **앞선 goal 이 돌고 있으면 새 goal 을
+# 반려한다**(선점이 아니다 — 75ms 간격도 거부됐다). 그래서 타겟이 정해지는 순간
+# 나가는 표값 lift 가 인식 자세(4관절) goal 에 밀려 버려졌다. 아래 두 값은
+# `_send_lift_pinned` 가 쓰는 대기 상한이다(실측: 응답 44~100ms / 100mm 이동 1~2s).
+_LIFT_SEND_WAIT_SEC = 3.0    # 직전 goal 이 끝나길 기다리는 상한
+_LIFT_ACK_WAIT_SEC  = 0.4    # 수락/거부 응답을 기다리는 창
+_LIFT_SEND_TRIES    = 3      # 거부 시 재시도 횟수
+
 
 def _lift_for_row(ri, nrows):
     """행 인덱스 → lift(m). row1 앵커에서 행 간격을 누적한다. 모르면 None.
@@ -889,7 +898,7 @@ def _lift_row_prior(node, place, tok):
             return
         node._dlog(f"[PRIOR] 승강장 {fl}층 '{tok}' → lift {cur:.3f}→{h:.3f} "
                    f"({(h - cur) * 100:+.1f}cm · 3D 실측 기준)")
-        if not node._send_goal(["joint_lift"], [h]):
+        if not node._send_lift_pinned(h, f"승강장 {fl}층 '{tok}'"):
             node._dlog("[PRIOR] ⛔ lift 명령이 안 나갔다 — 승강장 높이 미적용")
         return
     if place != "cab":
@@ -917,7 +926,7 @@ def _lift_row_prior(node, place, tok):
         return
     node._dlog(f"[PRIOR] '{tok}' = {ri}행 → lift {cur:.3f}→{tgt:.3f} "
                f"({(tgt - cur) * 100:+.1f}cm · 행 간격 실측 기준)")
-    if not node._send_goal(["joint_lift"], [tgt]):
+    if not node._send_lift_pinned(tgt, f"차내 '{tok}' {ri}행"):
         node._dlog("[PRIOR] ⛔ lift 명령이 안 나갔다 — 행 높이 미적용")
 
 
@@ -7892,6 +7901,58 @@ class ElevatorTracker(Node):
                        f"({pwhere}) → 지금 {float(val):.3f}({where}). "
                        "단일-goal 서버라 나중 것이 이긴다")
         self._lift_cmd = (float(val), time.time(), where)
+
+    def _send_lift_pinned(self, h, where, tries=_LIFT_SEND_TRIES) -> bool:
+        """표값 lift 를 **반드시 앉히는** 전송 — 거부되면 직전 goal 을 기다려 재시도.
+
+        2026-11-18 실기에서 `_lift_row_prior` 의 lift 명령이 **4/4 전부 거부**됐다:
+            13:39:24  5F 's'  0.900→0.933    9ms 전 4관절 goal → ⛔ 거부됨
+            13:41:02  차내 '3' 0.933→0.991    6ms 전           → ⛔ 거부됨
+            13:46:54  3F '^'  0.900→0.837   22ms 전           → ⛔ 거부됨
+            13:48:45  차내 '5' 0.837→0.930   75ms 전           → ⛔ 거부됨
+        원인은 선점이 아니라 **반려**다. 그래서 `[LIFT] ⚠ 덮어쓰기 … 나중 것이
+        이긴다` 주석의 전제가 틀렸다 — 나중 것이 버려진다.
+
+        왜 아무도 재시도하지 않았나: `_send_goal` 은 "보냈다"에 True 를 주고, 거부는
+        44~100ms 뒤 `_on_goal_response` 로 **비동기로** 와서 로그만 찍고 버려진다.
+        그래서 `_lift_row_prior` 의 `if not node._send_goal(...)` 가드가 한 번도
+        안 걸렸다(실기 0건 — `[PRIOR] ⛔ lift 명령이 안 나갔다` 가 없다).
+
+        결과: 세 번은 `_servo_step` 의 '표값 복귀'가 몇 초 안에 구했지만 그건 **타겟
+        잠금이 있어야** 도는 경로다. 잠금이 없던 ⑤(13:41:02~47)에서는 리프트가
+        0.940 에 **45초** 앉아 있다가 타겟이 재선택되고서야 올라갔다 — 사용자가
+        "리프트가 멈춰 있다가 늦게 올라갔다"고 본 것이 이것이다.
+
+        하는 일은 셋뿐이다:
+          1) 직전 goal 이 돌고 있으면 끝나길 기다린다 (_LIFT_SEND_WAIT_SEC)
+          2) 보낸 뒤 거부 응답을 짧게 확인한다 (_LIFT_ACK_WAIT_SEC)
+          3) 거부면 재시도 (tries 번까지)
+        🔴 `/select`(Flask 스레드)에서만 부른다 — 스핀 스레드에서 부르면 안 된다
+           (`_send_goal` 자체가 wait_for_server 로 블로킹한다).
+        """
+        want = max(0.15, min(1.10, float(h)))
+        for i in range(1, tries + 1):
+            t0 = time.time()
+            while (not getattr(self, "_goal_done", True)
+                   and time.time() - t0 < _LIFT_SEND_WAIT_SEC):
+                time.sleep(0.05)
+            if not self._send_goal(["joint_lift"], [want]):
+                return False      # 액션서버 없음 — _send_goal 이 이미 로그를 남겼다
+            rejected, t0 = False, time.time()
+            while time.time() - t0 < _LIFT_ACK_WAIT_SEC:
+                if (getattr(self, "_goal_done", False)
+                        and not getattr(self, "_goal_ok", True)):
+                    rejected = True
+                    break
+                time.sleep(0.02)
+            if not rejected:
+                return True
+            if i < tries:
+                self._dlog(f"[LIFT] 거부됨 — {want:.3f} 재전송 "
+                           f"{i}/{tries - 1} ({where})")
+        self._dlog(f"[LIFT] 🚨 {want:.3f} 전송 {tries}회 모두 거부 ({where}) "
+                   "— 표 높이가 적용되지 않았다")
+        return False
 
     def _send_goal(self, joint_names, positions) -> bool:
         """관절 목표 전송. 전송 성공 True / 액션서버 없어 유실되면 False.
