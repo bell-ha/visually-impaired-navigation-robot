@@ -41,6 +41,8 @@ def main():
         import rclpy
         from rclpy.node import Node
         from rcl_interfaces.msg import Log
+        from geometry_msgs.msg import Twist
+        from nav_msgs.msg import Odometry
         try:   # 종료 신호(SIGTERM/SIGINT) 시 rclpy가 던지는 정상 종료 예외
             from rclpy.executors import ExternalShutdownException
         except Exception:
@@ -56,7 +58,83 @@ def main():
             self._dups = 0
             # /rosout 은 신뢰성 있게 받도록 큐 깊이 크게
             self.create_subscription(Log, "/rosout", self._on_rosout, 200)
-            logger.log("BOOT", "nav2 /rosout 캡처 시작 (독립 프로세스, WARN+ 및 nav 노드/키워드)")
+            # ── 바퀴 명령 vs 실제 (2026-11-18 추가) ──────────────────────────────
+            # 🔴 왜 필요한가: 11/18 ② 문앞정렬이 60초간 안 움직였는데, **이 블랙박스가
+            #   /rosout 만 받아서** "nav2 가 0 을 명령했나 / 명령은 나갔는데 바퀴가 안
+            #   받았나"를 **영원히 못 갈랐다.** 그 둘은 처방이 정반대다. DWB 는 그때
+            #   `No valid trajectories` 를 한 번도 안 냈으므로(= 궤적은 있었다) 로그만
+            #   보면 멀쩡해 보인다. 명령값과 실측값을 나란히 적어야 그 구분이 생긴다.
+            # 기록 정책 — 20Hz 를 그대로 적으면 로그가 못 쓰게 된다:
+            #   · 둘 중 하나라도 움직이는 동안 1초에 한 줄
+            #   · 멈춤/출발 전이는 즉시 한 줄
+            #   · **명령은 있는데 실측이 0** 이 1.5초 넘게 이어지면 🚨 한 줄 (회당 1회)
+            self._cmd = (0.0, 0.0, 0.0)    # (vx, wz, 수신시각)
+            self._od  = (0.0, 0.0, 0.0)
+            self._emit_ts  = 0.0
+            self._was_live = False
+            self._stuck_since = None
+            self._stuck_said  = False
+            self.create_subscription(Twist, "/stretch/cmd_vel", self._on_cmd, 20)
+            self.create_subscription(Odometry, "/odom", self._on_odom, 20)
+            self.create_timer(0.5, self._tick)
+            logger.log("BOOT", "nav2 /rosout + /stretch/cmd_vel + /odom 캡처 시작 "
+                               "(독립 프로세스, WARN+ 및 nav 노드/키워드)")
+
+        _EPS_V, _EPS_W = 0.005, 0.010      # m/s, rad/s — 이 아래는 '0' 으로 본다
+
+        def _on_cmd(self, m):
+            try:
+                self._cmd = (float(m.linear.x), float(m.angular.z), time.time())
+            except Exception:
+                pass
+
+        def _on_odom(self, m):
+            try:
+                self._od = (float(m.twist.twist.linear.x),
+                            float(m.twist.twist.angular.z), time.time())
+            except Exception:
+                pass
+
+        def _tick(self):
+            """명령·실측을 한 줄로 묶어 남긴다. 어떤 실패도 삼킨다(블랙박스는 안 죽는다)."""
+            try:
+                now = time.time()
+                cv, cw, cts = self._cmd
+                ov, ow, ots = self._od
+                fresh = (now - cts) < 0.5          # 0.5초 넘게 끊기면 명령 없음으로 본다
+                cv, cw = (cv, cw) if fresh else (0.0, 0.0)
+                cmd_on = abs(cv) > self._EPS_V or abs(cw) > self._EPS_W
+                od_on  = abs(ov) > self._EPS_V or abs(ow) > self._EPS_W
+                live   = cmd_on or od_on
+
+                # 명령은 있는데 바퀴가 안 도는 상태 — 오늘 못 갈랐던 바로 그 경우
+                if cmd_on and not od_on:
+                    if self._stuck_since is None:
+                        self._stuck_since = now
+                    elif not self._stuck_said and now - self._stuck_since > 1.5:
+                        self._stuck_said = True
+                        logger.log("WHEEL", f"🚨 명령은 나가는데 바퀴가 안 돈다 — "
+                                            f"명령 vx {cv:+.3f} wz {cw:+.3f} / "
+                                            f"실측 vx {ov:+.3f} wz {ow:+.3f} "
+                                            f"({now - self._stuck_since:.1f}초째)")
+                else:
+                    self._stuck_since = None
+                    self._stuck_said  = False
+
+                if live != self._was_live:         # 출발·정지 전이는 즉시
+                    self._was_live = live
+                    logger.log("WHEEL", f"{'▶ 출발' if live else '■ 정지'} — "
+                                        f"명령 vx {cv:+.3f} wz {cw:+.3f} / "
+                                        f"실측 vx {ov:+.3f} wz {ow:+.3f}")
+                    self._emit_ts = now
+                    return
+                if live and now - self._emit_ts >= 1.0:
+                    self._emit_ts = now
+                    logger.log("WHEEL", f"명령 vx {cv:+.3f} wz {cw:+.3f} / "
+                                        f"실측 vx {ov:+.3f} wz {ow:+.3f}"
+                                        + ("" if fresh else "  (명령 끊김)"))
+            except Exception:
+                pass
 
         def _on_rosout(self, m):
             try:

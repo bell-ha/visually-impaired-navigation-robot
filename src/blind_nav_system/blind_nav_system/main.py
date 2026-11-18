@@ -4212,10 +4212,17 @@ def _exit_failed(reason: str, cur, res=None):
     # noapp도 예외를 두지 않는다: noapp은 연속 2회 무응답에서 나온 '추정'이지
     # 사망 증명이 아니다. 앱이 살아 있는데 느렸던 경우가 정확히 멈춰야 할
     # 경우이고, 정말 죽었으면 POST가 실패할 뿐 해가 없다.
-    stopped = _elev_post("/step_stop", {}, timeout=3) is not None
+    # 🔴 2026-11-18 — 응답을 버리지 않는다. `/step_stop` 은 `_step_abort` 를 세울 뿐이고
+    #   **누르기 시퀀스는 그 깃발을 안 본다**(런스톱만 듣는다). 그래서 엘베앱이
+    #   `stopped_press=False` 를 같이 돌려준다. 종전에는 `is not None` 만 봐서
+    #   "전송됨 — 중단" 이라고 적었는데, 팔이 버튼으로 나가는 중이면 그 말이 틀렸다.
+    _sr = _elev_post("/step_stop", {}, timeout=3)
     _log("AUTO", "⑥ 하차 실패 → 베이스 정지 요청 " +
                  ("전송됨(_step_abort) — 안무·현재 스텝 중단"
-                  if stopped else "🚨 전송 실패 — 로봇이 계속 움직일 수 있다"))
+                  if _sr is not None else "🚨 전송 실패 — 로봇이 계속 움직일 수 있다")
+                 + ("" if not (_sr or {}).get("pressing") else
+                    "  🚨 단 **누르기 진행 중이라 팔은 안 선다** — "
+                    f"{(_sr or {}).get('press_status')} · 즉시 세우려면 런스톱"))
     moved = f"{abs(cur):.0f}cm" if isinstance(cur, float) else "확인 불가"
     _d    = (res or {}).get("dist_m")
     # cur 도 dist_m 도 없을 수 있다 — 첫 폴링 전에 강제·취소가 들어오거나, /scene
@@ -4433,9 +4440,15 @@ def _auto_cancel_in_cabin(dest_floor, where: str):
     이것이 종전(앱 종료)보다 나쁠 수 없는 이유다."""
     global _rescue_hold
     _rescue_hold = True
-    stopped = _elev_post("/step_stop", {}, timeout=3) is not None
+    # 🔴 2026-11-18 — 응답을 버리지 않는다. `/step_stop` 은 `_step_abort` 를 세울 뿐이고
+    #   **누르기 시퀀스는 그 깃발을 안 본다**(런스톱만 듣는다). 그래서 엘베앱이
+    #   `stopped_press=False` 를 같이 돌려준다. 종전에는 `is not None` 만 봐서
+    #   "전송됨 — 중단" 이라고 적었는데, 팔이 버튼으로 나가는 중이면 그 말이 틀렸다.
+    _sr = _elev_post("/step_stop", {}, timeout=3)
     _log("AUTO", f"⏹ 캐빈 안 중단 [{where}] — 바퀴 정지 요청 "
-                 + ("전송됨" if stopped else "🚨 전송 실패")
+                 + ("전송됨" if _sr is not None else "🚨 전송 실패")
+                 + ("" if not (_sr or {}).get("pressing") else
+                    "  🚨 누르기 진행 중 — 팔은 안 선다(런스톱만)")
                  + " · 엘베앱 유지(조종 패드 보존) · 층 확정 안 함")
     _jr("gate", "cancel_in_cabin", where=where, dest=dest_floor, floor=_current_floor)
     _auto_notify("안내를 멈췄습니다. 엘리베이터 안입니다. "
@@ -5816,7 +5829,11 @@ def auto_force():
         _jr("human", "force_paused", step=step, remote_addr=request.remote_addr)
         return jsonify(ok=False, error="멈춤 중 — ▶ 재개 후 다시"), 409
     # 1) 정지가 먼저 (_step_abort → 안무 스레드와 현재 스텝 중단)
-    stopped = _elev_post("/step_stop", {}, timeout=3) is not None
+    # 🔴 2026-11-18 — 누르기 시퀀스는 _step_abort 를 안 본다(런스톱만). 엘베앱이
+    #   pressing 을 같이 돌려주므로 그 사실을 로그·응답에 싣는다.
+    _sr = _elev_post("/step_stop", {}, timeout=3)
+    stopped = _sr is not None
+    _press_on = bool((_sr or {}).get("pressing"))
     # 2) 무엇을 어떤 상태에서 강제했는지 남긴다 — 다음 로그 판독에 이게 필요하다
     res = (_elev_status(timeout=1.5) or {}).get("scene_result") or {}
     where = (f"씬{res.get('n')} " + ("실행 중" if res.get("running") else
@@ -5826,14 +5843,16 @@ def auto_force():
     _log("AUTO", f"⏭ 강제로 넘어가기 — [{step}] 에서 사람이 눌렀다. "
                  + ("베이스 정지 요청 전송됨" if stopped
                     else "🚨 정지 요청 전송 실패 — 로봇이 계속 움직일 수 있다")
+                 + ("" if not _press_on else
+                    "  🚨 누르기 진행 중이라 팔은 안 선다 — 런스톱만 듣는다")
                  + f" / 그 시점: {where}")
-    _jr("human", "force", step=step, stopped=stopped, where=where,
+    _jr("human", "force", step=step, stopped=stopped, pressing=_press_on, where=where,
         remote_addr=request.remote_addr)
     # 3) 그다음에 진행
     with _auto_lock:
         _AUTO["force"] = True
         _AUTO["waiting"] = False
-    return jsonify(ok=True, stopped=stopped)
+    return jsonify(ok=True, stopped=stopped, pressing=_press_on)
 
 @app.route("/auto_cancel", methods=["POST"])
 def auto_cancel():

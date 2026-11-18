@@ -3345,11 +3345,36 @@ def step_move():
 
 @app.route("/step_stop", methods=["POST"])
 def step_stop():
-    """진행 중인 수동 스텝 즉시 중단 (Esc)."""
+    """진행 중인 스텝·안무 중단 (Esc). `_step_abort` 를 세우는 것이 전부다.
+
+    🔴 2026-11-18 — **누르기 시퀀스는 이 깃발을 읽지 않는다.** 그런데 종전에는
+      무조건 `ok=True` 만 돌려줘서, 부르는 쪽이 "멈췄다"로 읽었다. 못 멈추는데
+      성공으로 답하는 것은 이 저장소의 뿌리 B(실패가 전달되지 않는다) 그 자체다
+      (2026-09-23 보류목록 1-A, 두 달째 그대로였다).
+      · `_step_abort` 를 보는 곳: 안무 루프(`_run_scene_moves_inner`)·수동 스텝
+      · 안 보는 곳: **누르기 시퀀스 1/6~6/6 전체** — 팔이 버튼으로 나가는 구간이다.
+        거기서 실제로 듣는 것은 **런스톱뿐**이다.
+      그래서 `pressing` 중이면 `stopped_press=False` 와 사유를 **같이** 돌려주고
+      로그에도 남긴다. HTTP 는 200·ok=True 를 유지한다 — 깃발을 세우는 일 자체는
+      성공했고, 여기를 409 로 바꾸면 `_elev_post` 가 None 을 돌려받아 대시보드의
+      구조 경로가 "전송 실패"로 오독한다(그쪽이 더 나쁜 거짓말이다).
+    """
     node = _node_ref[0]
     if node:
         node._step_abort = True
-    return jsonify(ok=True)
+    with state_lock:
+        _pressing = bool(state.get("pressing"))
+        _pstat    = state.get("press_status")
+    if _pressing and node:
+        node._dlog("[STOP] ⚠ 누르기 진행 중 — /step_stop 은 이 구간을 멈추지 못한다 "
+                   f"(현재: {_pstat}). 팔은 시퀀스가 끝나야 선다. "
+                   "지금 즉시 세우려면 런스톱이다")
+    return jsonify(ok=True, step_abort=True,
+                   pressing=_pressing,
+                   stopped_press=(not _pressing),
+                   press_status=_pstat,
+                   error=(None if not _pressing else
+                          "누르기 시퀀스는 중단되지 않는다 — 런스톱만 듣는다"))
 
 @app.route("/gripper", methods=["POST"])
 def gripper_ctrl():
@@ -6307,6 +6332,14 @@ class ElevatorTracker(Node):
                     self._target_lock = {
                         "cx": (chosen["box"]["x1"] + chosen["box"]["x2"]) / 2,
                         "cy": (chosen["box"]["y1"] + chosen["box"]["y2"]) / 2,
+                        # 🔴 박스 자체도 싣는다 (2026-11-18) — 점등 측정용.
+                        #   `start_press` 가 det 없이 '단일 관측(잠금) 기반'으로 진행하면
+                        #   `_press_roi` 가 None 이 되고, 네 장 전부 ROI 없이 저장돼
+                        #   **점등을 아예 못 잰다.** 11/18 실측 3건 중 1건(차내 '3')이 그랬고
+                        #   과거 전수에서도 40건 중 7건이 같은 이유로 측정 불가였다.
+                        #   cx/cy 만으로는 박스 크기를 복원할 수 없어 값을 통째로 둔다.
+                        #   ⚠ 조준·누르기에는 안 쓴다 — 증거 메타(roi_ocr) 전용이다.
+                        "box": dict(chosen["box"]),
                         "ts": now,
                         "born": now if _new_lock else lk["born"],
                         "bel": (0.7 * prev + 0.3 * new_b) if prev is not None else new_b}
@@ -7508,6 +7541,15 @@ class ElevatorTracker(Node):
         # press 시작 시점의 ROI(OCR 입력 좌표계 박스)를 프레임 메타에 실으려고 집어 둔다.
         # 여기가 det 을 손에 들고 있는 유일한 지점이다. 없으면 None 이고 그대로 기록된다.
         self._press_roi = dict((det or {}).get("box") or {}) or None
+        if self._press_roi is None:
+            # det 이 없는 경로('단일 관측(잠금) 기반 진행')에서는 잠금이 들고 있는
+            # 박스를 쓴다. 안 그러면 이 회차는 점등 측정이 통째로 비어 버린다.
+            # 신선도는 위 20초 창이 이미 확인했다(여기 오면 잠금이 유효하다).
+            _lkb = (getattr(self, "_target_lock", None) or {}).get("box")
+            if _lkb:
+                self._press_roi = dict(_lkb)
+                self._dlog("[PFRAME] ROI 를 타겟 잠금 박스로 대체 — 이번 회차는 "
+                           "관측 det 없이 진행한다(점등 측정을 비우지 않기 위함)")
         threading.Thread(target=self._press_sequence, args=(d, ext, tgt),
                          daemon=True).start()
         return None
