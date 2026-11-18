@@ -2059,8 +2059,30 @@ class InterfaceApp:
     # ──────────────────────────────────────────
     # STT 결과: 3세션 무응답
     # ──────────────────────────────────────────
+    def _journey_drop(self, why: str) -> None:
+        """안내를 끝내는 자리에서 **대시보드 여정도 같이 끝낸다.**
+
+        🔴 2026-11-18: 주행 중 버튼이 멈춤으로 이어지게 되면서(/auto_pause) 새 막다른
+           길이 생겼다 — 버튼으로 멈춘 뒤 사용자가 아무 말도 안 하면 음성은
+           MSG[17]("응답이 없어 안내를 종료합니다") + LOCKED 로 끝나는데,
+           `_AUTO["paused"]` 는 True 로 남는다. `_auto_pause_wait` 에는 **타임아웃이
+           없어서**(`while paused and not cancel`) 여정 스레드가 영원히 park 되고,
+           로봇은 선 채로 남는다. 운영자가 화면에서 ▶/⏹ 를 눌러야 풀린다 —
+           시각장애인 혼자면 빠져나갈 길이 없다.
+
+        🔴 _go_locked 안에 넣으면 안 된다 — ■ 정지(/stop)도 interface 로 /cancel 을
+           보내 _go_locked 를 타고, 그쪽은 **멈춤이지 종료가 아니다**(풀기는
+           /auto_resume). 거기서 취소하면 ■ 정지가 여정을 죽이게 된다.
+           그래서 "안내를 끝낸다"고 말하는 자리에서만 부른다.
+        """
+        if not self._journey_active():
+            return
+        ok, d = self._dash("/auto_cancel", {})
+        print(f"[DASH] 안내 종료({why}) → /auto_cancel ok={ok} {d}", flush=True)
+
     def _handle_stt_timeout(self) -> None:
         self._say(MSG[17])
+        self._journey_drop("무응답 3세션")
         self._go_locked()
 
     # ──────────────────────────────────────────
@@ -2096,6 +2118,7 @@ class InterfaceApp:
         if self.pending and now >= self.pending.deadline:
             self._clear_pending()
             self._say(MSG[17])
+            self._journey_drop("확인 시간초과")
             self._go_locked()
             return
 
