@@ -1735,10 +1735,16 @@ class InterfaceApp:
         #      · resume        → /auto_resume (여정을 계속. 목적지가 같으므로
         #                        아래 _go_nav 와 여정의 /goto 재발행은 같은 곳을 본다)
         #      · abort/change  → /auto_cancel (여정을 떠난다 — 되살아나면 안 된다)
-        if self._journey_active():
-            _ep = "/auto_resume" if pc.action == "resume" else "/auto_cancel"
-            _ok, _d = self._dash(_ep, {})
-            print(f"[DASH] 멈춤 결말({pc.action}) → {_ep} ok={_ok} {_d}", flush=True)
+        _was_journey = self._journey_active()
+        if _was_journey:
+            if pc.action == "resume":
+                _ok, _d = self._dash("/auto_resume", {})
+                print(f"[DASH] 멈춤 결말(resume) → /auto_resume ok={_ok} {_d}",
+                      flush=True)
+            else:
+                # 떠나는 결말 — 취소가 **정리될 때까지** 기다린다. 기다리지 않으면
+                # 아래 change_start 의 새 여정이 '이미 여정 진행 중'으로 거부된다.
+                self._journey_cancel_wait(pc.action)
 
         if pc.action == "resume":
             # PAUSED → READY → NAV
@@ -1768,6 +1774,14 @@ class InterfaceApp:
 
         elif pc.action == "change_start":
             if pc.destination:
+                # 🔴 여정이었다면 **대시보드에 넘긴다.** _go_nav 는 같은 층 전용이고
+                #    (_start_journey 독스트링: "다른 층이면 틀린 곳으로 간다"),
+                #    2026-11-11 부터 지도·호실좌표가 층마다 달라 다른 층을 고르면
+                #    그 호실 좌표를 **지금 층 지도에서** 찾아 엉뚱한 복도로 간다.
+                #    /auto_goto 는 층을 비교해 필요하면 엘베 여정을 새로 짠다.
+                if _was_journey:
+                    self._start_journey(pc.destination)
+                    return
                 self.last_target = pc.destination
                 self.state = State.READY
                 self.phase = Phase.NONE
@@ -2077,8 +2091,35 @@ class InterfaceApp:
         """
         if not self._journey_active():
             return
-        ok, d = self._dash("/auto_cancel", {})
+        ok, d = self._dash("/auto_cancel", {"notify_iface": False})
         print(f"[DASH] 안내 종료({why}) → /auto_cancel ok={ok} {d}", flush=True)
+
+    def _journey_cancel_wait(self, why: str, timeout: float = 6.0) -> bool:
+        """여정을 취소하고 **정리될 때까지** 기다린다. 끝났으면 True.
+
+        왜 기다리는가: /auto_goto 는 `_AUTO["active"]` 면 '이미 여정 진행 중'으로
+        거부한다. /auto_cancel 은 cancel 플래그만 세우고 여정 스레드가 스스로
+        풀려야 active 가 내려가므로, 바로 새 여정을 넣으면 거부된다.
+        실측 unwind 시간: 2026-11-18 당김 13:44:59.330 → run_end 13:45:02.370 ≈ 3.0s
+        (도중에 _nav_release_wheels 등이 돈다). 그래서 상한을 6초로 둔다.
+
+        notify_iface=False: 되돌아온 /cancel 이 `_go_locked` 로 우리 상태를 덮는다
+        (위 _journey_drop 주석의 13:45:02 실측).
+
+        ⚠ 이벤트 루프 스레드에서 블로킹한다 — 그동안 버튼·당김이 큐에 쌓인다.
+          로봇은 이미 멈춰 있고(호출 전에 _go_paused 를 지났다) 수초짜리 과도구간이다.
+        """
+        ok, d = self._dash("/auto_cancel", {"notify_iface": False})
+        print(f"[DASH] 여정 취소({why}) → ok={ok} {d}", flush=True)
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if not self._journey_active():
+                print(f"[DASH] 여정 정리 완료({why}, {time.time()-t0:.1f}s)", flush=True)
+                return True
+            time.sleep(0.2)
+        print(f"[DASH] ⚠ 여정이 {timeout:.0f}초 안에 정리되지 않았다({why}) — "
+              "새 여정이 거부될 수 있다", flush=True)
+        return False
 
     def _handle_stt_timeout(self) -> None:
         self._say(MSG[17])

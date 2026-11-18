@@ -5819,10 +5819,29 @@ def auto_force():
 
 @app.route("/auto_cancel", methods=["POST"])
 def auto_cancel():
+    """⏹ 여정 취소. notify_iface=False 면 interface 로 /cancel 을 되돌려 보내지 않는다.
+
+    🔴 되돌림이 필요한 쪽과 해로운 쪽이 다르다:
+      · 화면의 ⏹ · 당김 → 인터페이스는 아무것도 모르므로 /cancel 로 세워야 한다(기본값)
+      · 인터페이스가 **스스로** 부른 취소(목적지 변경·종료·무응답) → 그 되돌림이
+        이벤트 큐에 들어와 `_go_locked("수동 모드 전환")` 으로 **방금 정한 상태를
+        덮는다.** 2026-11-18 13:45:02 실측: 당김이 "문제가 있으신가요?"를 말하고
+        3.4초 뒤 스스로 LOCKED 가 되어 사용자가 답할 틈이 없었다. 그쪽 경로는
+        인터페이스가 자기 상태를 이미 정했으므로 되돌림이 해롭기만 하다.
+    """
+    _notify = True
+    try:
+        _notify = bool((request.json or {}).get("notify_iface", True))
+    except Exception:
+        pass                      # 본문 없음·파싱 실패 = 기존 동작(되돌림 보냄)
     with _auto_lock:
         _AUTO["cancel"] = True; _AUTO["waiting"] = False
     _jr("human", "cancel", step=_AUTO.get("step"), remote_addr=request.remote_addr)
-    _write("iface", "/cancel")
+    if _notify:
+        _write("iface", "/cancel")
+    else:
+        _log("AUTO", "⏹ 취소 — interface 가 스스로 부른 것이므로 /cancel 을 "
+                     "되돌려 보내지 않는다(그쪽 상태를 덮지 않게)")
     return jsonify(ok=True)
 
 
