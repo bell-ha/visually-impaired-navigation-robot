@@ -959,6 +959,27 @@ PRESS_Q_MAX      = 16     # 대기 큐 상한 — 넘으면 오래된 것부터 
 PRESS_JPEG_Q = {"A_before": 75, "B_push": 55, "C_after": 92, "D_after2s": 75}
 PRESS_SAVE_B = True       # B 가 필요 없으면 False — A·C 만으로 판정은 성립한다
 
+# ── 점등 측정 (2026-11-18) ────────────────────────────────────────────
+# 버튼이 켜지면 램프가 **포화**한다 — R 만 오르는 게 아니라 R·G·B 가 다 오른다.
+# 그래서 '붉기'(R-(B+G)/2)로는 안 갈린다: 과거 32건에서 켜진 사진도 안 켜진 사진도
+# 전부 +2~+8%p 였다(처음 그 지표로 재서 "분리 안 됨" 이라고 잘못 읽었다).
+# 갈리는 건 **밝기**다 — ROI 안에서 R 채널이 LIT_R_MIN 을 넘는 화소의 비율.
+#   과거 스냅샷 전수(roi_raw 가 있는 32건) 실측:
+#     꺼짐 0.0~9.8% (n=21)  /  켜짐 13.0~48.8% (n=21)   ← 겹치는 구간이 0
+#   타겟 특이성도 확인 — 차내 '3' 누른 회차: '3' +21.5%p vs '2' +0.4 '5' +0.2 문열림 +0.2
+#
+# 🔴 **측정만 한다. 성공/실패로 부르지 않는다.**
+#   32건 중 9건이 "변화 없음"인데, 그 중 하나(11/18 승강장 's')는 여정이 성공했다 —
+#   엘리베이터가 왔다. 즉 변화 없음 ≠ 누르기 실패다. 사람이 먼저 눌렀거나(11/18 '^'
+#   스냅샷에는 사람 손가락이 찍혀 있다) 그 각도에서 램프가 안 보였을 수도 있다.
+#   그 9건의 정체를 가르기 전에 사용자에게 "불이 안 켜졌습니다"라고 말하면
+#   시각장애인이 확인할 수 없는 오보가 된다(뿌리 B). 그래서 지금은 로그·화면까지만.
+LIT_R_MIN     = 200    # R 채널이 이 값을 넘는 화소를 '밝다'로 센다
+LIT_ON_RATIO  = 11.0   # % — 켜짐/꺼짐 경계. 실측 두 분포(9.8 / 13.0) 사이
+LIT_DELTA_MIN = 10.0   # %p — 이만큼 올랐으면 '눌러서 켜졌다'
+LIT_POSE_TOL_M = 0.004 # m — A/D 자세가 이 안이면 '같은 자세'. 엔코더가 5~7째
+                       #     자리에서 흔들려 == 비교는 항상 거짓이 된다
+
 _press_q        = collections.deque()
 _press_q_lock   = threading.Lock()
 _press_q_ev     = threading.Event()
@@ -1067,6 +1088,78 @@ def _press_worker_loop(node):
             _press_frame_write(node, *item)
 
 
+def _lit_ratio(frame, roi):
+    """ROI 안에서 R>LIT_R_MIN 인 화소의 비율(%). 못 재면 None.
+
+    roi 는 **raw_full 좌표계**(= frame 과 같은 축)여야 한다 — meta["roi_raw"] 다.
+    표시좌표(roi_ocr)를 그대로 넣으면 레터박스만큼 밀린 엉뚱한 패치를 잰다.
+    """
+    if frame is None or not roi:
+        return None
+    try:
+        h, w = frame.shape[:2]
+        x1 = max(0, int(roi["x1"])); y1 = max(0, int(roi["y1"]))
+        x2 = min(w, int(roi["x2"])); y2 = min(h, int(roi["y2"]))
+        if x2 - x1 < 4 or y2 - y1 < 4:
+            return None            # 박스가 프레임을 벗어났거나 너무 작다
+        p = frame[y1:y2, x1:x2]
+        r = p[:, :, 2] if p.ndim == 3 else p       # BGR — R 은 2번 채널
+        return round(float((r > LIT_R_MIN).mean()) * 100.0, 2)
+    except Exception:
+        return None
+
+
+def _press_lit_compare(node, run_dir, meta_d):
+    """A(누르기 직전) 와 D(복귀+2초) 의 점등값을 대조해 로그·화면에 남긴다.
+
+    **판정이 아니라 기록이다.** 이 결과로 바뀌는 분기는 하나도 없다 — press_ok_ts
+    도 press_fail_ts 도 건드리지 않는다. 이유는 LIT_* 상수 위 주석에 있다.
+    """
+    try:
+        b = meta_d.get("lit_ratio")
+        a, same_pose, ma = None, None, {}
+        try:
+            with open(os.path.join(run_dir, "A_before.json"), encoding="utf-8") as f:
+                ma = json.load(f)
+            a = ma.get("lit_ratio")
+            # 같은 자세에서 찍힌 두 장이어야 밝기 차이를 '점등'으로 읽을 수 있다.
+            # 🔴 == 로 비교하면 **항상 다르다고 나온다** — 엔코더값이 5~7째 자리에서
+            #   흔들린다(실측: lift 3e-6, arm_ext 5e-5 차이). 과거 39건 전부에
+            #   "자세 다름" 경고가 붙었다. 눈에 보이는 차이가 나는 폭으로 재야 한다.
+            same_pose = all(
+                x is not None and y is not None and abs(x - y) <= LIT_POSE_TOL_M
+                for x, y in ((ma.get("lift"), meta_d.get("lift")),
+                             (ma.get("arm_ext"), meta_d.get("arm_ext"))))
+        except Exception:
+            pass
+        # D 의 target 은 비어 있는 게 보통이다 — +2초 기다리는 사이에 그리퍼 열기가
+        # 끝나 target_text 가 해제되는 경우가 있다(과거 39건 전부 None). A 를 쓴다.
+        tgt = ma.get("target") or meta_d.get("target") or "?"
+        if a is None or b is None:
+            node._dlog(f"[LIT] '{tgt}' 점등 측정 불가 — A={a} D={b} "
+                       "(ROI 없음·프레임 없음·A 메타 없음 중 하나)")
+            return
+        d = b - a
+        if d >= LIT_DELTA_MIN or (a < LIT_ON_RATIO <= b):
+            # 경계를 넘어선 것 자체가 신호다. 실측 4.7%→13.0% 은 상승폭이 8.2%p 로
+            # LIT_DELTA_MIN 에 못 미치지만, 꺼짐 분포를 벗어나 켜짐 분포로 들어갔다.
+            v = "눌러서 켜짐"
+        elif a >= LIT_ON_RATIO and b >= LIT_ON_RATIO:
+            v = "누르기 전부터 켜져 있었음"
+        elif a >= LIT_ON_RATIO > b:
+            v = "켜져 있다가 꺼짐(엘베 도착?)"
+        else:
+            v = "변화 없음"
+        line = f"'{tgt}' 점등 {a:.1f}% → {b:.1f}% ({d:+.1f}%p) = {v}"
+        if same_pose is False:
+            line += " ⚠A/D 자세 다름 — 밝기 비교 신뢰 낮음"
+        node._dlog(f"[LIT] {line}  (기록만 — 판정·분기에 쓰지 않는다)")
+        with state_lock:
+            state["lit_note"] = line
+    except Exception:
+        pass
+
+
 def _press_frame_write(node, run_dir, tag, frame, extra, snap, lb, ts):
     """실제 인코딩·디스크 쓰기. 워커 스레드에서만 불린다.
 
@@ -1117,10 +1210,16 @@ def _press_frame_write(node, run_dir, tag, frame, extra, snap, lb, ts):
             # 나중에 정규화할 수 있도록 전체 프레임 평균 밝기를 남긴다.
             # (AE 고정 파라미터는 넣지 않는다 — 그건 카메라 구성 변경이라 별건이다)
             meta["frame_mean"] = round(float(frame.mean()), 3)
+            # 점등 측정 — ROI(버튼 박스) 안에서 R>200 인 화소 비율(%).
+            # roi_raw 가 없으면(레터박스 미수신·박스 없음) None 이고 그대로 남는다.
+            meta["lit_ratio"] = _lit_ratio(frame, meta["roi_raw"])
         with open(os.path.join(run_dir, f"{tag}.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=1)
         if tag == "A_before":
             _press_frames_prune()
+        if tag == "D_after2s":
+            # A 는 이 시점에 이미 디스크에 있다(큐가 순서를 지키고 D 는 +2초 뒤 촬영).
+            _press_lit_compare(node, run_dir, meta)
     except Exception as e:
         try:
             node._dlog(f"[PFRAME] ⛔ {tag} 저장 실패 — {e} (press 는 계속한다)")
@@ -1397,6 +1496,7 @@ state = {
     "align_block_ts": 0.0,  # 그 사유를 마지막으로 갱신한 시각(낡은 값 구분용)
     "pressing":     False,  # 누르기 시퀀스 진행 중
     "press_status": None,   # 누르기 진행 메시지
+    "lit_note":     None,   # 직전 회차의 점등 측정 한 줄 (표시·기록 전용, 판정 아님)
     "authority":    False,   # 이동 제어권 — 대시보드(8080)가 부여/회수하는 주도권.
                             # False면 모든 이동(서보·스캔·패드·안무·press) 거부,
                             # 카메라·OCR·UI 관찰은 유지. fail-closed: 기본 False,
@@ -1752,6 +1852,7 @@ HTML = """
     </select>
     <span id="clr-info" style="font-size:0.76rem;color:#8ac;white-space:nowrap;"></span>
     <span id="acc-info" style="font-size:0.76rem;color:#a9c;white-space:nowrap;"></span>
+    <span id="lit-info" style="font-size:0.76rem;color:#dc8;white-space:nowrap;"></span>
   </div>
   <!-- 영점 조절: press가 빗나간 "방향"을 입력 → 십자가 그쪽으로 이동 (파일 영속) -->
   <div style="display:flex;gap:8px;align-items:center;">
@@ -2116,6 +2217,8 @@ HTML = """
         if (ci) ci.innerHTML =
           `앞 <b style="color:${clrCol(s.clear_f)}">${s.clear_f == null ? '?' : s.clear_f.toFixed(2)}m</b>` +
           ` 뒤 <b style="color:${clrCol(s.clear_b)}">${s.clear_b == null ? '?' : s.clear_b.toFixed(2)}m</b>`;
+        const li = document.getElementById('lit-info');
+        if (li) li.textContent = s.lit_note ? ('\uD83D\uDCA1 ' + s.lit_note) : '';
         const ai = document.getElementById('acc-info');
         if (ai && s.scene_acc) ai.textContent =
           `누적 ${s.scene_acc.fwd_cm >= 0 ? '+' : ''}${s.scene_acc.fwd_cm.toFixed(1)}cm / ` +
@@ -2378,6 +2481,7 @@ def status():
                    centered=s["centered"], ex=ex, ey=ey,
                    dist=s.get("target_dist"),
                    pressing=s.get("pressing"), press_status=s.get("press_status"),
+                   lit_note=s.get("lit_note"),
                    lift=s.get("lift"), wall_tilt=s.get("wall_tilt"),
                    wall_flat=s.get("wall_flat"),
                    base_align=s.get("base_align"), align_note=s.get("align_note"),
@@ -7414,6 +7518,7 @@ class ElevatorTracker(Node):
 
         with state_lock:
             state["pressing"] = True
+            state["lit_note"] = None     # 지난 회차 값이 남아 화면에 섞이지 않게
             _scene0 = state.get("scene")
         # 고정 모드(표를 아는 상태)인가 — 이 시퀀스 내내 같은 답을 쓴다.
         _pin_p, _ = _lift_pin()
