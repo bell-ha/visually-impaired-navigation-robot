@@ -1666,7 +1666,21 @@ class InterfaceApp:
         if self._journey_active():
             ok, d = self._dash("/auto_confirm", {})
             print(f"[DASH] 버튼 → /auto_confirm ok={ok} {d}", flush=True)
-            return
+            # 🔴 거부(409)를 그냥 삼키면 안 된다 — 2026-11-18 실기에서 주행 중
+            #    여섯 번 눌렀고 여섯 번 다 아무 반응이 없었다(`동작 중 — 잠김`).
+            #    확인을 기다리는 단계가 아니면 **아래 상태기계가 받아야** 하고,
+            #    NAV 면 `_go_paused()` 가 로봇을 세우고 MSG[8]
+            #    ("일시정지되었습니다. 문제가 있으신가요?")을 말한 뒤 마이크를 연다.
+            #    = 거기서 "목적지 바꿔"/"종료"/"계속"을 말할 수 있다.
+            #    대시보드도 같이 멈춘다 — 인터페이스만 멈추면 여정 스레드는 계속
+            #    주행 중이라 믿고 도착 대기가 시간초과된다. 멈춤이면
+            #    `_auto_wait_arrival` 이 멈춘 시간을 빼고 풀릴 때 목표를 다시 낸다.
+            #    NAV 가 아닌 상태(확인 대기·멈춤 중 등)는 종전대로 여기서 끝낸다 —
+            #    그 상태들의 버튼 의미는 이미 /auto_confirm 쪽에 있다.
+            if ok or self.state != State.NAV:
+                return
+            ok2, d2 = self._dash("/auto_pause", {})
+            print(f"[DASH] 버튼(주행 중) → /auto_pause ok={ok2} {d2}", flush=True)
 
         # ── LOCKED ──────────────────────────────
         if s == State.LOCKED:
@@ -1711,6 +1725,20 @@ class InterfaceApp:
         if not pc:
             return
         self._clear_pending()
+
+        # 🔴 2026-11-18: 주행 중 버튼이 멈춤으로 이어지게 되면서 **여정이 살아 있는
+        #    채로** 이 분기에 올 수 있게 됐다 (그 전에는 여정 중 버튼이 전부
+        #    /auto_confirm 에서 끝나 여기 못 왔다). 멈춘 여정을 그냥 두면
+        #    `_auto_wait_arrival` 이 ▶ 재개 때 **옛 목적지로 /goto 를 다시 낸다** —
+        #    아래에서 새 목적지로 떠난 뒤라면 Nav2 목표를 두 주체가 각자 내는 상태가
+        #    된다. 그래서 결말마다 대시보드에 먼저 알린다:
+        #      · resume        → /auto_resume (여정을 계속. 목적지가 같으므로
+        #                        아래 _go_nav 와 여정의 /goto 재발행은 같은 곳을 본다)
+        #      · abort/change  → /auto_cancel (여정을 떠난다 — 되살아나면 안 된다)
+        if self._journey_active():
+            _ep = "/auto_resume" if pc.action == "resume" else "/auto_cancel"
+            _ok, _d = self._dash(_ep, {})
+            print(f"[DASH] 멈춤 결말({pc.action}) → {_ep} ok={_ok} {_d}", flush=True)
 
         if pc.action == "resume":
             # PAUSED → READY → NAV

@@ -5826,6 +5826,40 @@ def auto_cancel():
     return jsonify(ok=True)
 
 
+@app.route("/auto_pause", methods=["POST"])
+def auto_pause():
+    """⏸ 멈춤 — 돌고 있는 여정만 멈춘다(풀기는 /auto_resume). 아니면 409.
+
+    왜 필요한가 (2026-11-18 실기): 손잡이 버튼이 **주행 중**에 눌리면 인터페이스가
+    NAV→PAUSED 로 가도록 원래 설계돼 있었다(`_handle_button` 의 `State.NAV` 분기).
+    그런데 여정 중에는 버튼이 전부 /auto_confirm 으로 가로채여 409 로 거부되고
+    `return` 으로 끝났다 — 그 분기가 죽어 있었다. 사용자가 13:37:39·13:44:23~55 에
+    여섯 번 눌렀고 여섯 번 다 **침묵**이었다(음성 0건).
+
+    그 분기를 살리려면 **대시보드도 같이 멈춰야** 한다. 인터페이스만 멈추면
+    (_go_paused → nav.stop) 여정 스레드는 계속 주행 중이라 믿고, 도착 대기가
+    시간초과돼 '목적지 도착 실패'로 끝난다. 멈춤이면 `_auto_wait_arrival` 이
+    멈춘 시간을 시간초과에서 빼고 풀릴 때 목표를 다시 낸다 — 그 경로를 탄다.
+
+    ■ 정지(/stop)와 다른 점: /stop 은 인터페이스에 /cancel 을 되돌려 보내
+    LOCKED(무음)로 만든다. 여기서는 인터페이스가 **스스로** PAUSED 로 가서
+    "문제가 있으신가요?"를 말하므로, 되돌려 보내면 그 음성을 덮는다.
+    그래서 이 라우트는 멈춤 플래그만 세운다(바퀴는 부른 쪽이 이미 세웠다).
+    """
+    with _auto_lock:
+        active  = bool(_AUTO.get("active"))
+        already = bool(_AUTO.get("paused"))
+        ok = active and not already
+        if ok:
+            _AUTO["paused"] = True
+        step = _AUTO.get("step", "")
+    if not ok:
+        return jsonify(ok=False,
+                       error=("이미 멈춤" if already else "여정이 없습니다")), 409
+    _log("AUTO", f"⏸ 멈춤 — [{step}] 손잡이·외부 요청 ({request.remote_addr})")
+    _jr("human", "pause", step=step, remote_addr=request.remote_addr)
+    return jsonify(ok=True)
+
 @app.route("/auto_resume", methods=["POST"])
 def auto_resume():
     """▶ 재개 — 멈춘 여정만 푼다(STOP S2). 여정이 없거나 멈춤이 아니면 409.
