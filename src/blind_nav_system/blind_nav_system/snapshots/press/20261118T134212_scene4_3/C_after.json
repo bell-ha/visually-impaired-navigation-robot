@@ -1,0 +1,29 @@
+{
+ "tag": "C_after",
+ "ts": 1794976939.4328043,
+ "time": "2026-11-18T13:42:19",
+ "scene": 4,
+ "target": "3",
+ "press_status": "5/6 복귀 중… →0.304m",
+ "lift": 0.9906067054419078,
+ "arm_ext": 0.3131232191020324,
+ "frame_source": "raw_full(rotated)",
+ "rot_grip": 0,
+ "letterbox": {
+  "scale": 0.7547169811320755,
+  "off_x": 0,
+  "off_y": 59
+ },
+ "roi_ocr": null,
+ "jpeg_quality": 92,
+ "missing": [],
+ "roi_raw": null,
+ "shortfall_mm": -0.10245511172557453,
+ "note": "복귀 완료 직후 — 증거 프레임(판정 아님)",
+ "image": "C_after.jpg",
+ "frame_hw": [
+  480,
+  848
+ ],
+ "frame_mean": 111.366
+}
