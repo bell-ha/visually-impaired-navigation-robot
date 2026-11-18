@@ -3998,9 +3998,13 @@ def _nav_release_wheels(arrived, where):
 
 @_jr_traced("auto_front_nav2")
 def _auto_front_nav2():
-    """② 문앞 — 3단 안무 대신 Nav2 로 간다. 계속할지(bool) 반환.
+    """② 문앞 — 팔을 수납하고, ④⑥ 과 같은 좌표 안무로 문 앞에 선다. 계속할지(bool) 반환.
 
-    ■ 왜 바꾸나 (2026-09-09 사용자)
+    🔴 이름이 `_nav2` 인 것은 **이력일 뿐이다 — 지금 이 함수는 Nav2 를 쓰지 않는다**
+       (2026-11-18 되돌림. 사유는 아래 본문 블록에 있다). 되돌리기 diff 를 작게
+       유지하려고 이름만 남겼다. 호출부를 찾을 때 헷갈리지 말 것.
+
+    ■ (이력) 왜 Nav2 로 바꿨었나 (2026-09-09 사용자)
       "좌표로 이동하는 게 너무 이상했어… 문 앞에 위치하는 것도 너무 멀리 떨어져있었고"
       9/9 실기 ② 기록: 잔여 dist 0.100m / yaw +2.4° / 회전 13회 · |회전|합 297°.
       Nav2 는 같은 구간을 xy_goal_tolerance 0.03 · yaw_goal_tolerance 0.05(2.9°)로 선다.
@@ -4027,11 +4031,12 @@ def _auto_front_nav2():
     """
     with _auto_lock:
         _AUTO["force"] = False
-    p = _loc(_FRONT_LOC)
-    if not p:
-        _auto_set("오류", f"'{_FRONT_LOC}' 좌표가 location.yaml 에 없음 — ② 중단")
-        return False
-    _auto_set("② 문앞정렬", "Nav2 주행 준비 — 팔 수납·제어권 회수 중...",
+    # 🔴 `_loc(_FRONT_LOC)` 사전 확인을 뺐다(2026-11-18) — 목표가 location.yaml 이
+    #   아니라 scene_targets.yaml "1" 에서 오므로, 저 파일을 보고 거부하면 **엉뚱한
+    #   파일을 근거로 멈추는** 가드가 된다. 두 값은 같지만(2026-09-10 확인: 0.0001°)
+    #   같다는 것이 보장은 아니다. 좌표가 없을 때 멈추는 일은 안무가 한다
+    #   (씬1 은 SCENE_COORD_FALLBACK 에 없어 목표가 없으면 움직이지 않는다).
+    _auto_set("② 문앞정렬", "이동 준비 — 팔 수납 중...",
               wait=False, phase="front")
     # ── 🔴 팔 수납을 주행 **앞**으로 옮긴다 (2026-09-30) ──────────────────────
     # 2026-09-30 15:29 실기: ② 문앞 Nav2 주행 23초를 **팔 37cm 뻗은 채** 달렸다.
@@ -4069,96 +4074,57 @@ def _auto_front_nav2():
         _auto_set("오류", f"🚨 팔 수납 미확인 — {_arm_why}. ② 주행 거부", phase="front")
         return False
     _log("AUTO", f"② 주행 전 {_arm_why}")
-    # 제어권 회수가 실패하면 주행을 시작하지 않는다. 두 주체가 /cmd_vel 을 동시에
-    # 쓰는 것은 사람 옆에서 절대 허용할 수 없다(fail-closed).
-    if not _grant_elev_lease(False, "② 문앞 Nav2 주행"):
-        _auto_set("오류", "🚨 제어권 회수 실패 — Nav2 와 엘베앱이 /cmd_vel 을 "
-                          "동시에 쓸 수 있다. ② 중단")
-        return False
-    if not _nav_params_restore_normal("② 문앞"):
-        # 여기서 거부하면 제어권은 이미 회수된 상태다 — 되돌려 놓고 나간다.
-        _grant_elev_lease(True, "② 파라미터 복원 실패 — 엘베 모드 복귀")
-        _auto_set("오류", "🚨 Nav2 파라미터를 평소값으로 되돌리지 못했다 — ② 주행 거부")
-        return False
-    _auto_set("② 문앞정렬", "문 앞으로 Nav2 주행 중... 로봇이 멈추면 '다음'이 열립니다",
-              wait=False, phase="front")
-    if not _auto_hold("② 문앞 주행"):
-        return False
-    _write("iface", f"/goto {_FRONT_LOC}")
-    # check_yaw=True — 이 호출처 **하나만** 방향까지 본다(2026-10-07). 근거는
-    # _ARRIVE_YAW_TOL_DEG 주석: 여기 '도착'이 방향을 안 보고 떠서 nav2 의 마지막 정렬을
-    # /cancel 로 끊고 있었다. 다른 세 호출처는 켜지 않는다(_auto_wait_arrival 독스트링 참조).
-    arrived = _auto_wait_arrival(_FRONT_LOC, timeout=_FRONT_ARRIVE_SEC, check_yaw=True)
-    # 🔴 제어권을 돌려주기 **전에** Nav2 가 바퀴를 놓았는지 확인한다(A1·A2 — _NAV_* 주석).
-    #    못 확인하면 제어권을 돌려주지 않는다. 여기서 False 를 돌려주면 _auto_run 이 엘베앱을
-    #    끈다 — 팔은 ① 누르기 뒤 수납 확인된 상태(arm_safe)라 앱 종료로 잃는 것은 패드뿐이고,
-    #    Nav2 가 아직 바퀴를 잡고 있다면 패드는 어차피 쓸 수 없다.
-    if not _nav_release_wheels(arrived, "② 문앞"):
-        _auto_notify("로봇이 멈췄는지 확인하지 못해 안내를 종료했습니다. 도움을 요청하세요")
-        _auto_set("오류", "🚨 Nav2 가 바퀴를 놓았는지 확인 못 함 — 엘베앱 제어권을 돌려주지 "
-                          "않고 ② 중단", phase="front")
-        return False
-    # 도착 여부와 무관하게 제어권은 되돌린다 — ③ 문대기·④ 엘리베이터 안이 엘베앱이고,
-    # 실패해도 사람이 엘베UI 조종 패드로 수습해야 한다(패드는 제어권이 있어야 듣는다).
-    if not _grant_elev_lease(True, "② 문앞 구간 종료 — 엘베 모드 복귀"):
-        _auto_set("오류", "제어권 재부여 실패 — 여정 중단")
-        return False
-    if not arrived:
-        # 🔴 사유를 먼저 재서 문구에 싣는다(2026-10-07). 전에는 원인을 하나로 단정해
-        # "interface 가 문앞을 모를 수 있다(재시작 필요)"만 띄웠는데, 방향 검사가 생긴 뒤로는
-        # **위치는 맞는데 방위만 안 맞아서** 실패하는 경우가 생긴다. 그때 재시작 안내가 뜨면
-        # 운영자가 엉뚱한 조치를 한다. 잰 값을 보여주고 판단은 사람이 하게 한다.
-        _d_f = _dist_to(p.get("x"), p.get("y"))
-        try:
-            _ty_f = _math_auto.degrees(2.0 * _math_auto.atan2(float(p["z"]), float(p["w"])))
-            _dy_f = (_robot_pose["yaw_deg"] - _ty_f + 180.0) % 360.0 - 180.0
-        except (TypeError, ValueError, KeyError):
-            _dy_f = None
-        _near_f = (_d_f is not None and _d_f <= 0.10)
-        if _near_f and _dy_f is not None and abs(_dy_f) > _ARRIVE_YAW_TOL_DEG:
-            _why_f = (f"위치는 맞는데 방향이 {_dy_f:+.1f}° 어긋났다 "
-                      f"(허용 ±{_ARRIVE_YAW_TOL_DEG:.0f}°) — 로봇이 끝까지 못 돌았다")
-        else:
-            # 위치부터 못 맞춘 경우. interface 는 location.yaml 을 **init 에 한 번만** 읽는다
-            # (interface.py:1177) — 장소를 새로 추가했으면 재시작해야 _handle_goto 가 받는다.
-            _why_f = (("남은 거리 " + ("?" if _d_f is None else f"{_d_f*100:.0f}cm"))
-                      + (f" / 방향 {_dy_f:+.1f}°" if _dy_f is not None else "")
-                      + f" — interface 가 '{_FRONT_LOC}' 를 모를 수 있다"
-                        "(장소 추가 후 interface 재시작 필요)")
-        _auto_set("② 문앞정렬",
-                  f"⚠ 문앞 도착 실패(≤{_FRONT_ARRIVE_SEC:.0f}s) — {_why_f}. "
-                  "엘베UI 로 수동 정렬 후 '다음'", wait=True, phase="front")
-        return _auto_wait_confirm()
-    # 단계 기록(_elev_scene(1, move=False))은 **주행 앞**으로 옮겼다 — 위 '팔 수납을
-    # 주행 앞으로' 주석 참조. 안무는 여기서도 띄우지 않는다(Nav2 가 이미 데려다 놨다).
-    # 여기서 다시 부르지 않는다: 자세 전환이 한 번 더 나가 이미 접힌 팔에 goal 을 또
-    # 쏘고, 누적 리셋도 두 번이 된다(씬 누적 관련 사고 전력이 있다).
-    d = _dist_to(p.get("x"), p.get("y"))
-    try:
-        # 모듈 최상위에 `import math` 가 없다 — 예전 `math.degrees` 는 NameError 로 except 에 떨어져
-        # 이 로그의 방향이 도입 이후 **항상 "?"** 였다(A2 를 로그로 잡을 유일한 수단이 죽어 있었다).
-        # 🔴 `p.get("z") or 0.0` 금지 — 2471 줄 주석이 못 박은 그 패턴이 여기 남아
-        #   있었다(2026-11-02 정리). location.yaml 143곳 중 z·w 가 **둘 다 있는 건
-        #   3곳뿐**이고 나머지 140곳은 방향이 아예 없다. 기본값을 채우면 그 140곳이
-        #   "없는 값"이 아니라 **"목표 방위 0°"라는 틀린 값**을 갖는다.
-        #   여기는 표시·로그 전용이고 대상도 `엘리베이터 문앞`(z·w 있음) 한 곳이라
-        #   당장 터지지는 않았다. 고치는 이유는 **다음 사람이 이걸 보고 판정 자리에
-        #   복사하는 것**을 막기 위해서다. 26줄 위 _ty_f 가 올바른 판이다 — 같은 함수
-        #   안에서 두 방식이 섞여 있었다.
-        tgt_yaw = _math_auto.degrees(2.0 * _math_auto.atan2(float(p["z"]), float(p["w"])))
-        dy = (_robot_pose["yaw_deg"] - tgt_yaw + 180.0) % 360.0 - 180.0
-    except (TypeError, ValueError, KeyError):
-        dy = None
-    _log("AUTO", "② 문앞 Nav2 도착 — 잔여 위치 "
-                 + ("?" if d is None else f"{d:.3f}m")
-                 + " 방향 " + ("?" if dy is None else f"{dy:+.1f}°")
-                 + "  (3단 기준선 2026-09-09: 0.100m / +2.4° / 회전 13회 297°)")
-    _auto_set("② 문앞정렬", "문 앞 도착 ✅ (Nav2) — 잔여 "
-                            + ("?" if d is None else f"{d*100:.1f}cm")
-                            + ("" if dy is None else f" / {dy:+.1f}°") + " · '다음'",
-              wait=True, phase="front")
-    # Nav2 가 도착(+방향 10° 이내)을 확인한 뒤 — 토글 시 자동
-    return _auto_wait_confirm(auto_ok=True)
+    # ── ② 이동: Nav2 → ④⑥ 과 같은 좌표 안무로 되돌린다 (2026-11-18) ──────────
+    # 🔴 왜 되돌리나 — 2026-11-18 실기. 같은 로봇이 **잣대에 따라 10배 갈렸다.**
+    #   ② (Nav2, 지도/AMCL 폐루프): 3층에서 13cm·52° 를 남기고 60초 내내 못 좁혀 실패.
+    #     같은 좌표가 5층에서는 9초에 됐다 — 수렴이 운에 달렸다는 뜻이다.
+    #   ④⑥ (이 안무, odom 실행 + 매 걸음 지도 재측정): 같은 시간대 47스텝 **전부**
+    #     명령 대비 오차 1° 안. 명령 -62.6° → odom -62.9°, 명령 +73.3° → odom +74.2°.
+    #
+    #   원인은 하드웨어가 아니라 잣대다. 같은 여정 600표본에서 AMCL 불확실도는
+    #   위치 1σ 17.8cm / 방향 1σ 7.4° 인데 Nav2 목표는 3cm / 2.87° 다(6배·2.6배 조임).
+    #   게다가 AMCL 은 update_min_d 0.15 / update_min_a 0.1(5.73°) 라 **마지막 접근
+    #   구간에서는 보정을 아예 안 낸다.** 그러니 오차 부호가 잡음 폭으로 뒤집히고
+    #   로봇은 충실하게 좌우로 왕복한다(실측: 135.0° → 142.7° → 136.5°).
+    #   ⚠ Nav2 가 고장난 게 아니다 — 끊지 않고 계속 재는 구조가 이 잡음과 안 맞는다.
+    #     안무는 **한 걸음 가고 서서 다시 재므로** 같은 잡음에도 안 떤다.
+    #
+    # ■ 바뀌는 것은 ② 뿐이다
+    #   · Nav2 파라미터는 하나도 안 건드린다 — 탑승지점·목적지 주행은 그대로다
+    #     (xy 0.03 / yaw 0.05 유지. 사용자 결정 2026-11-18: "방향 0.05가 맞다").
+    #   · 덤으로 /cmd_vel 주인이 ①~⑥ 내내 엘베앱 하나가 된다. 종전에는 ② 에서만
+    #     Nav2 에 넘겼다 받아왔고, 그 토픽에는 중재자가 없다(실측 퍼블리셔 8~9개).
+    #     아래 _grant_elev_lease(False)/(True) 왕복과 [GUARD] 두 번 뒤집기가 사라진다.
+    #
+    # ■ 팔 수납 확인은 **위에 그대로 남긴다 — 빼지 마라.**
+    #   엘베앱 /scene 은 수납 goal 을 _send_goal(비블로킹)로 쏘고 **기다리지 않고**
+    #   _run_scene_moves 스레드를 띄운다. 그래서 _auto_scene_step 만 부르면 팔이
+    #   뻗은 채로 베이스가 출발한다 — 2026-09-30 사고(팔 37cm 로 23초 주행) 그대로다.
+    #   위 _elev_scene(1, move=False) + _elev_wait_arm_stowed() 가 그 사이를 막는다.
+    #
+    # ■ _elev_scene(1) 이 두 번 나가는 것은 의도된 것이고 안전하다
+    #   엘베앱 /scene 은 prev != n 일 때만 누적을 리셋하는데, 여기서는 위 호출로
+    #   이미 scene=1 이라 prev == n 이다 → **누적 리셋이 두 번 일어나지 않는다.**
+    #   같은 씬 재클릭의 '정지' 분기도 _auto_busy 가 True 일 때만이라 안 걸린다
+    #   (여기는 move=False 였으므로 안무가 돈 적이 없다). 수납 자세가 한 번 더
+    #   나가지만 팔은 이미 그 자리라 무동작이다.
+    #
+    # ■ 좌표로 간다 — 고정 거리가 아니다
+    #   목표는 scene_targets.yaml "1"(-48.228, 5.224, 83.3°) = location.yaml 문앞.
+    #   SCENE_MOVES 의 70cm 는 이동량이 아니라 **클램프 중심**이다(좌표가 시킨 양이
+    #   거기서 ±40cm 를 벗어나면 측위가 틀렸다고 보고 안 움직인다).
+    #   씬1 은 SCENE_COORD_FALLBACK 에 없다 — 클램프에 걸리면 맹목 주행이 아니라
+    #   **멈춘다.** 폴백이 있는 것은 ⑥ 뿐이다.
+    #
+    # ■ 되돌리려면: 이 블록을 지우고 2026-11-18 이전 판(Nav2 /goto + _auto_wait_arrival
+    #   + _nav_release_wheels + 리스 왕복)으로 복구한다. 커밋 하나다.
+    #   합격선(9/9 3단 기준선): 잔여 0.100m / yaw +2.4° / 회전 13회 297° 를 이겨야 한다.
+    #   오늘 Nav2 성적은 2회 중 1회 성공(1.9cm/+1.8°) · 1회 실패(12.7cm/+53.2°, 60초)다.
+    ok_f, _why_f, _res_f = _auto_scene_step(
+        "② 문앞정렬", 1,
+        "문 앞으로 이동 중... 로봇이 멈추면 '다음'이 열립니다",
+        "② 문앞정렬 — 안무가 시작되지 않았습니다. 다 왔으면 '다음'", "front")
+    return ok_f
 
 
 def _scene_res_txt(res):
